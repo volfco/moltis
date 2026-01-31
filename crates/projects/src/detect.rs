@@ -125,6 +125,8 @@ pub fn detect_project(dir: &Path) -> Option<Project> {
         system_prompt: None,
         auto_worktree: is_git_repo(dir),
         setup_command: None,
+        teardown_command: None,
+        branch_prefix: None,
         detected: true,
         created_at: now,
         updated_at: now,

@@ -79,7 +79,11 @@ pub fn build_gateway_app(state: Arc<GatewayState>, methods: Arc<MethodRegistry>)
 }
 
 /// Start the gateway HTTP + WebSocket server.
-pub async fn start_gateway(bind: &str, port: u16) -> anyhow::Result<()> {
+pub async fn start_gateway(
+    bind: &str,
+    port: u16,
+    log_buffer: Option<crate::logs::LogBuffer>,
+) -> anyhow::Result<()> {
     // Resolve auth from environment (MOLTIS_TOKEN / MOLTIS_PASSWORD).
     let token = std::env::var("MOLTIS_TOKEN").ok();
     let password = std::env::var("MOLTIS_PASSWORD").ok();
@@ -104,6 +108,12 @@ pub async fn start_gateway(bind: &str, port: u16) -> anyhow::Result<()> {
     let approval_manager = Arc::new(ApprovalManager::default());
 
     let mut services = GatewayServices::noop();
+
+    // Wire live logs service if a log buffer is available.
+    if let Some(ref buf) = log_buffer {
+        services.logs = Arc::new(crate::logs::LiveLogsService::new(buf.clone()));
+    }
+
     services.exec_approval = Arc::new(LiveExecApprovalService::new(Arc::clone(&approval_manager)));
     services.provider_setup = Arc::new(LiveProviderSetupService::new(
         Arc::clone(&registry),
@@ -118,6 +128,11 @@ pub async fn start_gateway(bind: &str, port: u16) -> anyhow::Result<()> {
         .map(|d| d.data_dir().to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from(".moltis"));
     std::fs::create_dir_all(&data_dir).ok();
+
+    // Enable log persistence so entries survive restarts.
+    if let Some(ref buf) = log_buffer {
+        buf.enable_persistence(data_dir.join("logs.jsonl"));
+    }
     let db_path = data_dir.join("moltis.db");
     let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
     let db_pool = sqlx::SqlitePool::connect(&db_url)
@@ -190,7 +205,9 @@ pub async fn start_gateway(bind: &str, port: u16) -> anyhow::Result<()> {
     // Session service wired below after sandbox_router is created.
 
     // Wire live project service.
-    services.project = Arc::new(crate::project::LiveProjectService::new(project_store));
+    services.project = Arc::new(crate::project::LiveProjectService::new(Arc::clone(
+        &project_store,
+    )));
 
     // Initialize cron service with file-backed store.
     let cron_store: Arc<dyn moltis_cron::store::CronStore> =
@@ -292,10 +309,11 @@ pub async fn start_gateway(bind: &str, port: u16) -> anyhow::Result<()> {
         }
     }
 
-    // Wire live session service with sandbox router.
+    // Wire live session service with sandbox router and project store.
     services.session = Arc::new(
         LiveSessionService::new(Arc::clone(&session_store), Arc::clone(&session_metadata))
-            .with_sandbox_router(Arc::clone(&sandbox_router)),
+            .with_sandbox_router(Arc::clone(&sandbox_router))
+            .with_project_store(Arc::clone(&project_store)),
     );
 
     let state = GatewayState::with_sandbox_router(
@@ -366,6 +384,34 @@ pub async fn start_gateway(bind: &str, port: u16) -> anyhow::Result<()> {
             broadcast_tick(&tick_state).await;
         }
     });
+
+    // Spawn log broadcast task: forwards captured tracing events to WS clients.
+    if let Some(buf) = log_buffer {
+        let log_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            let mut rx = buf.subscribe();
+            loop {
+                match rx.recv().await {
+                    Ok(entry) => {
+                        if let Ok(payload) = serde_json::to_value(&entry) {
+                            crate::broadcast::broadcast(
+                                &log_state,
+                                "logs.entry",
+                                payload,
+                                crate::broadcast::BroadcastOpts {
+                                    drop_if_slow: true,
+                                    ..Default::default()
+                                },
+                            )
+                            .await;
+                        }
+                    },
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                }
+            }
+        });
+    }
 
     // Start the cron scheduler (loads persisted jobs, arms the timer).
     if let Err(e) = cron_service.start().await {

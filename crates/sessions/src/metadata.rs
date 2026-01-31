@@ -121,6 +121,14 @@ impl SessionMetadata {
         }
     }
 
+    /// Set the worktree branch for a session.
+    pub fn set_worktree_branch(&mut self, key: &str, branch: Option<String>) {
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.worktree_branch = branch;
+            entry.updated_at = now_ms();
+        }
+    }
+
     /// Set the sandbox_enabled override for a session.
     pub fn set_sandbox_enabled(&mut self, key: &str, enabled: Option<bool>) {
         if let Some(entry) = self.entries.get_mut(key) {
@@ -300,6 +308,17 @@ impl SqliteSessionMetadata {
             .ok();
     }
 
+    pub async fn set_worktree_branch(&self, key: &str, branch: Option<String>) {
+        let now = now_ms() as i64;
+        sqlx::query("UPDATE sessions SET worktree_branch = ?, updated_at = ? WHERE key = ?")
+            .bind(&branch)
+            .bind(now)
+            .bind(key)
+            .execute(&self.pool)
+            .await
+            .ok();
+    }
+
     pub async fn remove(&self, key: &str) -> Option<SessionEntry> {
         let entry = self.get(key).await;
         sqlx::query("DELETE FROM sessions WHERE key = ?")
@@ -455,6 +474,53 @@ mod tests {
         meta.save().unwrap();
         let reloaded = SessionMetadata::load(path).unwrap();
         assert_eq!(reloaded.get("main").unwrap().sandbox_enabled, Some(false));
+    }
+
+    #[test]
+    fn test_worktree_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.json");
+        let mut meta = SessionMetadata::load(path.clone()).unwrap();
+
+        meta.upsert("main", None);
+        assert!(meta.get("main").unwrap().worktree_branch.is_none());
+
+        meta.set_worktree_branch("main", Some("moltis/abc".to_string()));
+        assert_eq!(
+            meta.get("main").unwrap().worktree_branch.as_deref(),
+            Some("moltis/abc")
+        );
+
+        meta.set_worktree_branch("main", None);
+        assert!(meta.get("main").unwrap().worktree_branch.is_none());
+
+        // Round-trip through save/load.
+        meta.set_worktree_branch("main", Some("moltis/xyz".to_string()));
+        meta.save().unwrap();
+        let reloaded = SessionMetadata::load(path).unwrap();
+        assert_eq!(
+            reloaded.get("main").unwrap().worktree_branch.as_deref(),
+            Some("moltis/xyz")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_worktree_branch() {
+        let pool = sqlite_pool().await;
+        let meta = SqliteSessionMetadata::new(pool);
+
+        meta.upsert("main", None).await.unwrap();
+        assert!(meta.get("main").await.unwrap().worktree_branch.is_none());
+
+        meta.set_worktree_branch("main", Some("moltis/abc".to_string()))
+            .await;
+        assert_eq!(
+            meta.get("main").await.unwrap().worktree_branch.as_deref(),
+            Some("moltis/abc")
+        );
+
+        meta.set_worktree_branch("main", None).await;
+        assert!(meta.get("main").await.unwrap().worktree_branch.is_none());
     }
 
     #[test]

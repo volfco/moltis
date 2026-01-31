@@ -80,6 +80,89 @@
     sendRpc("sessions.patch", { key: sessionKey, model: modelId });
   }
 
+  // ── Session project combo (in chat header) ──────────────────
+  var projectCombo = null;
+  var projectComboBtn = null;
+  var projectComboLabel = null;
+  var projectDropdown = null;
+  var projectDropdownList = null;
+
+  function openProjectDropdown() {
+    if (!projectDropdown) return;
+    projectDropdown.classList.remove("hidden");
+    renderProjectDropdownList();
+  }
+
+  function closeProjectDropdown() {
+    if (!projectDropdown) return;
+    projectDropdown.classList.add("hidden");
+  }
+
+  function renderProjectDropdownList() {
+    if (!projectDropdownList) return;
+    projectDropdownList.textContent = "";
+    // "No project" option
+    var none = document.createElement("div");
+    none.className = "model-dropdown-item" + (!activeProjectId ? " selected" : "");
+    var noneLabel = document.createElement("span");
+    noneLabel.className = "model-item-label";
+    noneLabel.textContent = "No project";
+    none.appendChild(noneLabel);
+    none.addEventListener("click", function () { selectProject("", "No project"); });
+    projectDropdownList.appendChild(none);
+    (projects || []).forEach(function (p) {
+      var el = document.createElement("div");
+      el.className = "model-dropdown-item" + (p.id === activeProjectId ? " selected" : "");
+      var lbl = document.createElement("span");
+      lbl.className = "model-item-label";
+      lbl.textContent = p.label || p.id;
+      el.appendChild(lbl);
+      el.addEventListener("click", function () { selectProject(p.id, p.label || p.id); });
+      projectDropdownList.appendChild(el);
+    });
+  }
+
+  function selectProject(id, label) {
+    activeProjectId = id;
+    localStorage.setItem("moltis-project", activeProjectId);
+    if (projectComboLabel) projectComboLabel.textContent = label;
+    closeProjectDropdown();
+    if (connected && activeSessionKey) {
+      sendRpc("sessions.patch", { key: activeSessionKey, project_id: id });
+    }
+  }
+
+  function updateSessionProjectSelect(projectId) {
+    if (!projectComboLabel) return;
+    if (!projectId) {
+      projectComboLabel.textContent = "No project";
+      return;
+    }
+    var proj = (projects || []).find(function (p) { return p.id === projectId; });
+    projectComboLabel.textContent = proj ? (proj.label || proj.id) : projectId;
+  }
+
+  function renderSessionProjectSelect() {
+    updateSessionProjectSelect(activeProjectId);
+  }
+
+  function bindProjectComboEvents() {
+    if (!projectComboBtn || !projectCombo) return;
+    projectComboBtn.addEventListener("click", function () {
+      if (projectDropdown.classList.contains("hidden")) {
+        openProjectDropdown();
+      } else {
+        closeProjectDropdown();
+      }
+    });
+  }
+
+  document.addEventListener("click", function (e) {
+    if (projectCombo && !projectCombo.contains(e.target)) {
+      closeProjectDropdown();
+    }
+  });
+
   // ── Sandbox toggle ───────────────────────────────────────────
   var sandboxToggleBtn = null;
   var sandboxLabel = null;
@@ -319,6 +402,9 @@
       sessionsPanel.classList.add("hidden");
     }
 
+    // Clear unseen logs alert when viewing the logs page
+    if (currentPage === "/logs") clearLogsAlert();
+
     if (page) page.init(pageContent);
   }
 
@@ -351,7 +437,13 @@
 
   function renderSessionList() {
     sessionList.textContent = "";
-    sessions.forEach(function (s) {
+    var filtered = sessions;
+    if (projectFilterId) {
+      filtered = sessions.filter(function (s) {
+        return s.projectId === projectFilterId;
+      });
+    }
+    filtered.forEach(function (s) {
       var item = document.createElement("div");
       item.className = "session-item" + (s.key === activeSessionKey ? " active" : "");
       item.setAttribute("data-session-key", s.key);
@@ -368,7 +460,11 @@
       meta.className = "session-meta";
       meta.setAttribute("data-session-key", s.key);
       var count = s.messageCount || 0;
-      meta.textContent = count + " msg" + (count !== 1 ? "s" : "");
+      var metaText = count + " msg" + (count !== 1 ? "s" : "");
+      if (s.worktree_branch) {
+        metaText += " \u00b7 \u2387 " + s.worktree_branch;
+      }
+      meta.textContent = metaText;
       info.appendChild(meta);
 
       item.appendChild(info);
@@ -396,12 +492,22 @@
         deleteBtn.title = "Delete";
         deleteBtn.addEventListener("click", function (e) {
           e.stopPropagation();
-          if (confirm("Delete this session?")) {
-            sendRpc("sessions.delete", { key: s.key }).then(function () {
-              if (activeSessionKey === s.key) switchSession("main");
-              fetchSessions();
-            });
-          }
+          var metaEl = sessionList.querySelector('.session-meta[data-session-key="' + s.key + '"]');
+          var count = metaEl ? (parseInt(metaEl.textContent, 10) || 0) : (s.messageCount || 0);
+          if (count > 0 && !confirm("Delete this session?")) return;
+          sendRpc("sessions.delete", { key: s.key }).then(function (res) {
+            if (res && !res.ok && res.error && res.error.indexOf("uncommitted changes") !== -1) {
+              if (confirm("Worktree has uncommitted changes. Force delete?")) {
+                sendRpc("sessions.delete", { key: s.key, force: true }).then(function () {
+                  if (activeSessionKey === s.key) switchSession("main");
+                  fetchSessions();
+                });
+              }
+              return;
+            }
+            if (activeSessionKey === s.key) switchSession("main");
+            fetchSessions();
+          });
         });
         actions.appendChild(deleteBtn);
       }
@@ -437,7 +543,7 @@
   newSessionBtn.addEventListener("click", function () {
     if (currentPage !== "/") navigate("/");
     var key = "session:" + crypto.randomUUID();
-    switchSession(key);
+    switchSession(key, null, null);
   });
 
   // ── Projects ──────────────────────────────────────────────────
@@ -448,6 +554,7 @@
       if (!res || !res.ok) return;
       projects = res.payload || [];
       renderProjectSelect();
+      renderSessionProjectSelect();
     });
   }
 
@@ -456,25 +563,24 @@
     while (projectSelect.firstChild) projectSelect.removeChild(projectSelect.firstChild);
     var defaultOpt = document.createElement("option");
     defaultOpt.value = "";
-    defaultOpt.textContent = "No project";
+    defaultOpt.textContent = "All sessions";
     projectSelect.appendChild(defaultOpt);
 
     projects.forEach(function (p) {
       var opt = document.createElement("option");
       opt.value = p.id;
       opt.textContent = p.label || p.id;
-      if (p.id === activeProjectId) opt.selected = true;
       projectSelect.appendChild(opt);
     });
+    projectSelect.value = projectFilterId || "";
   }
 
+  var projectFilterId = localStorage.getItem("moltis-project-filter") || "";
+
   projectSelect.addEventListener("change", function () {
-    activeProjectId = projectSelect.value;
-    localStorage.setItem("moltis-project", activeProjectId);
-    // Persist project binding to the current session.
-    if (connected && activeSessionKey) {
-      sendRpc("sessions.switch", { key: activeSessionKey, project_id: activeProjectId });
-    }
+    projectFilterId = projectSelect.value;
+    localStorage.setItem("moltis-project-filter", projectFilterId);
+    renderSessionList();
   });
 
   // ── Project modal ─────────────────────────────────────────────
@@ -1345,7 +1451,68 @@
       tokenSection.appendChild(ctxRow("System Prompt", formatTokens(tu.systemPromptTokens)));
     }
     tokenSection.appendChild(ctxRow("Total", formatTokens(tu.estimatedTotal || 0), true));
+    if (tu.contextWindow > 0) {
+      tokenSection.appendChild(ctxRow("Context Window", formatTokens(tu.contextWindow)));
+      sessionContextWindow = tu.contextWindow;
+      updateTokenBar();
+    }
     card.appendChild(tokenSection);
+
+    chatMsgBox.appendChild(card);
+    chatMsgBox.scrollTop = chatMsgBox.scrollHeight;
+  }
+
+  function renderCompactCard(data) {
+    if (!chatMsgBox) return;
+    slashInjectStyles();
+
+    var card = ctxEl("div", "ctx-card");
+
+    // Header with compress icon
+    var header = ctxEl("div", "ctx-header");
+    var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("width", "16");
+    svg.setAttribute("height", "16");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    // Compress/shrink icon (two arrows pointing inward)
+    var p1 = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+    p1.setAttribute("points", "4 14 10 14 10 20");
+    var p2 = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+    p2.setAttribute("points", "20 10 14 10 14 4");
+    var l1 = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    l1.setAttribute("x1", "14"); l1.setAttribute("y1", "10");
+    l1.setAttribute("x2", "21"); l1.setAttribute("y2", "3");
+    var l2 = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    l2.setAttribute("x1", "3"); l2.setAttribute("y1", "21");
+    l2.setAttribute("x2", "10"); l2.setAttribute("y2", "14");
+    svg.appendChild(p1);
+    svg.appendChild(p2);
+    svg.appendChild(l1);
+    svg.appendChild(l2);
+    header.appendChild(svg);
+    header.appendChild(ctxEl("span", "ctx-header-title", "Conversation compacted"));
+    card.appendChild(header);
+
+    // Stats section
+    var statsSection = ctxSection("Before compact");
+    statsSection.appendChild(ctxRow("Messages", String(data.messageCount || 0)));
+    statsSection.appendChild(ctxRow("Total tokens", formatTokens(data.totalTokens || 0)));
+    if (data.contextWindow) {
+      var pctUsed = Math.round((data.totalTokens || 0) / data.contextWindow * 100);
+      statsSection.appendChild(ctxRow("Context usage", pctUsed + "% of " + formatTokens(data.contextWindow)));
+    }
+    card.appendChild(statsSection);
+
+    // After section
+    var afterSection = ctxSection("After compact");
+    afterSection.appendChild(ctxRow("Messages", "1 (summary)"));
+    afterSection.appendChild(ctxRow("Status", "Conversation history replaced with a summary"));
+    card.appendChild(afterSection);
 
     chatMsgBox.appendChild(card);
     chatMsgBox.scrollTop = chatMsgBox.scrollHeight;
@@ -1521,13 +1688,14 @@
     });
   }
 
-  function switchSession(key, searchContext) {
+  function switchSession(key, searchContext, projectId) {
     activeSessionKey = key;
     localStorage.setItem("moltis-session", key);
     if (chatMsgBox) chatMsgBox.textContent = "";
     streamEl = null;
     streamText = "";
     sessionTokens = { input: 0, output: 0 };
+    sessionContextWindow = 0;
     updateTokenBar();
 
     var items = sessionList.querySelectorAll(".session-item");
@@ -1537,20 +1705,18 @@
       if (isTarget) el.classList.remove("unread");
     });
 
-    sendRpc("sessions.switch", { key: key }).then(function (res) {
+    var switchParams = { key: key };
+    if (projectId) switchParams.project_id = projectId;
+    sendRpc("sessions.switch", switchParams).then(function (res) {
       if (res && res.ok && res.payload) {
         var entry = res.payload.entry || {};
         // Restore the session's project binding.
-        if (entry.projectId) {
-          activeProjectId = entry.projectId;
-          localStorage.setItem("moltis-project", activeProjectId);
-          projectSelect.value = activeProjectId;
-        } else {
-          // Session has no project — clear selection.
-          activeProjectId = "";
-          localStorage.setItem("moltis-project", "");
-          projectSelect.value = "";
-        }
+        // If we explicitly passed a projectId (e.g. new session), keep it
+        // even if the server response hasn't persisted it yet.
+        var effectiveProjectId = entry.projectId || projectId || "";
+        activeProjectId = effectiveProjectId;
+        localStorage.setItem("moltis-project", activeProjectId);
+        updateSessionProjectSelect(activeProjectId);
         // Restore per-session model
         if (entry.model && models.length > 0) {
           var found = models.find(function (m) { return m.id === entry.model; });
@@ -1591,6 +1757,13 @@
           }
         });
         chatBatchLoading = false;
+        // Fetch context window for the token bar percentage display.
+        sendRpc("chat.context", {}).then(function (ctxRes) {
+          if (ctxRes && ctxRes.ok && ctxRes.payload && ctxRes.payload.tokenUsage) {
+            sessionContextWindow = ctxRes.payload.tokenUsage.contextWindow || 0;
+          }
+          updateTokenBar();
+        });
         updateTokenBar();
 
         if (searchContext && searchContext.query && chatMsgBox) {
@@ -1695,7 +1868,8 @@
               if (chatMsgBox) chatMsgBox.textContent = "";
               sessionTokens = { input: 0, output: 0 };
               updateTokenBar();
-              bumpSessionCount(activeSessionKey, 0);
+              var metaEl = sessionList.querySelector('.session-meta[data-session-key="' + activeSessionKey + '"]');
+              if (metaEl) metaEl.textContent = "0 msgs";
             } else {
               chatAddMsg("error", (res && res.error && res.error.message) || "Clear failed");
             }
@@ -1761,6 +1935,8 @@
     return String(n);
   }
 
+  var sessionContextWindow = 0;
+
   function updateTokenBar() {
     var bar = $("tokenBar");
     if (!bar) return;
@@ -1769,16 +1945,30 @@
       bar.textContent = "";
       return;
     }
-    bar.textContent =
+    var text =
       formatTokens(sessionTokens.input) + " in / " +
       formatTokens(sessionTokens.output) + " out \u00b7 " +
       formatTokens(total) + " tokens";
+    if (sessionContextWindow > 0) {
+      var pct = Math.max(0, 100 - Math.round(total / sessionContextWindow * 100));
+      text += " \u00b7 Context left before auto-compact: " + pct + "%";
+    }
+    bar.textContent = text;
   }
 
   // Safe: static hardcoded HTML template, no user input.
   var chatPageHTML =
     '<div class="flex-1 flex flex-col min-w-0">' +
       '<div class="px-4 py-1.5 border-b border-[var(--border)] bg-[var(--surface)] flex items-center gap-2 shrink-0">' +
+        '<div id="projectCombo" class="model-combo">' +
+          '<button id="projectComboBtn" class="model-combo-btn" type="button">' +
+            '<span id="projectComboLabel">No project</span>' +
+            '<svg class="model-combo-chevron" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" width="12" height="12"><path d="M19.5 8.25l-7.5 7.5-7.5-7.5"/></svg>' +
+          '</button>' +
+          '<div id="projectDropdown" class="model-dropdown hidden">' +
+            '<div id="projectDropdownList" class="model-dropdown-list"></div>' +
+          '</div>' +
+        '</div>' +
         '<div id="modelCombo" class="model-combo">' +
           '<button id="modelComboBtn" class="model-combo-btn" type="button">' +
             '<span id="modelComboLabel">' + (selectedModelId || 'loading\u2026') + '</span>' +
@@ -1824,6 +2014,14 @@
     sandboxLabel = $("sandboxLabel");
     bindSandboxToggleEvents();
     updateSandboxUI(true); // default: sandboxed until session loads
+
+    // Bind session project combo
+    projectCombo = $("projectCombo");
+    projectComboBtn = $("projectComboBtn");
+    projectComboLabel = $("projectComboLabel");
+    projectDropdown = $("projectDropdown");
+    projectDropdownList = $("projectDropdownList");
+    bindProjectComboEvents();
 
     // Update model selector label if models are already loaded
     if (models.length > 0 && modelComboLabel) {
@@ -1890,6 +2088,11 @@
     modelDropdownList = null;
     sandboxToggleBtn = null;
     sandboxLabel = null;
+    projectCombo = null;
+    projectComboBtn = null;
+    projectComboLabel = null;
+    projectDropdown = null;
+    projectDropdownList = null;
   });
 
   // ════════════════════════════════════════════════════════════
@@ -1993,7 +2196,7 @@
 
       var thead = document.createElement("thead");
       var headRow = document.createElement("tr");
-      ["Name", "Schedule", "Enabled", "Next Run", "Last Status", "Actions"].forEach(function (h) {
+      ["Name", "Schedule", "Next Run", "Last Status", "Enabled", "Actions"].forEach(function (h) {
         var th = document.createElement("th");
         th.textContent = h;
         headRow.appendChild(th);
@@ -2015,24 +2218,6 @@
         tdSched.style.fontSize = ".78rem";
         tr.appendChild(tdSched);
 
-        var tdEnabled = document.createElement("td");
-        var toggle = document.createElement("label");
-        toggle.className = "cron-toggle";
-        var checkbox = document.createElement("input");
-        checkbox.type = "checkbox";
-        checkbox.checked = job.enabled;
-        checkbox.addEventListener("change", function () {
-          sendRpc("cron.update", { id: job.id, patch: { enabled: checkbox.checked } }).then(function () {
-            loadStatus();
-          });
-        });
-        toggle.appendChild(checkbox);
-        var slider = document.createElement("span");
-        slider.className = "cron-slider";
-        toggle.appendChild(slider);
-        tdEnabled.appendChild(toggle);
-        tr.appendChild(tdEnabled);
-
         var tdNext = document.createElement("td");
         tdNext.style.fontSize = ".78rem";
         tdNext.textContent = job.state && job.state.nextRunAtMs
@@ -2050,6 +2235,24 @@
           tdStatus.textContent = "\u2014";
         }
         tr.appendChild(tdStatus);
+
+        var tdEnabled = document.createElement("td");
+        var toggle = document.createElement("label");
+        toggle.className = "cron-toggle";
+        var checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = job.enabled;
+        checkbox.addEventListener("change", function () {
+          sendRpc("cron.update", { id: job.id, patch: { enabled: checkbox.checked } }).then(function () {
+            loadStatus();
+          });
+        });
+        toggle.appendChild(checkbox);
+        var slider = document.createElement("span");
+        slider.className = "cron-slider";
+        toggle.appendChild(slider);
+        tdEnabled.appendChild(toggle);
+        tr.appendChild(tdEnabled);
 
         var tdActions = document.createElement("td");
         tdActions.className = "cron-actions";
@@ -2530,6 +2733,16 @@
           style: "font-size:.72rem;color:var(--muted);font-family:var(--font-mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;"
         }));
 
+        if (p.setup_command) {
+          nameRow.appendChild(createEl("span", { className: "provider-item-badge api-key", textContent: "setup" }));
+        }
+        if (p.teardown_command) {
+          nameRow.appendChild(createEl("span", { className: "provider-item-badge api-key", textContent: "teardown" }));
+        }
+        if (p.branch_prefix) {
+          nameRow.appendChild(createEl("span", { className: "provider-item-badge oauth", textContent: p.branch_prefix + "/*" }));
+        }
+
         if (p.system_prompt) {
           info.appendChild(createEl("div", {
             textContent: "System prompt: " + p.system_prompt.substring(0, 80) + (p.system_prompt.length > 80 ? "..." : ""),
@@ -2619,6 +2832,12 @@
       var setupField = labeledInput("Setup command", p.setup_command, "e.g. pnpm install", true);
       form.appendChild(setupField.group);
 
+      var teardownField = labeledInput("Teardown command", p.teardown_command, "e.g. docker compose down", true);
+      form.appendChild(teardownField.group);
+
+      var prefixField = labeledInput("Branch prefix", p.branch_prefix, "default: moltis", true);
+      form.appendChild(prefixField.group);
+
       // Worktree toggle
       var wtGroup = createEl("div", { style: "margin-bottom:10px;display:flex;align-items:center;gap:8px;" });
       var wtCheckbox = createEl("input", { type: "checkbox" });
@@ -2640,6 +2859,8 @@
         updated.directory = dirField.input.value.trim() || p.directory;
         updated.system_prompt = promptInput.value.trim() || null;
         updated.setup_command = setupField.input.value.trim() || null;
+        updated.teardown_command = teardownField.input.value.trim() || null;
+        updated.branch_prefix = prefixField.input.value.trim() || null;
         updated.auto_worktree = wtCheckbox.checked;
         updated.updated_at = Date.now();
 
@@ -2812,6 +3033,346 @@
     refreshProvidersPage = null;
   });
 
+  // ════════════════════════════════════════════════════════════
+  // Channels page
+  // ════════════════════════════════════════════════════════════
+  var channelModal = $("channelModal");
+  var channelModalTitle = $("channelModalTitle");
+  var channelModalBody = $("channelModalBody");
+  var channelModalClose = $("channelModalClose");
+
+  function openChannelModal() {
+    channelModal.classList.remove("hidden");
+    channelModalTitle.textContent = "Add Channel";
+    channelModalBody.textContent = "";
+    var msg = createEl("div", {
+      className: "text-sm text-[var(--muted)]",
+      style: "padding:12px 0;",
+      textContent: "Channel creation is not yet available. Channels are configured externally."
+    });
+    channelModalBody.appendChild(msg);
+  }
+
+  function closeChannelModal() {
+    channelModal.classList.add("hidden");
+  }
+
+  channelModalClose.addEventListener("click", closeChannelModal);
+  channelModal.addEventListener("click", function (e) {
+    if (e.target === channelModal) closeChannelModal();
+  });
+
+  // Safe: static hardcoded HTML template, no user input.
+  var channelsPageHTML =
+    '<div class="flex-1 flex flex-col min-w-0 p-4 gap-4 overflow-y-auto">' +
+      '<div class="flex items-center gap-3">' +
+        '<h2 class="text-lg font-medium text-[var(--text-strong)]">Channels</h2>' +
+        '<button id="chanAddBtn" class="bg-[var(--accent-dim)] text-white border-none px-3 py-1.5 rounded text-xs cursor-pointer hover:bg-[var(--accent)] transition-colors">+ Add Channel</button>' +
+      '</div>' +
+      '<div id="channelPageList"></div>' +
+    '</div>';
+
+  var refreshChannelsPage = null;
+
+  registerPage("/channels", function initChannels(container) {
+    container.innerHTML = channelsPageHTML;
+
+    var addBtn = $("chanAddBtn");
+    var listEl = $("channelPageList");
+
+    addBtn.addEventListener("click", function () {
+      if (connected) openChannelModal();
+    });
+
+    function renderChannelList() {
+      sendRpc("channels.status", {}).then(function (res) {
+        if (!res || !res.ok) return;
+        var channels = (res.payload && res.payload.channels) || [];
+        while (listEl.firstChild) listEl.removeChild(listEl.firstChild);
+
+        if (channels.length === 0) {
+          listEl.appendChild(createEl("div", {
+            className: "text-sm text-[var(--muted)]",
+            textContent: "No channels connected."
+          }));
+          return;
+        }
+
+        channels.forEach(function (ch) {
+          var card = createEl("div", {
+            style: "display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px;"
+          });
+
+          var left = createEl("div", { style: "display:flex;align-items:center;gap:8px;" });
+          left.appendChild(createEl("span", {
+            className: "text-sm text-[var(--text-strong)]",
+            textContent: ch.name || ch.type || "channel"
+          }));
+
+          var statusBadge = createEl("span", {
+            className: "provider-item-badge " + (ch.status === "connected" ? "configured" : "oauth"),
+            textContent: ch.status || "unknown"
+          });
+          left.appendChild(statusBadge);
+          card.appendChild(left);
+
+          var logoutBtn = createEl("button", {
+            className: "session-action-btn session-delete",
+            textContent: "Logout",
+            title: "Logout " + (ch.name || "channel")
+          });
+          logoutBtn.addEventListener("click", function () {
+            if (!confirm("Logout from " + (ch.name || "channel") + "?")) return;
+            sendRpc("channels.logout", { channel: ch.name || ch.type }).then(function (r) {
+              if (r && r.ok) renderChannelList();
+            });
+          });
+          card.appendChild(logoutBtn);
+
+          listEl.appendChild(card);
+        });
+      });
+    }
+
+    refreshChannelsPage = renderChannelList;
+    renderChannelList();
+  }, function teardownChannels() {
+    refreshChannelsPage = null;
+  });
+
+  // ── Logs page ──────────────────────────────────────────────
+  var logsEventHandler = null;
+  var logsAlertDot = $("logsAlertDot");
+  var unseenErrors = 0;
+  var unseenWarns = 0;
+
+  function updateLogsAlert() {
+    if (unseenErrors > 0) {
+      logsAlertDot.style.display = "";
+      logsAlertDot.style.background = "var(--error)";
+    } else if (unseenWarns > 0) {
+      logsAlertDot.style.display = "";
+      logsAlertDot.style.background = "var(--warn)";
+    } else {
+      logsAlertDot.style.display = "none";
+    }
+  }
+
+  function clearLogsAlert() {
+    unseenErrors = 0;
+    unseenWarns = 0;
+    updateLogsAlert();
+    // Tell the server we've seen the logs
+    if (connected) sendRpc("logs.ack", {});
+  }
+
+  registerPage("/logs", function initLogs(container) {
+    var paused = false;
+    var maxEntries = 2000;
+
+    container.style.cssText = "flex-direction:column;padding:0;overflow:hidden;";
+
+    // Toolbar
+    var toolbar = document.createElement("div");
+    toolbar.style.cssText = "display:flex;align-items:center;gap:8px;padding:8px 16px;border-bottom:1px solid var(--border);flex-shrink:0;flex-wrap:wrap;";
+
+    // Level filter
+    var levelSelect = document.createElement("select");
+    levelSelect.style.cssText = "background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);font-size:.78rem;padding:4px 8px;font-family:var(--font-body);";
+    var allOpt = document.createElement("option");
+    allOpt.value = "";
+    allOpt.textContent = "All levels";
+    allOpt.selected = true;
+    levelSelect.appendChild(allOpt);
+    ["trace","debug","info","warn","error"].forEach(function (lvl) {
+      var opt = document.createElement("option");
+      opt.value = lvl;
+      opt.textContent = lvl.toUpperCase();
+      levelSelect.appendChild(opt);
+    });
+
+    // Target filter
+    var targetInput = document.createElement("input");
+    targetInput.type = "text";
+    targetInput.placeholder = "Filter target…";
+    targetInput.style.cssText = "background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);font-size:.78rem;padding:4px 8px;width:140px;font-family:var(--font-body);";
+
+    // Search
+    var searchInput = document.createElement("input");
+    searchInput.type = "text";
+    searchInput.placeholder = "Search…";
+    searchInput.style.cssText = "background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);font-size:.78rem;padding:4px 8px;width:160px;font-family:var(--font-body);";
+
+    // Buttons
+    var pauseBtn = document.createElement("button");
+    pauseBtn.textContent = "Pause";
+    pauseBtn.style.cssText = "background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);font-size:.78rem;padding:4px 10px;cursor:pointer;";
+
+    var clearBtn = document.createElement("button");
+    clearBtn.textContent = "Clear";
+    clearBtn.style.cssText = "background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);font-size:.78rem;padding:4px 10px;cursor:pointer;";
+
+    var countLabel = document.createElement("span");
+    countLabel.style.cssText = "color:var(--muted);font-size:.72rem;margin-left:auto;";
+    countLabel.textContent = "0 entries";
+
+    toolbar.appendChild(levelSelect);
+    toolbar.appendChild(targetInput);
+    toolbar.appendChild(searchInput);
+    toolbar.appendChild(pauseBtn);
+    toolbar.appendChild(clearBtn);
+    toolbar.appendChild(countLabel);
+    container.appendChild(toolbar);
+
+    // Log area
+    var logArea = document.createElement("div");
+    logArea.style.cssText = "flex:1;overflow-y:auto;font-family:var(--font-mono);font-size:.78rem;line-height:1.5;padding:0;";
+    container.appendChild(logArea);
+
+    var entryCount = 0;
+
+    function levelColor(level) {
+      var l = level.toUpperCase();
+      if (l === "ERROR") return "var(--error)";
+      if (l === "WARN") return "var(--warn)";
+      if (l === "DEBUG") return "var(--muted)";
+      if (l === "TRACE") return "color-mix(in oklab, var(--muted) 60%, transparent)";
+      return "var(--text)";
+    }
+
+    function levelBg(level) {
+      var l = level.toUpperCase();
+      if (l === "ERROR") return "rgba(239,68,68,0.08)";
+      if (l === "WARN") return "rgba(245,158,11,0.06)";
+      return "transparent";
+    }
+
+    function renderEntry(entry) {
+      var row = document.createElement("div");
+      row.style.cssText = "display:flex;gap:8px;padding:1px 16px;background:" + levelBg(entry.level) + ";border-bottom:1px solid var(--border);";
+
+      var ts = document.createElement("span");
+      ts.style.cssText = "color:var(--muted);flex-shrink:0;min-width:85px;";
+      var d = new Date(entry.ts);
+      ts.textContent = d.toLocaleTimeString([], { hour:"2-digit", minute:"2-digit", second:"2-digit" }) + "." + String(d.getMilliseconds()).padStart(3, "0");
+
+      var lvl = document.createElement("span");
+      lvl.style.cssText = "color:" + levelColor(entry.level) + ";flex-shrink:0;min-width:42px;font-weight:600;";
+      lvl.textContent = entry.level.toUpperCase().substring(0, 5);
+
+      var tgt = document.createElement("span");
+      tgt.style.cssText = "color:var(--muted);flex-shrink:0;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+      tgt.textContent = entry.target;
+
+      var msg = document.createElement("span");
+      msg.style.cssText = "color:var(--text);white-space:pre-wrap;word-break:break-all;min-width:0;";
+      msg.textContent = entry.message;
+
+      // Append extra fields
+      if (entry.fields && Object.keys(entry.fields).length > 0) {
+        var extra = Object.keys(entry.fields).map(function (k) { return k + "=" + entry.fields[k]; }).join(" ");
+        msg.textContent += " " + extra;
+      }
+
+      row.appendChild(ts);
+      row.appendChild(lvl);
+      row.appendChild(tgt);
+      row.appendChild(msg);
+      return row;
+    }
+
+    function appendEntry(entry) {
+      var row = renderEntry(entry);
+      logArea.appendChild(row);
+      entryCount++;
+      // Trim oldest entries if over limit
+      while (logArea.childNodes.length > maxEntries) {
+        logArea.removeChild(logArea.firstChild);
+        entryCount--;
+      }
+      countLabel.textContent = entryCount + " entries";
+      // Auto-scroll if near bottom
+      if (!paused) {
+        var atBottom = logArea.scrollHeight - logArea.scrollTop - logArea.clientHeight < 60;
+        if (atBottom) logArea.scrollTop = logArea.scrollHeight;
+      }
+    }
+
+    function matchesFilter(entry) {
+      var minLevel = levelSelect.value;
+      if (minLevel) {
+        var levels = ["trace","debug","info","warn","error"];
+        if (levels.indexOf(entry.level.toLowerCase()) < levels.indexOf(minLevel)) return false;
+      }
+      var tgtVal = targetInput.value.trim();
+      if (tgtVal && entry.target.indexOf(tgtVal) === -1) return false;
+      var searchVal = searchInput.value.trim().toLowerCase();
+      if (searchVal && entry.message.toLowerCase().indexOf(searchVal) === -1 && entry.target.toLowerCase().indexOf(searchVal) === -1) return false;
+      return true;
+    }
+
+    // Load initial entries
+    sendRpc("logs.list", {
+      level: levelSelect.value || undefined,
+      target: targetInput.value.trim() || undefined,
+      search: searchInput.value.trim() || undefined,
+      limit: 500
+    }).then(function (res) {
+      if (!res || !res.ok) return;
+      var entries = (res.payload && res.payload.entries) || [];
+      entries.forEach(function (e) { appendEntry(e); });
+      logArea.scrollTop = logArea.scrollHeight;
+    });
+
+    // Subscribe to live events
+    logsEventHandler = function (entry) {
+      if (paused) return;
+      if (!matchesFilter(entry)) return;
+      appendEntry(entry);
+    };
+
+    // Re-fetch when filters change
+    function refetch() {
+      logArea.textContent = "";
+      entryCount = 0;
+      sendRpc("logs.list", {
+        level: levelSelect.value || undefined,
+        target: targetInput.value.trim() || undefined,
+        search: searchInput.value.trim() || undefined,
+        limit: 500
+      }).then(function (res) {
+        if (!res || !res.ok) return;
+        var entries = (res.payload && res.payload.entries) || [];
+        entries.forEach(function (e) { appendEntry(e); });
+        logArea.scrollTop = logArea.scrollHeight;
+      });
+    }
+
+    levelSelect.addEventListener("change", refetch);
+    var filterTimeout;
+    function debouncedRefetch() {
+      clearTimeout(filterTimeout);
+      filterTimeout = setTimeout(refetch, 300);
+    }
+    targetInput.addEventListener("input", debouncedRefetch);
+    searchInput.addEventListener("input", debouncedRefetch);
+
+    pauseBtn.addEventListener("click", function () {
+      paused = !paused;
+      pauseBtn.textContent = paused ? "Resume" : "Pause";
+      pauseBtn.style.borderColor = paused ? "var(--warn)" : "var(--border)";
+      if (!paused) logArea.scrollTop = logArea.scrollHeight;
+    });
+
+    clearBtn.addEventListener("click", function () {
+      logArea.textContent = "";
+      entryCount = 0;
+      countLabel.textContent = "0 entries";
+    });
+  }, function teardownLogs() {
+    logsEventHandler = null;
+  });
+
   // ── WebSocket ─────────────────────────────────────────────
   function connect() {
     setStatus("connecting", "connecting...");
@@ -2839,6 +3400,16 @@
           fetchModels();
           fetchSessions();
           fetchProjects();
+          // Fetch unseen log alerts from server
+          sendRpc("logs.status", {}).then(function (res) {
+            if (res && res.ok) {
+              var p = res.payload || {};
+              unseenErrors = p.unseen_errors || 0;
+              unseenWarns = p.unseen_warns || 0;
+              if (currentPage === "/logs") clearLogsAlert();
+              else updateLogsAlert();
+            }
+          });
           // Re-mount the current page so it can fetch data now that we're connected
           mount(currentPage);
         } else {
@@ -3004,6 +3575,22 @@
               streamText = "";
               lastToolOutput = "";
             }
+          } else if (p.state === "auto_compact") {
+            if (isActive && isChatPage) {
+              if (p.phase === "start") {
+                chatAddMsg("system", "Compacting conversation (context limit reached)\u2026");
+              } else if (p.phase === "done") {
+                // Remove the "Compacting..." message
+                if (chatMsgBox && chatMsgBox.lastChild) chatMsgBox.removeChild(chatMsgBox.lastChild);
+                renderCompactCard(p);
+                // Reset session tokens since history was replaced
+                sessionTokens = { input: 0, output: 0 };
+                updateTokenBar();
+              } else if (p.phase === "error") {
+                if (chatMsgBox && chatMsgBox.lastChild) chatMsgBox.removeChild(chatMsgBox.lastChild);
+                chatAddMsg("error", "Auto-compact failed: " + (p.error || "unknown error"));
+              }
+            }
           } else if (p.state === "error") {
             setSessionReplying(eventSession, false);
             if (isActive && isChatPage) {
@@ -3021,6 +3608,15 @@
         if (frame.event === "exec.approval.requested") {
           var ap = frame.payload || {};
           renderApprovalCard(ap.requestId, ap.command);
+        }
+        if (frame.event === "logs.entry") {
+          var logPayload = frame.payload || {};
+          if (logsEventHandler) logsEventHandler(logPayload);
+          if (currentPage !== "/logs") {
+            var ll = (logPayload.level || "").toUpperCase();
+            if (ll === "ERROR") { unseenErrors++; updateLogsAlert(); }
+            else if (ll === "WARN") { unseenWarns++; updateLogsAlert(); }
+          }
         }
         return;
       }
