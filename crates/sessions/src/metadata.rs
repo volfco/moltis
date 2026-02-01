@@ -167,7 +167,7 @@ impl SessionMetadata {
     /// List all entries sorted by updated_at descending.
     pub fn list(&self) -> Vec<SessionEntry> {
         let mut entries: Vec<_> = self.entries.values().cloned().collect();
-        entries.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        entries.sort_by_key(|a| a.created_at);
         entries
     }
 }
