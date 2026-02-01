@@ -77,6 +77,7 @@ impl WebFetchTool {
         url_str: &str,
         extract_mode: &str,
         max_chars: usize,
+        accept_language: Option<&str>,
     ) -> Result<serde_json::Value> {
         let mut current_url = Url::parse(url_str)?;
 
@@ -99,7 +100,11 @@ impl WebFetchTool {
             ssrf_check(&current_url).await?;
             visited.push(current_url.to_string());
 
-            let resp = client.get(current_url.as_str()).send().await?;
+            let mut req = client.get(current_url.as_str());
+            if let Some(lang) = accept_language {
+                req = req.header("Accept-Language", lang);
+            }
+            let resp = req.send().await?;
             let status = resp.status();
 
             if status.is_redirection() {
@@ -384,7 +389,9 @@ impl AgentTool for WebFetchTool {
 
     fn description(&self) -> &str {
         "Fetch a web page URL and extract its content as readable text or markdown. \
-         Use this when you need to read the contents of a specific web page."
+         Use this when you need to read the contents of a specific web page. \
+         The request is sent with the user's Accept-Language header, so pages \
+         are returned in the user's preferred language when available."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -433,8 +440,12 @@ impl AgentTool for WebFetchTool {
             return Ok(cached);
         }
 
+        let accept_language = params.get("_accept_language").and_then(|v| v.as_str());
+
         debug!("web_fetch: {url}");
-        let result = self.fetch_url(url, extract_mode, max_chars).await?;
+        let result = self
+            .fetch_url(url, extract_mode, max_chars, accept_language)
+            .await?;
 
         self.cache_set(cache_key, result.clone());
         Ok(result)
@@ -638,7 +649,9 @@ mod tests {
     #[tokio::test]
     async fn test_unsupported_scheme() {
         let tool = default_tool();
-        let result = tool.fetch_url("ftp://example.com", "text", 50000).await;
+        let result = tool
+            .fetch_url("ftp://example.com", "text", 50000, None)
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("unsupported"));
     }

@@ -824,10 +824,17 @@ async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
 
 async fn ws_upgrade_handler(
     ws: WebSocketUpgrade,
+    headers: axum::http::HeaderMap,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_connection(socket, state.gateway, state.methods, addr))
+    let accept_language = headers
+        .get(axum::http::header::ACCEPT_LANGUAGE)
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    ws.on_upgrade(move |socket| {
+        handle_connection(socket, state.gateway, state.methods, addr, accept_language)
+    })
 }
 
 /// SPA fallback: serve `index.html` for any path not matched by an explicit

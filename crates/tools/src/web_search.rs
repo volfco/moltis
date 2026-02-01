@@ -176,6 +176,7 @@ impl WebSearchTool {
         query: &str,
         count: u8,
         params: &serde_json::Value,
+        accept_language: Option<&str>,
     ) -> Result<serde_json::Value> {
         if self.api_key.is_empty() {
             return Ok(serde_json::json!({
@@ -204,13 +205,15 @@ impl WebSearchTool {
 
         let client = reqwest::Client::builder().timeout(self.timeout).build()?;
 
-        let resp = client
+        let mut req = client
             .get(&url)
             .header("Accept", "application/json")
             .header("Accept-Encoding", "gzip")
-            .header("X-Subscription-Token", &self.api_key)
-            .send()
-            .await?;
+            .header("X-Subscription-Token", &self.api_key);
+        if let Some(lang) = accept_language {
+            req = req.header("Accept-Language", lang);
+        }
+        let resp = req.send().await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -338,7 +341,8 @@ impl AgentTool for WebSearchTool {
 
     fn description(&self) -> &str {
         "Search the web and return results. Use this when you need up-to-date information, \
-         current events, or facts you're unsure about."
+         current events, or facts you're unsure about. Results are localized to the \
+         user's preferred language when the search provider supports it."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -395,9 +399,14 @@ impl AgentTool for WebSearchTool {
             return Ok(cached);
         }
 
+        let accept_language = params.get("_accept_language").and_then(|v| v.as_str());
+
         debug!("web_search: {query} (count={count})");
         let result = match &self.provider {
-            SearchProvider::Brave => self.search_brave(query, count, &params).await?,
+            SearchProvider::Brave => {
+                self.search_brave(query, count, &params, accept_language)
+                    .await?
+            },
             SearchProvider::Perplexity { base_url, model } => {
                 self.search_perplexity(query, base_url, model).await?
             },
