@@ -509,12 +509,16 @@ impl Sandbox for AppleContainerSandbox {
         }
 
         // Container doesn't exist — create it.
+        // Must pass `sleep infinity` so the container stays alive for `exec` calls
+        // (the default entrypoint is /bin/bash which exits immediately without a TTY).
         let args = vec![
             "run".to_string(),
             "-d".to_string(),
             "--name".to_string(),
             name.clone(),
             image_override.unwrap_or_else(|| self.image()).to_string(),
+            "sleep".to_string(),
+            "infinity".to_string(),
         ];
 
         let output = tokio::process::Command::new("container")
