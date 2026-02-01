@@ -1,44 +1,449 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use argon2::{
+    Argon2,
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
+};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use sqlx::SqlitePool;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum AuthMode {
-    Token,
+pub enum AuthMethod {
     Password,
+    Passkey,
+    ApiKey,
+    Loopback,
 }
 
-/// Resolved gateway auth configuration.
+/// A verified identity after successful authentication.
 #[derive(Debug, Clone)]
-pub struct ResolvedAuth {
-    pub mode: AuthMode,
-    pub token: Option<String>,
-    pub password: Option<String>,
+pub struct AuthIdentity {
+    pub method: AuthMethod,
 }
+
+/// A registered passkey entry (for listing in the UI).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PasskeyEntry {
+    pub id: i64,
+    pub name: String,
+    pub created_at: String,
+}
+
+/// An API key entry (for listing in the UI — never exposes the full key).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKeyEntry {
+    pub id: i64,
+    pub label: String,
+    pub key_prefix: String,
+    pub created_at: String,
+}
+
+// ── Credential store ─────────────────────────────────────────────────────────
+
+/// Single-user credential store backed by SQLite.
+pub struct CredentialStore {
+    pool: SqlitePool,
+    setup_complete: AtomicBool,
+    /// When true, auth has been explicitly disabled via "remove all auth".
+    /// The middleware and status endpoint treat this as "no auth configured".
+    auth_disabled: AtomicBool,
+}
+
+impl CredentialStore {
+    /// Create a new store and initialize tables.
+    pub async fn new(pool: SqlitePool) -> anyhow::Result<Self> {
+        let store = Self {
+            pool,
+            setup_complete: AtomicBool::new(false),
+            auth_disabled: AtomicBool::new(false),
+        };
+        store.init().await?;
+        let has = store.has_password().await?;
+        store.setup_complete.store(has, Ordering::Relaxed);
+        Ok(store)
+    }
+
+    async fn init(&self) -> anyhow::Result<()> {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS auth_password (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                password_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS passkeys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                credential_id BLOB NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                passkey_data BLOB NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS api_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                label TEXT NOT NULL,
+                key_hash TEXT NOT NULL,
+                key_prefix TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                revoked_at TEXT
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS auth_sessions (
+                token TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                expires_at TEXT NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    // ── Setup ────────────────────────────────────────────────────────────
+
+    /// Whether initial setup (password creation) has been completed.
+    pub fn is_setup_complete(&self) -> bool {
+        self.setup_complete.load(Ordering::Relaxed)
+    }
+
+    /// Whether authentication has been explicitly disabled via reset.
+    pub fn is_auth_disabled(&self) -> bool {
+        self.auth_disabled.load(Ordering::Relaxed)
+    }
+
+    async fn has_password(&self) -> anyhow::Result<bool> {
+        let row: Option<(i64,)> =
+            sqlx::query_as("SELECT id FROM auth_password WHERE id = 1")
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.is_some())
+    }
+
+    // ── Password ─────────────────────────────────────────────────────────
+
+    /// Set the initial password (first-run setup). Fails if already set.
+    pub async fn set_initial_password(&self, password: &str) -> anyhow::Result<()> {
+        if self.is_setup_complete() {
+            anyhow::bail!("password already set");
+        }
+        let hash = hash_password(password)?;
+        sqlx::query(
+            "INSERT INTO auth_password (id, password_hash) VALUES (1, ?)",
+        )
+        .bind(&hash)
+        .execute(&self.pool)
+        .await?;
+        self.setup_complete.store(true, Ordering::Relaxed);
+        self.auth_disabled.store(false, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Verify a password against the stored hash.
+    pub async fn verify_password(&self, password: &str) -> anyhow::Result<bool> {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT password_hash FROM auth_password WHERE id = 1")
+                .fetch_optional(&self.pool)
+                .await?;
+        let Some((hash,)) = row else {
+            return Ok(false);
+        };
+        Ok(verify_password(password, &hash))
+    }
+
+    /// Change the password (requires correct current password).
+    pub async fn change_password(
+        &self,
+        current: &str,
+        new_password: &str,
+    ) -> anyhow::Result<()> {
+        if !self.verify_password(current).await? {
+            anyhow::bail!("current password is incorrect");
+        }
+        let hash = hash_password(new_password)?;
+        sqlx::query(
+            "UPDATE auth_password SET password_hash = ?, updated_at = datetime('now') WHERE id = 1",
+        )
+        .bind(&hash)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    // ── Sessions ─────────────────────────────────────────────────────────
+
+    /// Create a new session token (30-day expiry).
+    pub async fn create_session(&self) -> anyhow::Result<String> {
+        let token = generate_token();
+        sqlx::query(
+            "INSERT INTO auth_sessions (token, expires_at) VALUES (?, datetime('now', '+30 days'))",
+        )
+        .bind(&token)
+        .execute(&self.pool)
+        .await?;
+        Ok(token)
+    }
+
+    /// Validate a session token. Returns true if valid and not expired.
+    pub async fn validate_session(&self, token: &str) -> anyhow::Result<bool> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT token FROM auth_sessions WHERE token = ? AND expires_at > datetime('now')",
+        )
+        .bind(token)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
+
+    /// Delete a session (logout).
+    pub async fn delete_session(&self, token: &str) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM auth_sessions WHERE token = ?")
+            .bind(token)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Clean up expired sessions.
+    pub async fn cleanup_expired_sessions(&self) -> anyhow::Result<u64> {
+        let result =
+            sqlx::query("DELETE FROM auth_sessions WHERE expires_at <= datetime('now')")
+                .execute(&self.pool)
+                .await?;
+        Ok(result.rows_affected())
+    }
+
+    // ── API Keys ─────────────────────────────────────────────────────────
+
+    /// Generate a new API key. Returns (id, raw_key). The raw key is only
+    /// shown once — we store only its SHA-256 hash.
+    pub async fn create_api_key(&self, label: &str) -> anyhow::Result<(i64, String)> {
+        let raw_key = format!("mk_{}", generate_token());
+        let prefix = &raw_key[..raw_key.len().min(11)]; // "mk_" + 8 chars
+        let hash = sha256_hex(&raw_key);
+
+        let result = sqlx::query(
+            "INSERT INTO api_keys (label, key_hash, key_prefix) VALUES (?, ?, ?)",
+        )
+        .bind(label)
+        .bind(&hash)
+        .bind(prefix)
+        .execute(&self.pool)
+        .await?;
+        Ok((result.last_insert_rowid(), raw_key))
+    }
+
+    /// List all API keys (active and revoked).
+    pub async fn list_api_keys(&self) -> anyhow::Result<Vec<ApiKeyEntry>> {
+        let rows: Vec<(i64, String, String, String)> = sqlx::query_as(
+            "SELECT id, label, key_prefix, created_at FROM api_keys WHERE revoked_at IS NULL ORDER BY created_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, label, key_prefix, created_at)| ApiKeyEntry {
+                id,
+                label,
+                key_prefix,
+                created_at,
+            })
+            .collect())
+    }
+
+    /// Revoke an API key by id.
+    pub async fn revoke_api_key(&self, key_id: i64) -> anyhow::Result<()> {
+        sqlx::query(
+            "UPDATE api_keys SET revoked_at = datetime('now') WHERE id = ? AND revoked_at IS NULL",
+        )
+        .bind(key_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Verify a raw API key. Returns true if it matches a non-revoked key.
+    pub async fn verify_api_key(&self, raw_key: &str) -> anyhow::Result<bool> {
+        let hash = sha256_hex(raw_key);
+        let row: Option<(i64,)> = sqlx::query_as(
+            "SELECT id FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL",
+        )
+        .bind(&hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
+
+    // ── Reset (remove all auth) ─────────────────────────────────────────
+
+    /// Remove all authentication data: password, sessions, passkeys, API keys.
+    /// After this, `is_setup_complete()` returns false and the middleware
+    /// passes all requests through (no auth required).
+    pub async fn reset_all(&self) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM auth_password")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM auth_sessions")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM passkeys")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM api_keys")
+            .execute(&self.pool)
+            .await?;
+        self.setup_complete.store(false, Ordering::Relaxed);
+        self.auth_disabled.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
+    // ── Passkeys ─────────────────────────────────────────────────────────
+
+    /// Store a new passkey credential.
+    pub async fn store_passkey(
+        &self,
+        credential_id: &[u8],
+        name: &str,
+        passkey_data: &[u8],
+    ) -> anyhow::Result<i64> {
+        let result = sqlx::query(
+            "INSERT INTO passkeys (credential_id, name, passkey_data) VALUES (?, ?, ?)",
+        )
+        .bind(credential_id)
+        .bind(name)
+        .bind(passkey_data)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.last_insert_rowid())
+    }
+
+    /// List all registered passkeys.
+    pub async fn list_passkeys(&self) -> anyhow::Result<Vec<PasskeyEntry>> {
+        let rows: Vec<(i64, String, String)> =
+            sqlx::query_as("SELECT id, name, created_at FROM passkeys ORDER BY created_at DESC")
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, name, created_at)| PasskeyEntry {
+                id,
+                name,
+                created_at,
+            })
+            .collect())
+    }
+
+    /// Remove a passkey by id.
+    pub async fn remove_passkey(&self, passkey_id: i64) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM passkeys WHERE id = ?")
+            .bind(passkey_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Rename a passkey.
+    pub async fn rename_passkey(&self, passkey_id: i64, name: &str) -> anyhow::Result<()> {
+        sqlx::query("UPDATE passkeys SET name = ? WHERE id = ?")
+            .bind(name)
+            .bind(passkey_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Load all passkey data blobs (for WebAuthn authentication).
+    pub async fn load_all_passkey_data(&self) -> anyhow::Result<Vec<(i64, Vec<u8>)>> {
+        let rows: Vec<(i64, Vec<u8>)> =
+            sqlx::query_as("SELECT id, passkey_data FROM passkeys")
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows)
+    }
+
+    /// Check if any passkeys are registered (for login page UI).
+    pub async fn has_passkeys(&self) -> anyhow::Result<bool> {
+        let row: Option<(i64,)> =
+            sqlx::query_as("SELECT id FROM passkeys LIMIT 1")
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.is_some())
+    }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+pub fn is_loopback(ip: &str) -> bool {
+    ip == "127.0.0.1"
+        || ip.starts_with("127.")
+        || ip == "::1"
+        || ip.starts_with("::ffff:127.")
+}
+
+fn hash_password(password: &str) -> anyhow::Result<String> {
+    let salt = SaltString::generate(&mut OsRng);
+    let argon2 = Argon2::default();
+    let hash = argon2
+        .hash_password(password.as_bytes(), &salt)
+        .map_err(|e| anyhow::anyhow!("failed to hash password: {e}"))?;
+    Ok(hash.to_string())
+}
+
+fn verify_password(password: &str, hash_str: &str) -> bool {
+    let Ok(parsed) = PasswordHash::new(hash_str) else {
+        return false;
+    };
+    Argon2::default()
+        .verify_password(password.as_bytes(), &parsed)
+        .is_ok()
+}
+
+fn generate_token() -> String {
+    use base64::Engine;
+    use rand::RngCore;
+
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn sha256_hex(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+// ── Legacy compat ────────────────────────────────────────────────────────────
 
 /// Result of an authentication attempt.
 #[derive(Debug, Clone)]
 pub struct AuthResult {
     pub ok: bool,
-    pub method: Option<AuthMethod>,
     pub reason: Option<String>,
 }
-
-#[derive(Debug, Clone, Copy)]
-pub enum AuthMethod {
-    Token,
-    Password,
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Constant-time string comparison (prevents timing attacks).
 fn safe_equal(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    // XOR each byte and accumulate; any difference makes result non-zero.
     let diff = a
         .as_bytes()
         .iter()
@@ -47,11 +452,75 @@ fn safe_equal(a: &str, b: &str) -> bool {
     diff == 0
 }
 
-pub fn is_loopback(ip: &str) -> bool {
-    ip == "127.0.0.1" || ip.starts_with("127.") || ip == "::1" || ip.starts_with("::ffff:127.")
+/// Authenticate an incoming WebSocket connect request against legacy env-var auth.
+pub fn authorize_connect(
+    auth: &ResolvedAuth,
+    provided_token: Option<&str>,
+    provided_password: Option<&str>,
+    _remote_ip: Option<&str>,
+) -> AuthResult {
+    match auth.mode {
+        AuthMode::Token => {
+            let Some(expected) = auth.token.as_deref() else {
+                return AuthResult {
+                    ok: true,
+                    reason: None,
+                };
+            };
+            match provided_token {
+                Some(t) if safe_equal(t, expected) => AuthResult {
+                    ok: true,
+                    reason: None,
+                },
+                Some(_) => AuthResult {
+                    ok: false,
+                    reason: Some("invalid token".into()),
+                },
+                None => AuthResult {
+                    ok: false,
+                    reason: Some("token required".into()),
+                },
+            }
+        },
+        AuthMode::Password => {
+            let Some(expected) = auth.password.as_deref() else {
+                return AuthResult {
+                    ok: true,
+                    reason: None,
+                };
+            };
+            match provided_password {
+                Some(p) if safe_equal(p, expected) => AuthResult {
+                    ok: true,
+                    reason: None,
+                },
+                Some(_) => AuthResult {
+                    ok: false,
+                    reason: Some("invalid password".into()),
+                },
+                None => AuthResult {
+                    ok: false,
+                    reason: Some("password required".into()),
+                },
+            }
+        },
+    }
 }
 
-// ── Auth logic ───────────────────────────────────────────────────────────────
+/// Legacy resolved auth from environment vars (kept for migration).
+#[derive(Debug, Clone)]
+pub struct ResolvedAuth {
+    pub mode: AuthMode,
+    pub token: Option<String>,
+    pub password: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthMode {
+    Token,
+    Password,
+}
 
 /// Resolve auth config from environment / config values.
 pub fn resolve_auth(token: Option<String>, password: Option<String>) -> ResolvedAuth {
@@ -67,69 +536,171 @@ pub fn resolve_auth(token: Option<String>, password: Option<String>) -> Resolved
     }
 }
 
-/// Authenticate an incoming WebSocket connect request.
-pub fn authorize_connect(
-    auth: &ResolvedAuth,
-    provided_token: Option<&str>,
-    provided_password: Option<&str>,
-    _remote_ip: Option<&str>,
-) -> AuthResult {
-    match auth.mode {
-        AuthMode::Token => {
-            let Some(expected) = auth.token.as_deref() else {
-                return AuthResult {
-                    ok: false,
-                    method: None,
-                    reason: Some("token_missing_config".into()),
-                };
-            };
-            let Some(given) = provided_token else {
-                return AuthResult {
-                    ok: false,
-                    method: None,
-                    reason: Some("token_missing".into()),
-                };
-            };
-            if !safe_equal(given, expected) {
-                return AuthResult {
-                    ok: false,
-                    method: None,
-                    reason: Some("token_mismatch".into()),
-                };
-            }
-            AuthResult {
-                ok: true,
-                method: Some(AuthMethod::Token),
-                reason: None,
-            }
-        },
-        AuthMode::Password => {
-            let Some(expected) = auth.password.as_deref() else {
-                return AuthResult {
-                    ok: false,
-                    method: None,
-                    reason: Some("password_missing_config".into()),
-                };
-            };
-            let Some(given) = provided_password else {
-                return AuthResult {
-                    ok: false,
-                    method: None,
-                    reason: Some("password_missing".into()),
-                };
-            };
-            if !safe_equal(given, expected) {
-                return AuthResult {
-                    ok: false,
-                    method: None,
-                    reason: Some("password_mismatch".into()),
-                };
-            }
-            AuthResult {
-                ok: true,
-                method: Some(AuthMethod::Password),
-                reason: None,
-            }
-        },
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_loopback() {
+        assert!(is_loopback("127.0.0.1"));
+        assert!(is_loopback("127.0.0.2"));
+        assert!(is_loopback("::1"));
+        assert!(is_loopback("::ffff:127.0.0.1"));
+        assert!(!is_loopback("192.168.1.1"));
+        assert!(!is_loopback("10.0.0.1"));
+    }
+
+    #[test]
+    fn test_password_hash_verify() {
+        let hash = hash_password("test123").unwrap();
+        assert!(verify_password("test123", &hash));
+        assert!(!verify_password("wrong", &hash));
+    }
+
+    #[test]
+    fn test_generate_token() {
+        let t1 = generate_token();
+        let t2 = generate_token();
+        assert_ne!(t1, t2);
+        assert!(t1.len() >= 40);
+    }
+
+    #[test]
+    fn test_sha256_hex() {
+        let h = sha256_hex("hello");
+        assert_eq!(h.len(), 64);
+        // deterministic
+        assert_eq!(h, sha256_hex("hello"));
+        assert_ne!(h, sha256_hex("world"));
+    }
+
+    #[tokio::test]
+    async fn test_credential_store_password() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let store = CredentialStore::new(pool).await.unwrap();
+
+        assert!(!store.is_setup_complete());
+        assert!(!store.verify_password("test").await.unwrap());
+
+        store.set_initial_password("mypassword").await.unwrap();
+        assert!(store.is_setup_complete());
+        assert!(store.verify_password("mypassword").await.unwrap());
+        assert!(!store.verify_password("wrong").await.unwrap());
+
+        // Can't set again
+        assert!(store.set_initial_password("another").await.is_err());
+
+        // Change password
+        store
+            .change_password("mypassword", "newpass")
+            .await
+            .unwrap();
+        assert!(store.verify_password("newpass").await.unwrap());
+        assert!(!store.verify_password("mypassword").await.unwrap());
+
+        // Wrong current password
+        assert!(store.change_password("wrong", "x").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_credential_store_sessions() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let store = CredentialStore::new(pool).await.unwrap();
+
+        let token = store.create_session().await.unwrap();
+        assert!(store.validate_session(&token).await.unwrap());
+        assert!(!store.validate_session("bogus").await.unwrap());
+
+        store.delete_session(&token).await.unwrap();
+        assert!(!store.validate_session(&token).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_credential_store_api_keys() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let store = CredentialStore::new(pool).await.unwrap();
+
+        let (id, raw_key) = store.create_api_key("test key").await.unwrap();
+        assert!(id > 0);
+        assert!(raw_key.starts_with("mk_"));
+
+        assert!(store.verify_api_key(&raw_key).await.unwrap());
+        assert!(!store.verify_api_key("mk_bogus").await.unwrap());
+
+        let keys = store.list_api_keys().await.unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].label, "test key");
+
+        store.revoke_api_key(id).await.unwrap();
+        assert!(!store.verify_api_key(&raw_key).await.unwrap());
+
+        let keys = store.list_api_keys().await.unwrap();
+        assert!(keys.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_credential_store_reset_all() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let store = CredentialStore::new(pool).await.unwrap();
+
+        // Set up password, session, API key, passkey.
+        store.set_initial_password("testpass").await.unwrap();
+        assert!(store.is_setup_complete());
+
+        let token = store.create_session().await.unwrap();
+        assert!(store.validate_session(&token).await.unwrap());
+
+        let (_id, raw_key) = store.create_api_key("test").await.unwrap();
+        assert!(store.verify_api_key(&raw_key).await.unwrap());
+
+        store
+            .store_passkey(b"cred-1", "test pk", b"data")
+            .await
+            .unwrap();
+        assert!(store.has_passkeys().await.unwrap());
+
+        // Reset everything.
+        store.reset_all().await.unwrap();
+
+        assert!(store.is_auth_disabled());
+        assert!(!store.is_setup_complete());
+        assert!(!store.validate_session(&token).await.unwrap());
+        assert!(!store.verify_api_key(&raw_key).await.unwrap());
+        assert!(!store.has_passkeys().await.unwrap());
+        assert!(!store.verify_password("testpass").await.unwrap());
+
+        // Can set up again — re-enables auth.
+        store.set_initial_password("newpass").await.unwrap();
+        assert!(store.is_setup_complete());
+        assert!(!store.is_auth_disabled());
+    }
+
+    #[tokio::test]
+    async fn test_credential_store_passkeys() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let store = CredentialStore::new(pool).await.unwrap();
+
+        assert!(!store.has_passkeys().await.unwrap());
+
+        let cred_id = b"credential-123";
+        let data = b"serialized-passkey-data";
+        let id = store
+            .store_passkey(cred_id, "MacBook Touch ID", data)
+            .await
+            .unwrap();
+        assert!(id > 0);
+
+        assert!(store.has_passkeys().await.unwrap());
+
+        let entries = store.list_passkeys().await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "MacBook Touch ID");
+
+        let all_data = store.load_all_passkey_data().await.unwrap();
+        assert_eq!(all_data.len(), 1);
+        assert_eq!(all_data[0].1, data);
+
+        store.remove_passkey(id).await.unwrap();
+        assert!(!store.has_passkeys().await.unwrap());
     }
 }

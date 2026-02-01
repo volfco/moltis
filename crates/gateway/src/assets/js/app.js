@@ -20,6 +20,8 @@ import "./page-plugins.js";
 import "./page-skills.js";
 import "./page-settings.js";
 import "./page-images.js";
+import "./page-setup.js";
+import { setHasPasskeys } from "./page-login.js";
 
 // Import side-effect modules
 import "./session-search.js";
@@ -35,9 +37,30 @@ onEvent("session", () => {
 	fetchSessions();
 });
 
-// Mount the page immediately so the UI shell renders without waiting for data.
-mount(location.pathname);
-connect();
+// Check auth status before mounting the app.
+fetch("/api/auth/status")
+	.then((r) => (r.ok ? r.json() : null))
+	.then((auth) => {
+		if (!auth) {
+			// Auth endpoints not available — no auth configured, proceed normally.
+			startApp();
+			return;
+		}
+		if (auth.setup_required) {
+			mount("/setup");
+			return;
+		}
+		setHasPasskeys(auth.has_passkeys);
+		if (!auth.authenticated) {
+			mount("/login");
+			return;
+		}
+		startApp();
+	})
+	.catch(() => {
+		// If auth check fails, proceed anyway (backward compat).
+		startApp();
+	});
 
 function applyModels(models) {
 	S.setModels(models || []);
@@ -52,28 +75,36 @@ function applyModels(models) {
 	}
 }
 
-// Fetch bootstrap data asynchronously — populates sidebar, models, projects
-// as soon as the data arrives, without blocking the initial page render.
-fetch("/api/bootstrap")
-	.then((r) => r.json())
-	.then((boot) => {
-		if (boot.onboarded === false && location.pathname !== "/settings") {
-			navigate("/settings");
-			return;
-		}
-		if (boot.channels) S.setCachedChannels(boot.channels.channels || boot.channels || []);
-		if (boot.sessions) {
-			S.setSessions(boot.sessions || []);
-			renderSessionList();
-		}
-		if (boot.models) applyModels(boot.models);
-		if (boot.projects) {
-			S.setProjects(boot.projects || []);
-			renderProjectSelect();
-			renderSessionProjectSelect();
-		}
-		S.setSandboxInfo(boot.sandbox || null);
-	})
-	.catch(() => {
-		/* WS connect will fetch this data anyway */
-	});
+function fetchBootstrap() {
+	// Fetch bootstrap data asynchronously — populates sidebar, models, projects
+	// as soon as the data arrives, without blocking the initial page render.
+	fetch("/api/bootstrap")
+		.then((r) => r.json())
+		.then((boot) => {
+			if (boot.onboarded === false && location.pathname !== "/settings") {
+				navigate("/settings");
+				return;
+			}
+			if (boot.channels) S.setCachedChannels(boot.channels.channels || boot.channels || []);
+			if (boot.sessions) {
+				S.setSessions(boot.sessions || []);
+				renderSessionList();
+			}
+			if (boot.models) applyModels(boot.models);
+			if (boot.projects) {
+				S.setProjects(boot.projects || []);
+				renderProjectSelect();
+				renderSessionProjectSelect();
+			}
+			S.setSandboxInfo(boot.sandbox || null);
+		})
+		.catch(() => {
+			/* WS connect will fetch this data anyway */
+		});
+}
+
+function startApp() {
+	mount(location.pathname);
+	connect();
+	fetchBootstrap();
+}

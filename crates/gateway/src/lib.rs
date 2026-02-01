@@ -12,6 +12,9 @@
 
 pub mod approval;
 pub mod auth;
+pub mod auth_middleware;
+pub mod auth_routes;
+pub mod auth_webauthn;
 pub mod broadcast;
 pub mod channel;
 pub mod channel_events;

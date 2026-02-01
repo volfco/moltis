@@ -5,8 +5,11 @@ version.workspace = true
 
 [dependencies]
 anyhow                = { workspace = true }
+argon2                = "0.5"
 async-trait           = "0.1"
 axum                  = { workspace = true }
+axum-extra            = { features = ["cookie"], version = "0.10" }
+dashmap               = "6"
 axum-server           = { optional = true, workspace = true }
 directories.workspace = true
 futures               = { workspace = true }
@@ -29,23 +32,29 @@ moltis-sessions       = { workspace = true }
 moltis-skills         = { workspace = true }
 moltis-telegram       = { workspace = true }
 moltis-tools          = { workspace = true }
+password-hash         = "0.5"
 pulldown-cmark        = { default-features = false, features = ["html"], version = "0.12" }
+rand                  = { workspace = true }
 rcgen                 = { optional = true, workspace = true }
 reqwest               = { workspace = true }
 rustls                = { optional = true, workspace = true }
 rustls-pemfile        = { optional = true, workspace = true }
 serde                 = { workspace = true }
 serde_json            = { workspace = true }
+sha2                  = { workspace = true }
 sqlx                  = { workspace = true }
 tokio                 = { workspace = true }
 tokio-rustls          = { optional = true, workspace = true }
 tokio-stream          = { workspace = true }
 tokio-tungstenite     = { workspace = true }
 toml                  = { workspace = true }
+base64                = { workspace = true }
 tower-http            = { features = ["cors"], version = "0.6" }
 tracing               = { workspace = true }
 tracing-subscriber    = { workspace = true }
 uuid                  = { workspace = true }
+webauthn-rs           = { version = "0.5", features = ["danger-allow-state-serialisation"] }
+webauthn-rs-proto     = "0.5"
 
 [features]
 default = ["tls", "web-ui"]

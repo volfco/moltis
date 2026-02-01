@@ -5,7 +5,7 @@ import { html } from "htm/preact";
 import { render } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { sendRpc } from "./helpers.js";
-import { registerPage } from "./router.js";
+import { navigate, registerPrefix } from "./router.js";
 import * as S from "./state.js";
 
 var identity = signal(null);
@@ -42,6 +42,11 @@ var sections = [
 		label: "Identity",
 		icon: html`<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z"/></svg>`,
 	},
+	{
+		id: "security",
+		label: "Security",
+		icon: html`<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z"/></svg>`,
+	},
 ];
 
 function SettingsSidebar() {
@@ -53,8 +58,7 @@ function SettingsSidebar() {
 					key=${s.id}
 					class="settings-nav-item ${activeSection.value === s.id ? "active" : ""}"
 					onClick=${() => {
-						activeSection.value = s.id;
-						rerender();
+						navigate(`/settings/${s.id}`);
 					}}
 				>
 					${s.icon}
@@ -343,6 +347,413 @@ function IdentitySection() {
 	</div>`;
 }
 
+// ── Security section ─────────────────────────────────────────
+
+function SecuritySection() {
+	var [curPw, setCurPw] = useState("");
+	var [newPw, setNewPw] = useState("");
+	var [confirmPw, setConfirmPw] = useState("");
+	var [pwMsg, setPwMsg] = useState(null);
+	var [pwErr, setPwErr] = useState(null);
+	var [pwSaving, setPwSaving] = useState(false);
+
+	var [passkeys, setPasskeys] = useState([]);
+	var [pkName, setPkName] = useState("");
+	var [pkMsg, setPkMsg] = useState(null);
+	var [pkLoading, setPkLoading] = useState(true);
+	var [editingPk, setEditingPk] = useState(null);
+	var [editingPkName, setEditingPkName] = useState("");
+
+	var [apiKeys, setApiKeys] = useState([]);
+	var [akLabel, setAkLabel] = useState("");
+	var [akNew, setAkNew] = useState(null);
+	var [akLoading, setAkLoading] = useState(true);
+
+	useEffect(() => {
+		fetch("/api/auth/passkeys")
+			.then((r) => (r.ok ? r.json() : { passkeys: [] }))
+			.then((d) => {
+				setPasskeys(d.passkeys || []);
+				setPkLoading(false);
+				rerender();
+			})
+			.catch(() => setPkLoading(false));
+		fetch("/api/auth/api-keys")
+			.then((r) => (r.ok ? r.json() : { api_keys: [] }))
+			.then((d) => {
+				setApiKeys(d.api_keys || []);
+				setAkLoading(false);
+				rerender();
+			})
+			.catch(() => setAkLoading(false));
+	}, []);
+
+	function onChangePw(e) {
+		e.preventDefault();
+		setPwErr(null);
+		setPwMsg(null);
+		if (newPw.length < 8) {
+			setPwErr("New password must be at least 8 characters.");
+			return;
+		}
+		if (newPw !== confirmPw) {
+			setPwErr("Passwords do not match.");
+			return;
+		}
+		setPwSaving(true);
+		fetch("/api/auth/password/change", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ current_password: curPw, new_password: newPw }),
+		})
+			.then((r) => {
+				if (r.ok) {
+					setPwMsg("Password changed.");
+					setCurPw("");
+					setNewPw("");
+					setConfirmPw("");
+				} else return r.text().then((t) => setPwErr(t));
+				setPwSaving(false);
+				rerender();
+			})
+			.catch((err) => {
+				setPwErr(err.message);
+				setPwSaving(false);
+				rerender();
+			});
+	}
+
+	function onAddPasskey() {
+		setPkMsg(null);
+		if (/^\d+\.\d+\.\d+\.\d+$/.test(location.hostname) || location.hostname.startsWith("[")) {
+			setPkMsg(`Passkeys require a domain name. Use localhost instead of ${location.hostname}`);
+			rerender();
+			return;
+		}
+		fetch("/api/auth/passkey/register/begin", { method: "POST" })
+			.then((r) => r.json())
+			.then((data) => {
+				var opts = data.options;
+				opts.publicKey.challenge = b64ToBuf(opts.publicKey.challenge);
+				opts.publicKey.user.id = b64ToBuf(opts.publicKey.user.id);
+				if (opts.publicKey.excludeCredentials) {
+					for (var c of opts.publicKey.excludeCredentials) c.id = b64ToBuf(c.id);
+				}
+				return navigator.credentials
+					.create({ publicKey: opts.publicKey })
+					.then((cred) => ({ cred, challengeId: data.challenge_id }));
+			})
+			.then(({ cred, challengeId }) => {
+				var body = {
+					challenge_id: challengeId,
+					name: pkName.trim() || "Passkey",
+					credential: {
+						id: cred.id,
+						rawId: bufToB64(cred.rawId),
+						type: cred.type,
+						response: {
+							attestationObject: bufToB64(cred.response.attestationObject),
+							clientDataJSON: bufToB64(cred.response.clientDataJSON),
+						},
+					},
+				};
+				return fetch("/api/auth/passkey/register/finish", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify(body),
+				});
+			})
+			.then((r) => {
+				if (r.ok) {
+					setPkName("");
+					return fetch("/api/auth/passkeys")
+						.then((r2) => r2.json())
+						.then((d) => {
+							setPasskeys(d.passkeys || []);
+							setPkMsg("Passkey added.");
+							rerender();
+						});
+				} else
+					return r.text().then((t) => {
+						setPkMsg(t);
+						rerender();
+					});
+			})
+			.catch((err) => {
+				setPkMsg(err.message || "Failed to add passkey");
+				rerender();
+			});
+	}
+
+	function onStartRename(id, currentName) {
+		setEditingPk(id);
+		setEditingPkName(currentName);
+		rerender();
+	}
+
+	function onCancelRename() {
+		setEditingPk(null);
+		setEditingPkName("");
+		rerender();
+	}
+
+	function onConfirmRename(id) {
+		var name = editingPkName.trim();
+		if (!name) return;
+		fetch(`/api/auth/passkeys/${id}`, {
+			method: "PATCH",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ name }),
+		})
+			.then(() => fetch("/api/auth/passkeys").then((r) => r.json()))
+			.then((d) => {
+				setPasskeys(d.passkeys || []);
+				setEditingPk(null);
+				setEditingPkName("");
+				rerender();
+			});
+	}
+
+	function onRemovePasskey(id) {
+		fetch(`/api/auth/passkeys/${id}`, { method: "DELETE" })
+			.then(() => fetch("/api/auth/passkeys").then((r) => r.json()))
+			.then((d) => {
+				setPasskeys(d.passkeys || []);
+				rerender();
+			});
+	}
+
+	function onCreateApiKey() {
+		if (!akLabel.trim()) return;
+		setAkNew(null);
+		fetch("/api/auth/api-keys", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ label: akLabel.trim() }),
+		})
+			.then((r) => r.json())
+			.then((d) => {
+				setAkNew(d.key);
+				setAkLabel("");
+				return fetch("/api/auth/api-keys").then((r2) => r2.json());
+			})
+			.then((d) => {
+				setApiKeys(d.api_keys || []);
+				rerender();
+			})
+			.catch(() => rerender());
+	}
+
+	function onRevokeApiKey(id) {
+		fetch(`/api/auth/api-keys/${id}`, { method: "DELETE" })
+			.then(() => fetch("/api/auth/api-keys").then((r) => r.json()))
+			.then((d) => {
+				setApiKeys(d.api_keys || []);
+				rerender();
+			});
+	}
+
+	var [resetConfirm, setResetConfirm] = useState(false);
+	var [resetBusy, setResetBusy] = useState(false);
+
+	function onResetAuth() {
+		if (!resetConfirm) {
+			setResetConfirm(true);
+			rerender();
+			return;
+		}
+		setResetBusy(true);
+		rerender();
+		fetch("/api/auth/reset", { method: "POST" })
+			.then((r) => {
+				if (r.ok) {
+					window.location.href = "/";
+				} else {
+					return r.text().then((t) => {
+						setPwErr(t);
+						setResetConfirm(false);
+						setResetBusy(false);
+						rerender();
+					});
+				}
+			})
+			.catch((err) => {
+				setPwErr(err.message);
+				setResetConfirm(false);
+				setResetBusy(false);
+				rerender();
+			});
+	}
+
+	return html`<div class="settings-content">
+		<h2 class="settings-title">Security</h2>
+
+		<div class="settings-section">
+			<h3 class="settings-section-title">Change Password</h3>
+			<form onSubmit=${onChangePw}>
+				<div class="settings-grid">
+					<div class="settings-field">
+						<label class="settings-label">Current password</label>
+						<input type="password" class="settings-input" value=${curPw}
+							onInput=${(e) => setCurPw(e.target.value)} />
+					</div>
+					<div class="settings-field">
+						<label class="settings-label">New password</label>
+						<input type="password" class="settings-input" value=${newPw}
+							onInput=${(e) => setNewPw(e.target.value)} placeholder="At least 8 characters" />
+					</div>
+					<div class="settings-field">
+						<label class="settings-label">Confirm new password</label>
+						<input type="password" class="settings-input" value=${confirmPw}
+							onInput=${(e) => setConfirmPw(e.target.value)} />
+					</div>
+				</div>
+				<div class="settings-actions">
+					<button type="submit" class="settings-btn" disabled=${pwSaving}>
+						${pwSaving ? "Changing\u2026" : "Change password"}
+					</button>
+					${pwMsg ? html`<span class="settings-saved">${pwMsg}</span>` : null}
+					${pwErr ? html`<span class="settings-error">${pwErr}</span>` : null}
+				</div>
+			</form>
+		</div>
+
+		<div class="settings-section">
+			<h3 class="settings-section-title">Passkeys</h3>
+			${
+				pkLoading
+					? html`<p class="text-sm text-[var(--muted)]">Loading...</p>`
+					: html`
+				${
+					passkeys.length > 0
+						? html`<div class="security-list">
+					${passkeys.map(
+						(pk) => html`<div class="security-list-item" key=${pk.id}>
+						${
+							editingPk === pk.id
+								? html`<form style="display:flex;align-items:center;gap:6px;flex:1" onSubmit=${(e) => {
+										e.preventDefault();
+										onConfirmRename(pk.id);
+									}}>
+									<input type="text" class="settings-input" value=${editingPkName}
+										onInput=${(e) => setEditingPkName(e.target.value)}
+										style="flex:1" autofocus />
+									<button type="submit" class="settings-btn">Save</button>
+									<button type="button" class="settings-btn" onClick=${onCancelRename}>Cancel</button>
+								</form>`
+								: html`<div>
+									<strong>${pk.name}</strong>
+									<span style="color:var(--muted);font-size:0.78rem"> - ${pk.created_at}</span>
+								</div>
+								<div style="display:flex;gap:4px">
+									<button class="settings-btn" onClick=${() => onStartRename(pk.id, pk.name)}>Rename</button>
+									<button class="settings-btn settings-btn-danger" onClick=${() => onRemovePasskey(pk.id)}>Remove</button>
+								</div>`
+						}
+					</div>`,
+					)}
+				</div>`
+						: html`<p class="settings-hint">No passkeys registered.</p>`
+				}
+				<div class="security-add-row">
+					<input type="text" class="settings-input" value=${pkName}
+						onInput=${(e) => setPkName(e.target.value)}
+						placeholder="Passkey name (e.g. MacBook Touch ID)" style="flex:1" />
+					<button type="button" class="settings-btn" onClick=${onAddPasskey}>Add passkey</button>
+				</div>
+				${pkMsg ? html`<p class="settings-hint" style="margin-top:0.5rem">${pkMsg}</p>` : null}
+			`
+			}
+		</div>
+
+		<div class="settings-section">
+			<h3 class="settings-section-title">API Keys</h3>
+			<p class="settings-hint">API keys authenticate external tools and scripts connecting to moltis over the WebSocket protocol. Pass the key as the <code>api_key</code> field in the <code>auth</code> object of the <code>connect</code> handshake.</p>
+			${
+				akLoading
+					? html`<p class="text-sm text-[var(--muted)]">Loading...</p>`
+					: html`
+				${
+					akNew
+						? html`<div class="security-key-reveal">
+					<p class="settings-hint">Copy this key now. It won't be shown again.</p>
+					<code class="security-key-code">${akNew}</code>
+				</div>`
+						: null
+				}
+				${
+					apiKeys.length > 0
+						? html`<div class="security-list">
+					${apiKeys.map(
+						(ak) => html`<div class="security-list-item" key=${ak.id}>
+						<div>
+							<strong>${ak.label}</strong>
+							<code style="margin-left:0.5rem;font-size:0.78rem">${ak.key_prefix}...</code>
+							<span style="color:var(--muted);font-size:0.78rem"> - ${ak.created_at}</span>
+						</div>
+						<button class="settings-btn settings-btn-danger"
+							onClick=${() => onRevokeApiKey(ak.id)}>Revoke</button>
+					</div>`,
+					)}
+				</div>`
+						: html`<p class="settings-hint">No API keys.</p>`
+				}
+				<div class="security-add-row">
+					<input type="text" class="settings-input" value=${akLabel}
+						onInput=${(e) => setAkLabel(e.target.value)}
+						placeholder="Key label (e.g. CLI tool)" style="flex:1" />
+					<button type="button" class="settings-btn" onClick=${onCreateApiKey} disabled=${!akLabel.trim()}>Generate key</button>
+				</div>
+			`
+			}
+		</div>
+
+		<div class="settings-section settings-danger-zone">
+			<h3 class="settings-section-title" style="color:var(--danger, #e53935)">Danger Zone</h3>
+			<div class="settings-danger-box">
+				<div>
+					<strong>Remove all authentication</strong>
+					<p class="settings-hint" style="margin-top:0.25rem">
+						If you know what you're doing, you can fully disable authentication.
+						Anyone with network access will be able to access moltis and your computer.
+						This removes your password, all passkeys, all API keys, and all sessions.
+					</p>
+				</div>
+				${
+					resetConfirm
+						? html`<div style="display:flex;align-items:center;gap:8px;margin-top:0.5rem">
+						<span class="settings-error" style="margin:0">Are you sure? This cannot be undone.</span>
+						<button type="button" class="settings-btn settings-btn-danger" disabled=${resetBusy}
+							onClick=${onResetAuth}>${resetBusy ? "Removing\u2026" : "Yes, remove all auth"}</button>
+						<button type="button" class="settings-btn" onClick=${() => {
+							setResetConfirm(false);
+							rerender();
+						}}>Cancel</button>
+					</div>`
+						: html`<button type="button" class="settings-btn settings-btn-danger" style="margin-top:0.5rem"
+						onClick=${onResetAuth}>Remove all authentication</button>`
+				}
+			</div>
+		</div>
+	</div>`;
+}
+
+function b64ToBuf(b64) {
+	var str = b64.replace(/-/g, "+").replace(/_/g, "/");
+	while (str.length % 4) str += "=";
+	var bin = atob(str);
+	var buf = new Uint8Array(bin.length);
+	for (var i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+	return buf.buffer;
+}
+
+function bufToB64(buf) {
+	var bytes = new Uint8Array(buf);
+	var str = "";
+	for (var b of bytes) str += String.fromCharCode(b);
+	return btoa(str).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
 // ── Main layout ──────────────────────────────────────────────
 
 function SettingsPage() {
@@ -355,15 +766,21 @@ function SettingsPage() {
 	return html`<div class="settings-layout">
 		<${SettingsSidebar} />
 		${section === "identity" ? html`<${IdentitySection} />` : null}
+		${section === "security" ? html`<${SecuritySection} />` : null}
 	</div>`;
 }
 
-registerPage(
+registerPrefix(
 	"/settings",
-	(container) => {
+	(container, param) => {
 		mounted = true;
 		containerRef = container;
 		container.style.cssText = "flex-direction:row;padding:0;overflow:hidden;";
+		var section = param && sections.some((s) => s.id === param) ? param : "identity";
+		activeSection.value = section;
+		if (!(param && sections.some((s) => s.id === param))) {
+			history.replaceState(null, "", `/settings/${section}`);
+		}
 		render(html`<${SettingsPage} />`, container);
 		fetchIdentity();
 	},

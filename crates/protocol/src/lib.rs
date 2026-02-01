@@ -241,6 +241,8 @@ pub struct ConnectAuth {
     pub token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
 }
 
 /// Sent by the gateway after successful handshake.

@@ -36,6 +36,7 @@ use {
 use crate::{
     approval::{GatewayApprovalBroadcaster, LiveExecApprovalService},
     auth,
+    auth_routes::{AuthState, auth_router},
     broadcast::broadcast_tick,
     chat::{LiveChatService, LiveModelService},
     methods::MethodRegistry,
@@ -52,57 +53,77 @@ use crate::tls::CertManager;
 // ── Shared app state ─────────────────────────────────────────────────────────
 
 #[derive(Clone)]
-struct AppState {
-    gateway: Arc<GatewayState>,
-    methods: Arc<MethodRegistry>,
+pub struct AppState {
+    pub gateway: Arc<GatewayState>,
+    pub methods: Arc<MethodRegistry>,
 }
 
 // ── Server startup ───────────────────────────────────────────────────────────
 
 /// Build the gateway router (shared between production startup and tests).
 pub fn build_gateway_app(state: Arc<GatewayState>, methods: Arc<MethodRegistry>) -> Router {
-    let app_state = AppState {
-        gateway: state,
-        methods,
-    };
-
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
 
-    let router = Router::new()
+    let mut router = Router::new()
         .route("/health", get(health_handler))
         .route("/ws", get(ws_upgrade_handler));
 
+    // Nest auth routes if credential store is available.
+    if let Some(ref cred_store) = state.credential_store {
+        let auth_state = AuthState {
+            credential_store: Arc::clone(cred_store),
+            webauthn_state: state.webauthn_state.clone(),
+        };
+        router = router.nest("/api/auth", auth_router().with_state(auth_state));
+    }
+
+    let app_state = AppState {
+        gateway: state,
+        methods,
+    };
+
     #[cfg(feature = "web-ui")]
-    let router = router
-        .route("/assets/v/{version}/{*path}", get(versioned_asset_handler))
-        .route("/assets/{*path}", get(asset_handler))
-        .route("/api/bootstrap", get(api_bootstrap_handler))
-        .route("/api/skills", get(api_skills_handler))
-        .route("/api/skills/search", get(api_skills_search_handler))
-        .route(
-            "/api/images/cached",
-            get(api_cached_images_handler).delete(api_prune_cached_images_handler),
-        )
-        .route(
-            "/api/images/cached/{tag}",
-            axum::routing::delete(api_delete_cached_image_handler),
-        )
-        .route(
-            "/api/images/build",
-            axum::routing::post(api_build_image_handler),
-        )
-        .route(
-            "/api/images/check-packages",
-            axum::routing::post(api_check_packages_handler),
-        )
-        .route(
-            "/api/images/default",
-            get(api_get_default_image_handler).put(api_set_default_image_handler),
-        )
-        .fallback(spa_fallback);
+    let router = {
+        // Protected API routes — require auth when credential store is configured.
+        let protected = Router::new()
+            .route("/api/bootstrap", get(api_bootstrap_handler))
+            .route("/api/skills", get(api_skills_handler))
+            .route("/api/skills/search", get(api_skills_search_handler))
+            .route(
+                "/api/images/cached",
+                get(api_cached_images_handler).delete(api_prune_cached_images_handler),
+            )
+            .route(
+                "/api/images/cached/{tag}",
+                axum::routing::delete(api_delete_cached_image_handler),
+            )
+            .route(
+                "/api/images/build",
+                axum::routing::post(api_build_image_handler),
+            )
+            .route(
+                "/api/images/check-packages",
+                axum::routing::post(api_check_packages_handler),
+            )
+            .route(
+                "/api/images/default",
+                get(api_get_default_image_handler).put(api_set_default_image_handler),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                app_state.clone(),
+                crate::auth_middleware::require_auth,
+            ));
+
+        // Public routes (assets, SPA fallback).
+        router
+            .route("/assets/v/{version}/{*path}", get(versioned_asset_handler))
+            .route("/assets/{*path}", get(asset_handler))
+            .merge(protected)
+            .fallback(spa_fallback)
+    };
 
     router.layer(cors).with_state(app_state)
 }
@@ -116,7 +137,7 @@ pub async fn start_gateway(
     // Resolve auth from environment (MOLTIS_TOKEN / MOLTIS_PASSWORD).
     let token = std::env::var("MOLTIS_TOKEN").ok();
     let password = std::env::var("MOLTIS_PASSWORD").ok();
-    let resolved_auth = auth::resolve_auth(token, password);
+    let resolved_auth = auth::resolve_auth(token, password.clone());
 
     // Load config file (moltis.toml / .yaml / .json) if present.
     let config = moltis_config::discover_and_load();
@@ -183,6 +204,44 @@ pub async fn start_gateway(
     SqliteSessionMetadata::init(&db_pool)
         .await
         .expect("failed to init sessions table");
+
+    // Initialize credential store (auth tables).
+    let credential_store = Arc::new(
+        auth::CredentialStore::new(db_pool.clone())
+            .await
+            .expect("failed to init credential store"),
+    );
+
+    // Initialize WebAuthn state for passkey support.
+    // RP ID defaults to "localhost"; override with MOLTIS_WEBAUTHN_RP_ID.
+    let rp_id = std::env::var("MOLTIS_WEBAUTHN_RP_ID")
+        .unwrap_or_else(|_| "localhost".into());
+    let default_scheme = if config.tls.enabled { "https" } else { "http" };
+    let rp_origin_str = std::env::var("MOLTIS_WEBAUTHN_ORIGIN")
+        .unwrap_or_else(|_| format!("{default_scheme}://{rp_id}:{port}"));
+    let webauthn_state = match webauthn_rs::prelude::Url::parse(&rp_origin_str) {
+        Ok(rp_origin) => match crate::auth_webauthn::WebAuthnState::new(&rp_id, &rp_origin) {
+            Ok(wa) => Some(Arc::new(wa)),
+            Err(e) => {
+                tracing::warn!("failed to init WebAuthn: {e}");
+                None
+            },
+        },
+        Err(e) => {
+            tracing::warn!("invalid WebAuthn origin URL '{rp_origin_str}': {e}");
+            None
+        },
+    };
+
+    // If MOLTIS_PASSWORD is set and no password in DB yet, migrate it.
+    if let Some(ref pw) = password {
+        if !credential_store.is_setup_complete() {
+            info!("migrating MOLTIS_PASSWORD env var to credential store");
+            if let Err(e) = credential_store.set_initial_password(pw).await {
+                tracing::warn!("failed to migrate env password: {e}");
+            }
+        }
+    }
 
     crate::message_log_store::SqliteMessageLog::init(&db_pool)
         .await
@@ -449,11 +508,13 @@ pub async fn start_gateway(
     services = services.with_session_metadata(Arc::clone(&session_metadata));
     services = services.with_session_store(Arc::clone(&session_store));
 
-    let state = GatewayState::with_sandbox_router(
+    let state = GatewayState::with_options(
         resolved_auth,
         services,
         Arc::clone(&approval_manager),
         Some(Arc::clone(&sandbox_router)),
+        Some(Arc::clone(&credential_store)),
+        webauthn_state,
     );
     // Populate the deferred reference so cron callbacks can reach the gateway.
     let _ = deferred_state.set(Arc::clone(&state));

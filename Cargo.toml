@@ -70,6 +70,7 @@ base64       = "0.22"
 fd-lock      = "4"
 genai        = "0.5"
 open         = "5.3"
+rand         = "0.8"
 sha2         = "0.10"
 teloxide     = { features = ["macros"], version = "0.13" }
 tokio-util   = "0.7"

@@ -1,0 +1,456 @@
+use std::sync::Arc;
+
+use axum::{
+    Json,
+    extract::State,
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{delete, get, post},
+};
+
+use crate::{
+    auth::CredentialStore,
+    auth_middleware::{AuthSession, SESSION_COOKIE},
+    auth_webauthn::WebAuthnState,
+};
+
+/// Auth-related application state.
+#[derive(Clone)]
+pub struct AuthState {
+    pub credential_store: Arc<CredentialStore>,
+    pub webauthn_state: Option<Arc<WebAuthnState>>,
+}
+
+impl axum::extract::FromRef<AuthState> for Arc<CredentialStore> {
+    fn from_ref(state: &AuthState) -> Self {
+        Arc::clone(&state.credential_store)
+    }
+}
+
+/// Build the auth router with all `/api/auth/*` routes.
+pub fn auth_router() -> axum::Router<AuthState> {
+    axum::Router::new()
+        .route("/status", get(status_handler))
+        .route("/setup", post(setup_handler))
+        .route("/login", post(login_handler))
+        .route("/logout", post(logout_handler))
+        .route("/password/change", post(change_password_handler))
+        .route("/api-keys", get(list_api_keys_handler).post(create_api_key_handler))
+        .route("/api-keys/{id}", delete(revoke_api_key_handler))
+        .route("/passkeys", get(list_passkeys_handler))
+        .route(
+            "/passkeys/{id}",
+            delete(remove_passkey_handler).patch(rename_passkey_handler),
+        )
+        .route("/passkey/register/begin", post(passkey_register_begin_handler))
+        .route("/passkey/register/finish", post(passkey_register_finish_handler))
+        .route("/passkey/auth/begin", post(passkey_auth_begin_handler))
+        .route("/passkey/auth/finish", post(passkey_auth_finish_handler))
+        .route("/reset", post(reset_auth_handler))
+}
+
+// ── Status ───────────────────────────────────────────────────────────────────
+
+async fn status_handler(
+    State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    // When auth has been explicitly disabled, tell the frontend no auth is needed.
+    if state.credential_store.is_auth_disabled() {
+        return Json(serde_json::json!({
+            "setup_required": false,
+            "has_passkeys": false,
+            "authenticated": true,
+        }));
+    }
+
+    let setup_required = !state.credential_store.is_setup_complete();
+    let has_passkeys = state.credential_store.has_passkeys().await.unwrap_or(false);
+
+    let cookie_header = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let token =
+        crate::auth_middleware::parse_cookie(cookie_header, crate::auth_middleware::SESSION_COOKIE);
+    let authenticated = match token {
+        Some(t) => state
+            .credential_store
+            .validate_session(t)
+            .await
+            .unwrap_or(false),
+        None => false,
+    };
+
+    Json(serde_json::json!({
+        "setup_required": setup_required,
+        "has_passkeys": has_passkeys,
+        "authenticated": authenticated,
+    }))
+}
+
+// ── Setup (first run) ────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct SetupRequest {
+    password: String,
+}
+
+async fn setup_handler(
+    State(state): State<AuthState>,
+    Json(body): Json<SetupRequest>,
+) -> impl IntoResponse {
+    if state.credential_store.is_setup_complete() {
+        return (StatusCode::FORBIDDEN, "setup already completed").into_response();
+    }
+
+    if body.password.len() < 8 {
+        return (
+            StatusCode::BAD_REQUEST,
+            "password must be at least 8 characters",
+        )
+            .into_response();
+    }
+
+    if let Err(e) = state.credential_store.set_initial_password(&body.password).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to set password: {e}"),
+        )
+            .into_response();
+    }
+
+    // Create session and set cookie.
+    match state.credential_store.create_session().await {
+        Ok(token) => session_response(token),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to create session: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+// ── Login ────────────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct LoginRequest {
+    password: String,
+}
+
+async fn login_handler(
+    State(state): State<AuthState>,
+    Json(body): Json<LoginRequest>,
+) -> impl IntoResponse {
+    match state.credential_store.verify_password(&body.password).await {
+        Ok(true) => match state.credential_store.create_session().await {
+            Ok(token) => session_response(token),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("session error: {e}"),
+            )
+                .into_response(),
+        },
+        Ok(false) => (StatusCode::UNAUTHORIZED, "invalid password").into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("auth error: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+// ── Logout ───────────────────────────────────────────────────────────────────
+
+async fn logout_handler(
+    State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    if let Some(token) = extract_session_token(&headers) {
+        let _ = state.credential_store.delete_session(token).await;
+    }
+    clear_session_response()
+}
+
+// ── Reset all auth (requires session) ─────────────────────────────────────────
+
+async fn reset_auth_handler(
+    _session: AuthSession,
+    State(state): State<AuthState>,
+) -> impl IntoResponse {
+    match state.credential_store.reset_all().await {
+        Ok(()) => clear_session_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+// ── Password change (requires session) ───────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct ChangePasswordRequest {
+    current_password: String,
+    new_password: String,
+}
+
+async fn change_password_handler(
+    _session: AuthSession,
+    State(state): State<AuthState>,
+    Json(body): Json<ChangePasswordRequest>,
+) -> impl IntoResponse {
+    if body.new_password.len() < 8 {
+        return (
+            StatusCode::BAD_REQUEST,
+            "new password must be at least 8 characters",
+        )
+            .into_response();
+    }
+
+    match state
+        .credential_store
+        .change_password(&body.current_password, &body.new_password)
+        .await
+    {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("incorrect") {
+                (StatusCode::FORBIDDEN, msg).into_response()
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
+            }
+        },
+    }
+}
+
+// ── API Keys (require session) ───────────────────────────────────────────────
+
+async fn list_api_keys_handler(
+    _session: AuthSession,
+    State(state): State<AuthState>,
+) -> impl IntoResponse {
+    match state.credential_store.list_api_keys().await {
+        Ok(keys) => Json(serde_json::json!({ "api_keys": keys })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct CreateApiKeyRequest {
+    label: String,
+}
+
+async fn create_api_key_handler(
+    _session: AuthSession,
+    State(state): State<AuthState>,
+    Json(body): Json<CreateApiKeyRequest>,
+) -> impl IntoResponse {
+    if body.label.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "label is required").into_response();
+    }
+    match state.credential_store.create_api_key(body.label.trim()).await {
+        Ok((id, key)) => Json(serde_json::json!({ "id": id, "key": key })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn revoke_api_key_handler(
+    _session: AuthSession,
+    State(state): State<AuthState>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+) -> impl IntoResponse {
+    match state.credential_store.revoke_api_key(id).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+// ── Passkeys (require session) ───────────────────────────────────────────────
+
+async fn list_passkeys_handler(
+    _session: AuthSession,
+    State(state): State<AuthState>,
+) -> impl IntoResponse {
+    match state.credential_store.list_passkeys().await {
+        Ok(passkeys) => Json(serde_json::json!({ "passkeys": passkeys })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn remove_passkey_handler(
+    _session: AuthSession,
+    State(state): State<AuthState>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+) -> impl IntoResponse {
+    match state.credential_store.remove_passkey(id).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RenamePasskeyRequest {
+    name: String,
+}
+
+async fn rename_passkey_handler(
+    _session: AuthSession,
+    State(state): State<AuthState>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    Json(body): Json<RenamePasskeyRequest>,
+) -> impl IntoResponse {
+    let name = body.name.trim();
+    if name.is_empty() {
+        return (StatusCode::BAD_REQUEST, "name cannot be empty").into_response();
+    }
+    match state.credential_store.rename_passkey(id, name).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+fn session_response(token: String) -> axum::response::Response {
+    let cookie = format!(
+        "{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000"
+    );
+    (
+        StatusCode::OK,
+        [(axum::http::header::SET_COOKIE, cookie)],
+        Json(serde_json::json!({ "ok": true })),
+    )
+        .into_response()
+}
+
+fn clear_session_response() -> axum::response::Response {
+    let cookie = format!(
+        "{SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"
+    );
+    (
+        StatusCode::OK,
+        [(axum::http::header::SET_COOKIE, cookie)],
+        Json(serde_json::json!({ "ok": true })),
+    )
+        .into_response()
+}
+
+// ── Passkey registration (requires session) ──────────────────────────────────
+
+async fn passkey_register_begin_handler(
+    _session: AuthSession,
+    State(state): State<AuthState>,
+) -> impl IntoResponse {
+    let Some(ref wa) = state.webauthn_state else {
+        return (StatusCode::NOT_IMPLEMENTED, "passkeys not configured").into_response();
+    };
+
+    let existing = crate::auth_webauthn::load_passkeys(&state.credential_store)
+        .await
+        .unwrap_or_default();
+
+    match wa.start_registration(&existing) {
+        Ok((challenge_id, ccr)) => Json(serde_json::json!({
+            "challenge_id": challenge_id,
+            "options": ccr,
+        }))
+        .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct PasskeyRegisterFinishRequest {
+    challenge_id: String,
+    name: String,
+    credential: webauthn_rs::prelude::RegisterPublicKeyCredential,
+}
+
+async fn passkey_register_finish_handler(
+    _session: AuthSession,
+    State(state): State<AuthState>,
+    Json(body): Json<PasskeyRegisterFinishRequest>,
+) -> impl IntoResponse {
+    let Some(ref wa) = state.webauthn_state else {
+        return (StatusCode::NOT_IMPLEMENTED, "passkeys not configured").into_response();
+    };
+
+    let passkey = match wa.finish_registration(&body.challenge_id, &body.credential) {
+        Ok(pk) => pk,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+
+    let cred_id = passkey.cred_id().as_ref();
+    let data = match serde_json::to_vec(&passkey) {
+        Ok(d) => d,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+
+    let name = if body.name.trim().is_empty() {
+        "Passkey"
+    } else {
+        body.name.trim()
+    };
+
+    match state
+        .credential_store
+        .store_passkey(cred_id, name, &data)
+        .await
+    {
+        Ok(id) => Json(serde_json::json!({ "id": id })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+// ── Passkey authentication (no session required) ─────────────────────────────
+
+async fn passkey_auth_begin_handler(
+    State(state): State<AuthState>,
+) -> impl IntoResponse {
+    let Some(ref wa) = state.webauthn_state else {
+        return (StatusCode::NOT_IMPLEMENTED, "passkeys not configured").into_response();
+    };
+
+    let passkeys = match crate::auth_webauthn::load_passkeys(&state.credential_store).await {
+        Ok(pks) => pks,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+
+    match wa.start_authentication(&passkeys) {
+        Ok((challenge_id, rcr)) => Json(serde_json::json!({
+            "challenge_id": challenge_id,
+            "options": rcr,
+        }))
+        .into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct PasskeyAuthFinishRequest {
+    challenge_id: String,
+    credential: webauthn_rs::prelude::PublicKeyCredential,
+}
+
+async fn passkey_auth_finish_handler(
+    State(state): State<AuthState>,
+    Json(body): Json<PasskeyAuthFinishRequest>,
+) -> impl IntoResponse {
+    let Some(ref wa) = state.webauthn_state else {
+        return (StatusCode::NOT_IMPLEMENTED, "passkeys not configured").into_response();
+    };
+
+    match wa.finish_authentication(&body.challenge_id, &body.credential) {
+        Ok(_result) => match state.credential_store.create_session().await {
+            Ok(token) => session_response(token),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        },
+        Err(e) => (StatusCode::UNAUTHORIZED, e.to_string()).into_response(),
+    }
+}
+
+fn extract_session_token<'a>(headers: &'a axum::http::HeaderMap) -> Option<&'a str> {
+    let cookie_header = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())?;
+    crate::auth_middleware::parse_cookie(cookie_header, SESSION_COOKIE)
+}

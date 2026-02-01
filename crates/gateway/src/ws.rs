@@ -90,62 +90,79 @@ pub async fn handle_connection(
     }
 
     // ── Auth validation ──────────────────────────────────────────────────
-    // If auth is configured (token or password set), validate credentials.
     let is_loopback = auth::is_loopback(&remote_ip);
-    let has_auth_configured = state.auth.token.is_some() || state.auth.password.is_some();
 
-    let (role, scopes) = if has_auth_configured && !is_loopback {
-        let provided_token = params.auth.as_ref().and_then(|a| a.token.as_deref());
-        let provided_password = params.auth.as_ref().and_then(|a| a.password.as_deref());
-        let auth_result = auth::authorize_connect(
-            &state.auth,
-            provided_token,
-            provided_password,
-            Some(&remote_ip),
-        );
+    // Try credential-store auth first (API key, password hash), then fall
+    // back to legacy env-var auth.
+    let mut authenticated = is_loopback;
 
-        if !auth_result.ok {
-            warn!(
-                conn_id = %conn_id,
-                reason = auth_result.reason.as_deref().unwrap_or("unknown"),
-                "ws: auth failed"
-            );
-            let err = ResponseFrame::err(
-                &request_id,
-                ErrorShape::new(error_codes::INVALID_REQUEST, "authentication failed"),
-            );
-            let _ = client_tx.send(serde_json::to_string(&err).unwrap());
-            drop(client_tx);
-            write_handle.abort();
-            return;
+    if !authenticated {
+        if let Some(ref cred_store) = state.credential_store {
+            if cred_store.is_setup_complete() {
+                // Check API key.
+                if let Some(ref api_key) = params.auth.as_ref().and_then(|a| a.api_key.clone()) {
+                    if cred_store.verify_api_key(api_key).await.unwrap_or(false) {
+                        authenticated = true;
+                    }
+                }
+                // Check password against DB hash.
+                if !authenticated {
+                    if let Some(ref pw) = params.auth.as_ref().and_then(|a| a.password.clone()) {
+                        if cred_store.verify_password(pw).await.unwrap_or(false) {
+                            authenticated = true;
+                        }
+                    }
+                }
+            } else {
+                // Setup not complete yet — allow all connections.
+                authenticated = true;
+            }
         }
+    }
 
-        // Use role/scopes from connect params, defaulting sensibly.
-        let role = params.role.clone().unwrap_or_else(|| "operator".into());
-        let scopes = params.scopes.clone().unwrap_or_else(|| {
-            vec![
-                "operator.admin".into(),
-                "operator.read".into(),
-                "operator.write".into(),
-                "operator.approvals".into(),
-                "operator.pairing".into(),
-            ]
-        });
-        (role, scopes)
-    } else {
-        // No auth configured or loopback — grant full access.
-        let role = params.role.clone().unwrap_or_else(|| "operator".into());
-        let scopes = params.scopes.clone().unwrap_or_else(|| {
-            vec![
-                "operator.admin".into(),
-                "operator.read".into(),
-                "operator.write".into(),
-                "operator.approvals".into(),
-                "operator.pairing".into(),
-            ]
-        });
-        (role, scopes)
-    };
+    // Fall back to legacy env-var auth if credential store didn't authenticate.
+    if !authenticated {
+        let has_legacy_auth = state.auth.token.is_some() || state.auth.password.is_some();
+        if has_legacy_auth {
+            let provided_token = params.auth.as_ref().and_then(|a| a.token.as_deref());
+            let provided_password = params.auth.as_ref().and_then(|a| a.password.as_deref());
+            let auth_result = auth::authorize_connect(
+                &state.auth,
+                provided_token,
+                provided_password,
+                Some(&remote_ip),
+            );
+            if auth_result.ok {
+                authenticated = true;
+            }
+        } else if state.credential_store.is_none() {
+            // No auth configured at all — grant access (backward compat).
+            authenticated = true;
+        }
+    }
+
+    if !authenticated {
+        warn!(conn_id = %conn_id, "ws: auth failed");
+        let err = ResponseFrame::err(
+            &request_id,
+            ErrorShape::new(error_codes::INVALID_REQUEST, "authentication failed"),
+        );
+        let _ = client_tx.send(serde_json::to_string(&err).unwrap());
+        drop(client_tx);
+        write_handle.abort();
+        return;
+    }
+
+    let role = params.role.clone().unwrap_or_else(|| "operator".into());
+    let scopes = params.scopes.clone().unwrap_or_else(|| {
+        vec![
+            "operator.admin".into(),
+            "operator.read".into(),
+            "operator.write".into(),
+            "operator.approvals".into(),
+            "operator.pairing".into(),
+        ]
+    });
 
     // Build HelloOk with auth info.
     let hello_auth = HelloAuth {
