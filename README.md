@@ -204,6 +204,8 @@ Moltis applies defense in depth across several layers:
   `Display`, and zeroes memory on drop. Environment variable values injected
   into sandbox sessions are redacted from command output (including base64 and
   hex encoded forms).
+- **No unsafe code** — `unsafe_code` is denied workspace-wide. The only
+  exception is an opt-in FFI wrapper behind the `local-embeddings` feature flag.
 - **Hook gating** — `BeforeToolCall` hooks can inspect, modify, or block any
   tool invocation before it executes, giving you a programmable policy layer
   over what the agent is allowed to do.
