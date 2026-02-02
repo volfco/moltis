@@ -839,15 +839,14 @@ pub async fn start_gateway(
                     tracing::warn!("memory migration failed: {e}");
                     None
                 } else {
-                    let cwd = std::env::current_dir().unwrap_or_default();
-                    let home_memory = directories::ProjectDirs::from("", "", "moltis")
-                        .map(|d| d.data_dir().join("memory"))
-                        .unwrap_or_else(|| std::path::PathBuf::from(".moltis/memory"));
-                    let workspace_memory = cwd.join("memory");
+                    // Scan the data directory for memory files written by the
+                    // silent memory turn (MEMORY.md, memory/*.md).
+                    let data_memory_root = data_dir.clone();
+                    let data_memory_sub = data_dir.join("memory");
 
                     let config = moltis_memory::config::MemoryConfig {
                         db_path: memory_db_path.to_string_lossy().into(),
-                        memory_dirs: vec![workspace_memory, home_memory],
+                        memory_dirs: vec![data_memory_root, data_memory_sub],
                         ..Default::default()
                     };
 

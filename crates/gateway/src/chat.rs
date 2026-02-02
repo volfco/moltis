@@ -657,11 +657,16 @@ impl ChatService for LiveChatService {
         }
 
         // Run silent memory turn before summarization — saves important memories to disk.
+        // Write into the data directory (e.g. ~/.moltis/) so files don't end up in cwd.
         if let Some(ref mm) = self.state.memory_manager {
-            let cwd = std::env::current_dir().unwrap_or_default();
+            let memory_dir = moltis_config::data_dir();
             if let Ok(provider) = self.resolve_provider(&session_key, &history).await {
-                match moltis_agents::silent_turn::run_silent_memory_turn(provider, &history, &cwd)
-                    .await
+                match moltis_agents::silent_turn::run_silent_memory_turn(
+                    provider,
+                    &history,
+                    &memory_dir,
+                )
+                .await
                 {
                     Ok(paths) => {
                         for path in &paths {

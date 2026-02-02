@@ -353,6 +353,30 @@ Rules:
 - **RwLock guards**: when a `RwLock<Option<Secret<String>>>` read guard is
   followed by a write in the same function, scope the read guard in a block
   `{ let guard = lock.read().await; ... }` to avoid deadlocks.
+
+## Data and Config Directories
+
+Moltis uses two directories, **never** the current working directory:
+
+- **Config dir** (`moltis_config::config_dir()`) — `~/.moltis/` by default.
+  Contains `moltis.toml`, `credentials.json`, `mcp-servers.json`.
+  Overridable via `--config-dir` or `MOLTIS_CONFIG_DIR`.
+- **Data dir** (`moltis_config::data_dir()`) — `~/.moltis/` by default.
+  Contains `moltis.db`, `memory.db`, `sessions/`, `logs.jsonl`,
+  `MEMORY.md`, `memory/*.md`.
+  Overridable via `--data-dir` or `MOLTIS_DATA_DIR`.
+
+**Rules:**
+- **Never use `std::env::current_dir()`** to resolve paths for persistent
+  storage (databases, memory files, config). Always use `data_dir()` or
+  `config_dir()`. Writing to cwd leaks files into the user's repo.
+- When a function needs a storage path, pass `data_dir` explicitly or call
+  `moltis_config::data_dir()`. Don't assume the process was started from a
+  specific directory.
+- The gateway's `run()` function resolves `data_dir` once at startup
+  (`server.rs`) and threads it through. Prefer using that resolved value
+  over calling `data_dir()` repeatedly.
+
 ## Provider Implementation Guidelines
 
 ### Async all the way down
