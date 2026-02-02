@@ -832,8 +832,8 @@ function SecuritySection() {
 
 		${
 			localhostOnly && !hasPassword
-				? html`<div style="max-width:600px;padding:10px 14px;border-radius:6px;font-size:.78rem;line-height:1.5;background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.2);color:var(--text);">
-					<span style="font-weight:500;color:var(--accent);">Note:</span>${" "}
+				? html`<div class="alert-info-text max-w-form">
+					<span class="alert-label-info">Note:</span>${" "}
 					Moltis is running on localhost, so you have full access without a password.
 					Set a password before exposing moltis to the network.
 				</div>`

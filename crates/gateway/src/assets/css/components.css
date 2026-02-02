@@ -724,6 +724,50 @@
     margin-bottom: 0.75rem;
   }
 
+  /* Simple text alerts (no icon) */
+  .alert-warning-text,
+  .alert-error-text {
+    padding: 10px 14px;
+    border-radius: var(--radius-sm);
+    font-size: 0.78rem;
+    line-height: 1.5;
+    color: var(--text);
+  }
+
+  .alert-warning-text {
+    background: color-mix(in srgb, var(--warn) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--warn) 25%, transparent);
+  }
+
+  .alert-info-text {
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+  }
+
+  .alert-error-text {
+    background: color-mix(in srgb, var(--error) 6%, transparent);
+    border: 1px solid color-mix(in srgb, var(--error) 20%, transparent);
+  }
+
+  .alert-error-text pre {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    line-height: 1.4;
+    color: var(--error);
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-x: auto;
+    max-height: 300px;
+    overflow-y: auto;
+  }
+
+  .alert-label-warn { font-weight: 500; color: var(--warn); }
+  .alert-label-info { font-weight: 500; color: var(--accent); }
+
+  /* Max width for form-like sections */
+  .max-w-form { max-width: 600px; }
+
   .settings-alert-error {
     background: color-mix(in srgb, var(--error) 12%, transparent);
     border: 1px solid color-mix(in srgb, var(--error) 30%, transparent);
