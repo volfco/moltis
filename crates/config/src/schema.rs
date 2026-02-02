@@ -208,6 +208,13 @@ pub struct ToolsConfig {
     pub exec: ExecConfig,
     pub policy: ToolPolicyConfig,
     pub web: WebConfig,
+    /// Maximum wall-clock seconds for an agent run (0 = no timeout). Default 600.
+    #[serde(default = "default_agent_timeout_secs")]
+    pub agent_timeout_secs: u64,
+}
+
+fn default_agent_timeout_secs() -> u64 {
+    600
 }
 
 /// Web tools configuration (search, fetch).

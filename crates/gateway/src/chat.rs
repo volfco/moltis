@@ -551,43 +551,87 @@ impl ChatService for LiveChatService {
             .await
             .expect("session semaphore closed unexpectedly");
 
+        let agent_timeout_secs = moltis_config::discover_and_load().tools.agent_timeout_secs;
+
         let handle = tokio::spawn(async move {
             let _permit = permit; // hold permit until task completes
             let ctx_ref = project_context.as_deref();
             let stats_ref = Some(session_stats.as_str());
-            let assistant_text = if stream_only {
-                run_streaming(
-                    &state,
-                    &run_id_clone,
-                    provider,
-                    &text,
-                    &provider_name,
-                    &history,
-                    &session_key_clone,
-                    ctx_ref,
-                    stats_ref,
-                    user_message_index,
-                    &discovered_skills,
+            let agent_fut = async {
+                if stream_only {
+                    run_streaming(
+                        &state,
+                        &run_id_clone,
+                        provider,
+                        &text,
+                        &provider_name,
+                        &history,
+                        &session_key_clone,
+                        ctx_ref,
+                        stats_ref,
+                        user_message_index,
+                        &discovered_skills,
+                    )
+                    .await
+                } else {
+                    run_with_tools(
+                        &state,
+                        &run_id_clone,
+                        provider,
+                        &tool_registry,
+                        &text,
+                        &provider_name,
+                        &history,
+                        &session_key_clone,
+                        ctx_ref,
+                        stats_ref,
+                        user_message_index,
+                        &discovered_skills,
+                        hook_registry,
+                        accept_language.clone(),
+                    )
+                    .await
+                }
+            };
+
+            let assistant_text = if agent_timeout_secs > 0 {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(agent_timeout_secs),
+                    agent_fut,
                 )
                 .await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        warn!(
+                            run_id = %run_id_clone,
+                            session = %session_key_clone,
+                            timeout_secs = agent_timeout_secs,
+                            "agent run timed out"
+                        );
+                        let error_obj = serde_json::json!({
+                            "type": "timeout",
+                            "message": format!(
+                                "Agent run timed out after {agent_timeout_secs}s"
+                            ),
+                        });
+                        broadcast(
+                            &state,
+                            "chat",
+                            serde_json::json!({
+                                "runId": run_id_clone,
+                                "sessionKey": session_key_clone,
+                                "state": "error",
+                                "error": error_obj,
+                            }),
+                            BroadcastOpts::default(),
+                        )
+                        .await;
+                        None
+                    },
+                }
             } else {
-                run_with_tools(
-                    &state,
-                    &run_id_clone,
-                    provider,
-                    &tool_registry,
-                    &text,
-                    &provider_name,
-                    &history,
-                    &session_key_clone,
-                    ctx_ref,
-                    stats_ref,
-                    user_message_index,
-                    &discovered_skills,
-                    hook_registry,
-                    accept_language.clone(),
-                )
-                .await
+                agent_fut.await
             };
 
             // Persist assistant response.
@@ -1475,5 +1519,46 @@ mod tests {
         .await
         .expect("permit should be available after abort")
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn agent_timeout_cancels_slow_future() {
+        use std::time::Duration;
+
+        let timeout_secs: u64 = 1;
+        let slow_fut = async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Some(("done".to_string(), 0u32, 0u32))
+        };
+
+        let result: Option<(String, u32, u32)> =
+            match tokio::time::timeout(Duration::from_secs(timeout_secs), slow_fut).await {
+                Ok(r) => r,
+                Err(_) => None,
+            };
+
+        assert!(
+            result.is_none(),
+            "slow future should have been cancelled by timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_timeout_zero_means_no_timeout() {
+        use std::time::Duration;
+
+        let timeout_secs: u64 = 0;
+        let fast_fut = async { Some(("ok".to_string(), 10u32, 5u32)) };
+
+        let result = if timeout_secs > 0 {
+            match tokio::time::timeout(Duration::from_secs(timeout_secs), fast_fut).await {
+                Ok(r) => r,
+                Err(_) => None,
+            }
+        } else {
+            fast_fut.await
+        };
+
+        assert_eq!(result, Some(("ok".to_string(), 10, 5)));
     }
 }

@@ -17,6 +17,8 @@ multiple LLM providers and communication channels, inspired by
 - **Web gateway** — HTTP and WebSocket server with a built-in web UI
 - **Session persistence** — SQLite-backed conversation history, session
   management, and per-session run serialization to prevent history corruption
+- **Agent-level timeout** — configurable wall-clock timeout for agent runs
+  (default 600s) to prevent runaway executions
 - **Memory and knowledge base** — embeddings-powered long-term memory
 - **Skills and plugins** — extensible skill system and plugin architecture
 - **Hook system** — lifecycle hooks with priority ordering, parallel dispatch
