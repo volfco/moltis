@@ -500,7 +500,7 @@ function EnvironmentSection() {
 									<div class="provider-item-name" style="font-family:var(--font-mono);font-size:.8rem;">${v.key}</div>
 									<div style="font-size:.7rem;color:var(--muted);margin-top:2px;display:flex;gap:12px;">
 										<span>\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022</span>
-										<span>${v.updated_at}</span>
+										<time datetime=${v.updated_at}>${v.updated_at}</time>
 									</div>
 								</div>
 								<div style="display:flex;gap:4px;">
