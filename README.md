@@ -1,7 +1,6 @@
 # Moltis
 
 [![CI](https://github.com/penso/moltis/actions/workflows/ci.yml/badge.svg)](https://github.com/penso/moltis/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/moltis.svg)](https://crates.io/crates/moltis)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://www.rust-lang.org)
 
@@ -12,8 +11,8 @@ build it and run it.
 ## Installation
 
 ```bash
-# Using cargo-binstall (recommended — downloads a pre-built binary)
-cargo binstall moltis-cli
+# macOS / Linux via Homebrew
+brew install penso/tap/moltis
 
 # Or build from source
 cargo install moltis-cli --git https://github.com/penso/moltis
