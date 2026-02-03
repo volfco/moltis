@@ -574,13 +574,17 @@ function renderLocalModelSelection(provider, sysInfo, modelsData) {
 	// Search handler
 	var doSearch = async () => {
 		var query = searchInput.value.trim();
-		searchResults.innerHTML = '<div class="text-xs text-[var(--muted)] py-2">Searching...</div>';
+		if (!query) return;
+		searchBtn.disabled = true;
+		searchBtn.textContent = "Searching...";
+		searchResults.innerHTML = "";
 		var res = await sendRpc("providers.local.search_hf", {
 			query: query,
 			backend: selectedBackend,
 			limit: 15,
 		});
-		searchResults.innerHTML = "";
+		searchBtn.disabled = false;
+		searchBtn.textContent = "Search";
 		if (!(res?.ok && res.payload?.results?.length)) {
 			searchResults.innerHTML = '<div class="text-xs text-[var(--muted)] py-2">No results found</div>';
 			return;
