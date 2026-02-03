@@ -481,6 +481,10 @@ function renderLocalModelSelection(provider, sysInfo, modelsData) {
 					// Select this card
 					card.classList.add("selected");
 					selectedBackend = b.id;
+					// Re-render models for new backend
+					if (wrapper._renderModelsForBackend) {
+						wrapper._renderModelsForBackend(b.id);
+					}
 				});
 			}
 
@@ -505,12 +509,31 @@ function renderLocalModelSelection(provider, sysInfo, modelsData) {
 
 	var modelsList = document.createElement("div");
 	modelsList.className = "flex flex-col gap-2 max-h-64 overflow-y-auto";
+	modelsList.id = "local-model-list";
 
-	var recommended = modelsData.recommended || [];
-	recommended.forEach((model) => {
-		var card = createModelCard(model, provider);
-		modelsList.appendChild(card);
-	});
+	// Helper to render models filtered by backend
+	function renderModelsForBackend(backend) {
+		modelsList.innerHTML = "";
+		var recommended = modelsData.recommended || [];
+		var filtered = recommended.filter((m) => m.backend === backend);
+		if (filtered.length === 0) {
+			var empty = document.createElement("div");
+			empty.className = "text-xs text-[var(--muted)] py-4 text-center";
+			empty.textContent = `No models available for ${backend}`;
+			modelsList.appendChild(empty);
+			return;
+		}
+		filtered.forEach((model) => {
+			var card = createModelCard(model, provider);
+			modelsList.appendChild(card);
+		});
+	}
+
+	// Initial render with selected backend
+	renderModelsForBackend(selectedBackend);
+
+	// Store render function for backend card click handlers
+	wrapper._renderModelsForBackend = renderModelsForBackend;
 
 	wrapper.appendChild(modelsList);
 

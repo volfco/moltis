@@ -1,4 +1,4 @@
-//! Model registry for local GGUF models.
+//! Model registry for local LLM models (GGUF and MLX).
 //!
 //! Defines available models with HuggingFace URLs, memory requirements,
 //! and chat template hints.
@@ -18,7 +18,25 @@ pub struct DownloadProgress {
     pub total: Option<u64>,
 }
 
-/// Definition of a GGUF model in the registry.
+/// Backend type for local models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelBackend {
+    /// GGUF format (llama.cpp)
+    Gguf,
+    /// MLX format (Apple Silicon native)
+    Mlx,
+}
+
+impl std::fmt::Display for ModelBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ModelBackend::Gguf => write!(f, "GGUF"),
+            ModelBackend::Mlx => write!(f, "MLX"),
+        }
+    }
+}
+
+/// Definition of a local LLM model in the registry.
 #[derive(Debug, Clone)]
 pub struct GgufModelDef {
     /// Model identifier (e.g., "qwen2.5-coder-7b-q4_k_m").
@@ -27,7 +45,7 @@ pub struct GgufModelDef {
     pub display_name: &'static str,
     /// HuggingFace repository (e.g., "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF").
     pub hf_repo: &'static str,
-    /// Filename in the repository.
+    /// Filename in the repository (for GGUF) or empty for MLX (uses whole repo).
     pub hf_filename: &'static str,
     /// Minimum RAM required in GB.
     pub min_ram_gb: u32,
@@ -35,6 +53,8 @@ pub struct GgufModelDef {
     pub context_window: u32,
     /// Chat template hint for formatting messages.
     pub chat_template: ChatTemplateHint,
+    /// Backend type (GGUF or MLX).
+    pub backend: ModelBackend,
 }
 
 impl GgufModelDef {
@@ -48,10 +68,13 @@ impl GgufModelDef {
     }
 }
 
-/// Model registry — all known GGUF models organized by memory tier.
+/// Model registry — all known local LLM models organized by backend and memory tier.
 ///
 /// Models are listed in recommended order within each tier.
 pub static MODEL_REGISTRY: &[GgufModelDef] = &[
+    // ════════════════════════════════════════════════════════════════════════
+    // GGUF Models (llama.cpp)
+    // ════════════════════════════════════════════════════════════════════════
     // ── 4GB tier (Tiny) ────────────────────────────────────────────────────
     GgufModelDef {
         id: "qwen2.5-coder-1.5b-q4_k_m",
@@ -61,6 +84,7 @@ pub static MODEL_REGISTRY: &[GgufModelDef] = &[
         min_ram_gb: 4,
         context_window: 32_768,
         chat_template: ChatTemplateHint::ChatML,
+        backend: ModelBackend::Gguf,
     },
     GgufModelDef {
         id: "llama-3.2-1b-q4_k_m",
@@ -70,6 +94,7 @@ pub static MODEL_REGISTRY: &[GgufModelDef] = &[
         min_ram_gb: 4,
         context_window: 128_000,
         chat_template: ChatTemplateHint::Llama3,
+        backend: ModelBackend::Gguf,
     },
     // ── 8GB tier (Small) ───────────────────────────────────────────────────
     GgufModelDef {
@@ -80,6 +105,7 @@ pub static MODEL_REGISTRY: &[GgufModelDef] = &[
         min_ram_gb: 8,
         context_window: 32_768,
         chat_template: ChatTemplateHint::ChatML,
+        backend: ModelBackend::Gguf,
     },
     GgufModelDef {
         id: "llama-3.2-3b-q4_k_m",
@@ -89,6 +115,7 @@ pub static MODEL_REGISTRY: &[GgufModelDef] = &[
         min_ram_gb: 8,
         context_window: 128_000,
         chat_template: ChatTemplateHint::Llama3,
+        backend: ModelBackend::Gguf,
     },
     GgufModelDef {
         id: "deepseek-coder-6.7b-q4_k_m",
@@ -98,6 +125,7 @@ pub static MODEL_REGISTRY: &[GgufModelDef] = &[
         min_ram_gb: 8,
         context_window: 16_384,
         chat_template: ChatTemplateHint::DeepSeek,
+        backend: ModelBackend::Gguf,
     },
     // ── 16GB tier (Medium) ─────────────────────────────────────────────────
     GgufModelDef {
@@ -108,6 +136,7 @@ pub static MODEL_REGISTRY: &[GgufModelDef] = &[
         min_ram_gb: 16,
         context_window: 32_768,
         chat_template: ChatTemplateHint::ChatML,
+        backend: ModelBackend::Gguf,
     },
     GgufModelDef {
         id: "codestral-22b-q4_k_m",
@@ -117,6 +146,7 @@ pub static MODEL_REGISTRY: &[GgufModelDef] = &[
         min_ram_gb: 16,
         context_window: 32_768,
         chat_template: ChatTemplateHint::Mistral,
+        backend: ModelBackend::Gguf,
     },
     GgufModelDef {
         id: "mistral-7b-q5_k_m",
@@ -126,6 +156,7 @@ pub static MODEL_REGISTRY: &[GgufModelDef] = &[
         min_ram_gb: 12,
         context_window: 32_768,
         chat_template: ChatTemplateHint::Mistral,
+        backend: ModelBackend::Gguf,
     },
     GgufModelDef {
         id: "llama-3.1-8b-q4_k_m",
@@ -135,6 +166,7 @@ pub static MODEL_REGISTRY: &[GgufModelDef] = &[
         min_ram_gb: 12,
         context_window: 128_000,
         chat_template: ChatTemplateHint::Llama3,
+        backend: ModelBackend::Gguf,
     },
     // ── 32GB tier (Large) ──────────────────────────────────────────────────
     GgufModelDef {
@@ -145,6 +177,7 @@ pub static MODEL_REGISTRY: &[GgufModelDef] = &[
         min_ram_gb: 32,
         context_window: 32_768,
         chat_template: ChatTemplateHint::ChatML,
+        backend: ModelBackend::Gguf,
     },
     GgufModelDef {
         id: "deepseek-coder-33b-q4_k_m",
@@ -154,6 +187,7 @@ pub static MODEL_REGISTRY: &[GgufModelDef] = &[
         min_ram_gb: 32,
         context_window: 16_384,
         chat_template: ChatTemplateHint::DeepSeek,
+        backend: ModelBackend::Gguf,
     },
     GgufModelDef {
         id: "llama-3.1-70b-q2_k",
@@ -163,6 +197,104 @@ pub static MODEL_REGISTRY: &[GgufModelDef] = &[
         min_ram_gb: 48,
         context_window: 128_000,
         chat_template: ChatTemplateHint::Llama3,
+        backend: ModelBackend::Gguf,
+    },
+    // ════════════════════════════════════════════════════════════════════════
+    // MLX Models (Apple Silicon native)
+    // ════════════════════════════════════════════════════════════════════════
+    // ── 4GB tier (Tiny) ────────────────────────────────────────────────────
+    GgufModelDef {
+        id: "mlx-qwen2.5-coder-1.5b-4bit",
+        display_name: "Qwen 2.5 Coder 1.5B (4-bit MLX)",
+        hf_repo: "mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit",
+        hf_filename: "",
+        min_ram_gb: 4,
+        context_window: 32_768,
+        chat_template: ChatTemplateHint::ChatML,
+        backend: ModelBackend::Mlx,
+    },
+    GgufModelDef {
+        id: "mlx-llama-3.2-1b-4bit",
+        display_name: "Llama 3.2 1B (4-bit MLX)",
+        hf_repo: "mlx-community/Llama-3.2-1B-Instruct-4bit",
+        hf_filename: "",
+        min_ram_gb: 4,
+        context_window: 128_000,
+        chat_template: ChatTemplateHint::Llama3,
+        backend: ModelBackend::Mlx,
+    },
+    // ── 8GB tier (Small) ───────────────────────────────────────────────────
+    GgufModelDef {
+        id: "mlx-qwen2.5-coder-7b-4bit",
+        display_name: "Qwen 2.5 Coder 7B (4-bit MLX)",
+        hf_repo: "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+        hf_filename: "",
+        min_ram_gb: 8,
+        context_window: 32_768,
+        chat_template: ChatTemplateHint::ChatML,
+        backend: ModelBackend::Mlx,
+    },
+    GgufModelDef {
+        id: "mlx-llama-3.2-3b-4bit",
+        display_name: "Llama 3.2 3B (4-bit MLX)",
+        hf_repo: "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        hf_filename: "",
+        min_ram_gb: 8,
+        context_window: 128_000,
+        chat_template: ChatTemplateHint::Llama3,
+        backend: ModelBackend::Mlx,
+    },
+    // ── 16GB tier (Medium) ─────────────────────────────────────────────────
+    GgufModelDef {
+        id: "mlx-qwen2.5-coder-14b-4bit",
+        display_name: "Qwen 2.5 Coder 14B (4-bit MLX)",
+        hf_repo: "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit",
+        hf_filename: "",
+        min_ram_gb: 16,
+        context_window: 32_768,
+        chat_template: ChatTemplateHint::ChatML,
+        backend: ModelBackend::Mlx,
+    },
+    GgufModelDef {
+        id: "mlx-mistral-7b-4bit",
+        display_name: "Mistral 7B Instruct (4-bit MLX)",
+        hf_repo: "mlx-community/Mistral-7B-Instruct-v0.3-4bit",
+        hf_filename: "",
+        min_ram_gb: 8,
+        context_window: 32_768,
+        chat_template: ChatTemplateHint::Mistral,
+        backend: ModelBackend::Mlx,
+    },
+    GgufModelDef {
+        id: "mlx-llama-3.1-8b-4bit",
+        display_name: "Llama 3.1 8B (4-bit MLX)",
+        hf_repo: "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
+        hf_filename: "",
+        min_ram_gb: 8,
+        context_window: 128_000,
+        chat_template: ChatTemplateHint::Llama3,
+        backend: ModelBackend::Mlx,
+    },
+    // ── 32GB tier (Large) ──────────────────────────────────────────────────
+    GgufModelDef {
+        id: "mlx-qwen2.5-coder-32b-4bit",
+        display_name: "Qwen 2.5 Coder 32B (4-bit MLX)",
+        hf_repo: "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit",
+        hf_filename: "",
+        min_ram_gb: 32,
+        context_window: 32_768,
+        chat_template: ChatTemplateHint::ChatML,
+        backend: ModelBackend::Mlx,
+    },
+    GgufModelDef {
+        id: "mlx-llama-3.1-70b-4bit",
+        display_name: "Llama 3.1 70B (4-bit MLX)",
+        hf_repo: "mlx-community/Meta-Llama-3.1-70B-Instruct-4bit",
+        hf_filename: "",
+        min_ram_gb: 48,
+        context_window: 128_000,
+        chat_template: ChatTemplateHint::Llama3,
+        backend: ModelBackend::Mlx,
     },
 ];
 
@@ -172,7 +304,7 @@ pub fn find_model(id: &str) -> Option<&'static GgufModelDef> {
     MODEL_REGISTRY.iter().find(|m| m.id == id)
 }
 
-/// Get models suitable for a given memory tier.
+/// Get models suitable for a given memory tier (all backends).
 #[must_use]
 pub fn models_for_tier(tier: MemoryTier) -> Vec<&'static GgufModelDef> {
     let max_ram = match tier {
@@ -187,11 +319,39 @@ pub fn models_for_tier(tier: MemoryTier) -> Vec<&'static GgufModelDef> {
         .collect()
 }
 
-/// Suggest the best model for a memory tier.
+/// Get models suitable for a given memory tier and backend.
+#[must_use]
+pub fn models_for_tier_and_backend(
+    tier: MemoryTier,
+    backend: ModelBackend,
+) -> Vec<&'static GgufModelDef> {
+    let max_ram = match tier {
+        MemoryTier::Tiny => 4,
+        MemoryTier::Small => 8,
+        MemoryTier::Medium => 16,
+        MemoryTier::Large => u32::MAX,
+    };
+    MODEL_REGISTRY
+        .iter()
+        .filter(|m| m.min_ram_gb <= max_ram && m.backend == backend)
+        .collect()
+}
+
+/// Suggest the best model for a memory tier (all backends).
 #[must_use]
 pub fn suggest_model(tier: MemoryTier) -> Option<&'static GgufModelDef> {
     let models = models_for_tier(tier);
     // Return the last model that fits (usually the largest that works)
+    models.iter().copied().max_by_key(|m| m.min_ram_gb)
+}
+
+/// Suggest the best model for a memory tier and backend.
+#[must_use]
+pub fn suggest_model_for_backend(
+    tier: MemoryTier,
+    backend: ModelBackend,
+) -> Option<&'static GgufModelDef> {
+    let models = models_for_tier_and_backend(tier, backend);
     models.iter().copied().max_by_key(|m| m.min_ram_gb)
 }
 

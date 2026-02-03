@@ -216,6 +216,7 @@ impl LiveLocalLlmService {
             "contextWindow": model.context_window,
             "hfRepo": model.hf_repo,
             "suggested": is_suggested,
+            "backend": model.backend.to_string(),
         })
     }
 }
