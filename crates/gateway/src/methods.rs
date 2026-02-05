@@ -3050,4 +3050,91 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn identity_get_requires_read() {
+        // Read scope is sufficient for get
+        assert!(
+            authorize_method(
+                "agent.identity.get",
+                "operator",
+                &scopes(&["operator.read"])
+            )
+            .is_none()
+        );
+        // No scope → denied
+        assert!(authorize_method("agent.identity.get", "operator", &scopes(&[])).is_some());
+    }
+
+    #[test]
+    fn identity_update_requires_write() {
+        // Write scope → authorized
+        assert!(
+            authorize_method(
+                "agent.identity.update",
+                "operator",
+                &scopes(&["operator.write"])
+            )
+            .is_none()
+        );
+        // Read-only scope → denied (these methods modify config)
+        assert!(
+            authorize_method(
+                "agent.identity.update",
+                "operator",
+                &scopes(&["operator.read"])
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn identity_update_soul_requires_write() {
+        // Write scope → authorized
+        assert!(
+            authorize_method(
+                "agent.identity.update_soul",
+                "operator",
+                &scopes(&["operator.write"])
+            )
+            .is_none()
+        );
+        // Read-only scope → denied (these methods modify config)
+        assert!(
+            authorize_method(
+                "agent.identity.update_soul",
+                "operator",
+                &scopes(&["operator.read"])
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn cron_read_methods_require_read() {
+        for method in &["cron.list", "cron.status", "cron.runs"] {
+            assert!(
+                authorize_method(method, "operator", &scopes(&["operator.read"])).is_none(),
+                "read scope should authorize {method}"
+            );
+            assert!(
+                authorize_method(method, "operator", &scopes(&[])).is_some(),
+                "no scope should deny {method}"
+            );
+        }
+    }
+
+    #[test]
+    fn cron_write_methods_require_write() {
+        for method in &["cron.add", "cron.update", "cron.remove", "cron.run"] {
+            assert!(
+                authorize_method(method, "operator", &scopes(&["operator.write"])).is_none(),
+                "write scope should authorize {method}"
+            );
+            assert!(
+                authorize_method(method, "operator", &scopes(&["operator.read"])).is_some(),
+                "read-only scope should deny {method}"
+            );
+        }
+    }
 }
