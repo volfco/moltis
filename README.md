@@ -11,11 +11,11 @@ build it and run it.
 ## Installation
 
 ```bash
-# macOS / Linux via Homebrew
-brew install penso/tap/moltis
-
 # Docker (multi-arch: amd64/arm64)
 docker pull ghcr.io/penso/moltis:latest
+
+# macOS / Linux via Homebrew
+brew install penso/tap/moltis
 
 # Or build from source
 cargo install moltis-cli --git https://github.com/penso/moltis
@@ -132,6 +132,7 @@ in a container, you need to give it access to the host's container runtime.
 docker run -d \
   --name moltis \
   -p 13131:13131 \
+  -v moltis-config:/home/moltis/.config/moltis \
   -v moltis-data:/home/moltis/.moltis \
   -v /var/run/docker.sock:/var/run/docker.sock \
   ghcr.io/penso/moltis:latest
@@ -140,6 +141,7 @@ docker run -d \
 podman run -d \
   --name moltis \
   -p 13131:13131 \
+  -v moltis-config:/home/moltis/.config/moltis \
   -v moltis-data:/home/moltis/.moltis \
   -v /run/user/$(id -u)/podman/podman.sock:/var/run/docker.sock \
   ghcr.io/penso/moltis:latest
@@ -148,6 +150,7 @@ podman run -d \
 podman run -d \
   --name moltis \
   -p 13131:13131 \
+  -v moltis-config:/home/moltis/.config/moltis \
   -v moltis-data:/home/moltis/.moltis \
   -v /run/podman/podman.sock:/var/run/docker.sock \
   ghcr.io/penso/moltis:latest
@@ -170,8 +173,9 @@ Open `http://localhost:13131` in your browser and complete the setup.
   (`/run/user/$(id -u)/podman/podman.sock`) or rootful path
   (`/run/podman/podman.sock`) depending on your setup. You may need to enable
   the Podman socket service: `systemctl --user enable --now podman.socket`
-- **Data persistence** — Mount a volume to `/home/moltis/.moltis` to persist
-  configuration, sessions, and memory across container restarts.
+- **Persistence** — Mount volumes to preserve data across container restarts:
+  - `/home/moltis/.config/moltis` — configuration (moltis.toml, mcp-servers.json)
+  - `/home/moltis/.moltis` — data (databases, sessions, memory)
 
 ## How It Works
 

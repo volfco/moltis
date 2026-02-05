@@ -42,11 +42,11 @@ RUN useradd --create-home --user-group moltis && \
 COPY --from=builder /build/target/release/moltis /usr/local/bin/moltis
 
 # Create config and data directories
-RUN mkdir -p /home/moltis/.moltis && \
-    chown -R moltis:moltis /home/moltis/.moltis
+RUN mkdir -p /home/moltis/.config/moltis /home/moltis/.moltis && \
+    chown -R moltis:moltis /home/moltis/.config /home/moltis/.moltis
 
 # Volume mount points for persistence and container runtime
-VOLUME ["/home/moltis/.moltis", "/var/run/docker.sock"]
+VOLUME ["/home/moltis/.config/moltis", "/home/moltis/.moltis", "/var/run/docker.sock"]
 
 USER moltis
 WORKDIR /home/moltis
