@@ -76,7 +76,7 @@ jobs:
       - name: Build .deb package
         env:
           BUILD_TARGET: ${{ matrix.target }}
-        run: cargo deb -p moltis-cli --no-build --target "$BUILD_TARGET"
+        run: cargo deb -p moltis --no-build --target "$BUILD_TARGET"
 
       - name: Sign with Sigstore and generate checksums
         uses: ./.github/actions/sign-artifacts

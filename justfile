@@ -24,17 +24,17 @@ build-release:
 
 # Build Debian package for the current architecture
 deb: build-release
-    cargo deb -p moltis-cli --no-build
+    cargo deb -p moltis --no-build
 
 # Build Debian package for amd64
 deb-amd64:
     cargo build --release --target x86_64-unknown-linux-gnu
-    cargo deb -p moltis-cli --no-build --target x86_64-unknown-linux-gnu
+    cargo deb -p moltis --no-build --target x86_64-unknown-linux-gnu
 
 # Build Debian package for arm64
 deb-arm64:
     cargo build --release --target aarch64-unknown-linux-gnu
-    cargo deb -p moltis-cli --no-build --target aarch64-unknown-linux-gnu
+    cargo deb -p moltis --no-build --target aarch64-unknown-linux-gnu
 
 # Build Debian packages for all architectures
 deb-all: deb-amd64 deb-arm64

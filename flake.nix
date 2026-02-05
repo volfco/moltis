@@ -16,7 +16,7 @@
           pname = "moltis";
           version = "0.1.0";
           src = ./.;
-          cargoBuildFlags = [ "-p" "moltis-cli" ];
+          cargoBuildFlags = [ "-p" "moltis" ];
           cargoLock.lockFile = ./Cargo.lock;
 
           meta = with pkgs.lib; {

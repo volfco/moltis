@@ -3,7 +3,7 @@ description       = "Rust version of moltbot"
 edition.workspace = true
 homepage          = "https://www.moltis.org/"
 license           = "MIT"
-name              = "moltis-cli"
+name              = "moltis"
 repository        = "https://github.com/moltis-org/moltis"
 version.workspace = true
 
