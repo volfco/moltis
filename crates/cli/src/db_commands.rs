@@ -160,11 +160,10 @@ async fn run_migrations() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("cron migrations failed: {e}"))?;
     println!("  - cron migrations complete");
 
-    // Gateway's own migrations - we need to run them via sqlx::migrate!
-    // But that requires the migrations to be embedded at compile time.
-    // Instead, we'll call a function from moltis_gateway if available.
-    // For now, just note that gateway migrations need the gateway to run.
-    println!("  - gateway migrations: run `moltis gateway` to apply");
+    moltis_gateway::run_migrations(&pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("gateway migrations failed: {e}"))?;
+    println!("  - gateway migrations complete");
 
     pool.close().await;
 
@@ -260,6 +259,7 @@ mod tests {
         moltis_projects::run_migrations(&pool).await.unwrap();
         moltis_sessions::run_migrations(&pool).await.unwrap();
         moltis_cron::run_migrations(&pool).await.unwrap();
+        moltis_gateway::run_migrations(&pool).await.unwrap();
 
         // Verify tables were created by querying them
         let _: (i64,) = sqlx::query_as("SELECT count(*) FROM projects")
@@ -271,6 +271,10 @@ mod tests {
             .await
             .unwrap();
         let _: (i64,) = sqlx::query_as("SELECT count(*) FROM cron_jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let _: (i64,) = sqlx::query_as("SELECT count(*) FROM channels")
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -312,13 +316,17 @@ mod tests {
         let db_url = format!("sqlite:{}?mode=rwc", main_db.display());
         let pool = sqlx::SqlitePool::connect(&db_url).await.unwrap();
 
-        // Run migrations twice - should not error
+        // Run all migrations
         moltis_projects::run_migrations(&pool).await.unwrap();
         moltis_sessions::run_migrations(&pool).await.unwrap();
+        moltis_cron::run_migrations(&pool).await.unwrap();
+        moltis_gateway::run_migrations(&pool).await.unwrap();
 
         // Run again - should still work due to set_ignore_missing
         moltis_projects::run_migrations(&pool).await.unwrap();
         moltis_sessions::run_migrations(&pool).await.unwrap();
+        moltis_cron::run_migrations(&pool).await.unwrap();
+        moltis_gateway::run_migrations(&pool).await.unwrap();
 
         pool.close().await;
     }
