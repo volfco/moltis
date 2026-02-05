@@ -2,6 +2,7 @@
 //!
 //! This crate provides a unified metrics interface using the `metrics` crate facade.
 //! When the `prometheus` feature is enabled, metrics are exported in Prometheus format.
+//! When the `tracing` feature is enabled, span context is propagated to metrics labels.
 //!
 //! # Usage
 //!
@@ -17,10 +18,12 @@
 //! # Features
 //!
 //! - `prometheus`: Enable Prometheus metrics export via `/metrics` endpoint
+//! - `tracing`: Enable tracing span context propagation to metrics labels
 
 mod definitions;
 mod recorder;
 mod snapshot;
+pub mod tracing_integration;
 
 pub use {
     definitions::*,
