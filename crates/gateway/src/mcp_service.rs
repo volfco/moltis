@@ -895,6 +895,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
     fn parse_server_config_preserves_request_timeout_override() {
         let existing = moltis_mcp::McpServerConfig {
             command: "npx".to_string(),
