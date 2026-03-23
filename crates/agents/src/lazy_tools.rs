@@ -70,16 +70,17 @@ impl ToolSearchTool {
             .full_registry
             .get(name)
             .ok_or_else(|| format!("unknown tool: {name}"))?;
+        let source = self
+            .full_registry
+            .get_source(name)
+            .unwrap_or(ToolSource::Builtin);
 
         let schema = tool.parameters_schema();
         let description = tool.description().to_string();
 
-        // Insert into activated map.
+        // Insert into activated map, preserving the original source metadata.
         let mut activated = self.activated.lock().unwrap_or_else(|e| e.into_inner());
-        activated.insert(name.to_string(), ToolEntry {
-            tool,
-            source: ToolSource::Builtin,
-        });
+        activated.insert(name.to_string(), ToolEntry { tool, source });
 
         debug!(tool = name, "tool activated via tool_search");
 
@@ -148,9 +149,9 @@ impl AgentTool for ToolSearchTool {
                     "hint": "To use a tool, call tool_search again with `name` set to the exact tool name."
                 }))
             },
-            (None, None) => Ok(serde_json::json!({
-                "error": "Provide either `name` (to activate a tool) or `query` (to search)."
-            })),
+            (None, None) => Err(anyhow::anyhow!(
+                "Provide either `name` (to activate a tool) or `query` (to search)."
+            )),
         }
     }
 }
@@ -332,14 +333,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_params_returns_usage_hint() {
+    async fn no_params_returns_error() {
         let full = build_full_registry();
         let lazy = wrap_registry_lazy(full);
         let search_tool = lazy.get("tool_search").unwrap();
 
-        let result = search_tool.execute(serde_json::json!({})).await.unwrap();
+        let result = search_tool.execute(serde_json::json!({})).await;
 
-        assert!(result["error"].as_str().unwrap().contains("Provide either"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Provide either"));
     }
 
     #[tokio::test]

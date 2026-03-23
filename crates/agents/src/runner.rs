@@ -686,12 +686,11 @@ pub async fn run_agent_loop_with_context(
     let max_tool_result_bytes = config.tools.max_tool_result_bytes;
     let base_max_iterations = resolve_agent_max_iterations(config.tools.agent_max_iterations);
     // Lazy mode needs extra iterations for tool_search discovery round-trips.
-    let max_iterations =
-        if tools.has_activated_tools() || tools.list_names().contains(&"tool_search".to_string()) {
-            base_max_iterations * 3
-        } else {
-            base_max_iterations
-        };
+    let max_iterations = if config.tools.registry_mode == moltis_config::ToolRegistryMode::Lazy {
+        base_max_iterations * 3
+    } else {
+        base_max_iterations
+    };
 
     let is_multimodal = matches!(user_content, UserContent::Multimodal(_));
     info!(
@@ -1238,12 +1237,11 @@ pub async fn run_agent_loop_streaming(
     let max_tool_result_bytes = config.tools.max_tool_result_bytes;
     let base_max_iterations = resolve_agent_max_iterations(config.tools.agent_max_iterations);
     // Lazy mode needs extra iterations for tool_search discovery round-trips.
-    let max_iterations =
-        if tools.has_activated_tools() || tools.list_names().contains(&"tool_search".to_string()) {
-            base_max_iterations * 3
-        } else {
-            base_max_iterations
-        };
+    let max_iterations = if config.tools.registry_mode == moltis_config::ToolRegistryMode::Lazy {
+        base_max_iterations * 3
+    } else {
+        base_max_iterations
+    };
 
     let is_multimodal = matches!(user_content, UserContent::Multimodal(_));
     info!(

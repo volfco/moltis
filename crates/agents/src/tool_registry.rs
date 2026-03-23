@@ -134,9 +134,9 @@ impl ToolRegistry {
         activated.get(name).map(|e| Arc::clone(&e.tool))
     }
 
-    /// Return a cloned tool handle by name (checks static tools, then activated).
-    pub fn get_arc(&self, name: &str) -> Option<Arc<dyn AgentTool>> {
-        self.get(name)
+    /// Return the [`ToolSource`] for a tool by name.
+    pub(crate) fn get_source(&self, name: &str) -> Option<ToolSource> {
+        self.tools.get(name).map(|e| e.source.clone())
     }
 
     pub fn list_schemas(&self) -> Vec<serde_json::Value> {
@@ -162,12 +162,6 @@ impl ToolRegistry {
             }
         }
         names
-    }
-
-    /// Whether any tools have been activated at runtime via lazy discovery.
-    pub fn has_activated_tools(&self) -> bool {
-        let activated = self.activated.lock().unwrap_or_else(|e| e.into_inner());
-        !activated.is_empty()
     }
 
     /// Clone the registry, excluding tools whose names start with `prefix`.
@@ -461,13 +455,13 @@ mod tests {
     }
 
     #[test]
-    fn test_get_arc_returns_cloned_tool_handle() {
+    fn test_get_returns_cloned_tool_handle() {
         let mut registry = ToolRegistry::new();
         registry.register(Box::new(DummyTool {
             name: "exec".to_string(),
         }));
-        assert!(registry.get_arc("exec").is_some());
-        assert!(registry.get_arc("missing").is_none());
+        assert!(registry.get("exec").is_some());
+        assert!(registry.get("missing").is_none());
     }
 
     #[test]

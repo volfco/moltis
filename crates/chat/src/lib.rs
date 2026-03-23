@@ -5392,7 +5392,7 @@ async fn run_explicit_shell_command(
 
     let exec_tool = {
         let registry = tool_registry.read().await;
-        registry.get_arc("exec")
+        registry.get("exec")
     };
 
     let exec_result = match exec_tool {
