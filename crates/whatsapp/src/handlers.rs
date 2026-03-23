@@ -396,6 +396,13 @@ async fn handle_message(
             handle_location(&msg, account_id, reply_to, meta, chat_jid, state).await;
         },
         ChannelMessageKind::Other => {
+            warn!(
+                account_id = %state.account_id,
+                chat = %chat_jid,
+                "unhandled WhatsApp message type — replying with error. \
+                 Message fields present: {}",
+                describe_message_fields(&msg),
+            );
             let reply_msg = wa::Message {
                 conversation: Some(
                     "Sorry, I can't understand that message type. Check logs for details.".into(),
@@ -715,6 +722,44 @@ fn capitalize(s: &str) -> String {
 fn is_owner_user(jid: &Jid, own_pn: Option<&Jid>, own_lid: Option<&Jid>) -> bool {
     own_pn.is_some_and(|pn| pn.is_same_user_as(jid))
         || own_lid.is_some_and(|lid| lid.is_same_user_as(jid))
+}
+
+/// List which `Option` fields on `wa::Message` are `Some`, giving operators a
+/// concrete clue about the unhandled message type (e.g. "sticker_message, reaction_message").
+fn describe_message_fields(msg: &wa::Message) -> String {
+    let mut present = Vec::new();
+    macro_rules! check {
+        ($($field:ident),+ $(,)?) => {
+            $(if msg.$field.is_some() { present.push(stringify!($field)); })+
+        };
+    }
+    check!(
+        conversation,
+        sender_key_distribution_message,
+        image_message,
+        contact_message,
+        location_message,
+        extended_text_message,
+        document_message,
+        audio_message,
+        video_message,
+        call,
+        protocol_message,
+        contacts_array_message,
+        sticker_message,
+        live_location_message,
+        reaction_message,
+        poll_creation_message,
+        poll_update_message,
+        interactive_message,
+        edited_message,
+        event_message,
+    );
+    if present.is_empty() {
+        "none".to_owned()
+    } else {
+        present.join(", ")
+    }
 }
 
 /// Classify the inbound message kind based on its content.

@@ -581,6 +581,20 @@ reset_on_exit = true              # Reset serve/funnel when gateway shuts down
 # External messaging integrations.
 
 [channels]
+# Which channel types appear in the web UI's "+ Add Channel" menu.
+# Default: ["telegram", "discord", "slack"]
+# Add "whatsapp" or "msteams" to enable them in the UI.
+# offered = ["telegram", "discord", "slack", "whatsapp"]
+
+# WhatsApp linked-device accounts
+# [channels.whatsapp.my-bot]
+# dm_policy = "open"              # "open", "allowlist", or "disabled"
+# group_policy = "disabled"       # "open", "allowlist", or "disabled"
+# model = "anthropic/claude-sonnet-4-20250514"
+# model_provider = "anthropic"
+# otp_self_approval = true        # OTP self-approval for non-allowlisted DM users
+# otp_cooldown_secs = 300         # Cooldown after 3 failed OTP attempts
+
 # Telegram bots
 # [channels.telegram.my-bot]
 # token = "..."                   # Bot token from @BotFather
