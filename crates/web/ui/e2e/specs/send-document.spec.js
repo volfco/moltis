@@ -187,11 +187,13 @@ test.describe("send_document rendering", () => {
 			},
 		});
 
-		const docContainer = page.locator(".document-container").first();
-		await expect(docContainer).toBeVisible({ timeout: 5_000 });
+		// Session may already contain documents from prior tests in this file;
+		// locate the CSV document specifically by its filename.
+		const csvDoc = page.locator(".document-container", { has: page.locator('.document-filename:text-is("data.csv")') });
+		await expect(csvDoc).toBeVisible({ timeout: 10_000 });
 
 		// Document icon should be present
-		const iconEl = docContainer.locator(".document-icon");
+		const iconEl = csvDoc.locator(".document-icon");
 		await expect(iconEl).toBeVisible();
 		const iconText = await iconEl.textContent();
 		expect(iconText.length).toBeGreaterThan(0);

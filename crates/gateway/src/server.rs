@@ -1407,6 +1407,7 @@ pub async fn prepare_gateway_core(
                         args: entry.args.clone(),
                         env: entry.env.clone(),
                         enabled: entry.enabled,
+                        request_timeout_secs: entry.request_timeout_secs,
                         transport,
                         url: entry.url.clone().map(Secret::new),
                         headers: entry
@@ -1423,6 +1424,7 @@ pub async fn prepare_gateway_core(
         let mcp_manager = Arc::new(moltis_mcp::McpManager::new_with_env_overrides(
             merged,
             config_env_overrides.clone(),
+            std::time::Duration::from_secs(config.mcp.request_timeout_secs.max(1)),
         ));
         live_mcp = Arc::new(crate::mcp_service::LiveMcpService::new(
             Arc::clone(&mcp_manager),
@@ -3620,7 +3622,7 @@ pub async fn prepare_gateway_core(
         }
 
         let shared_tool_registry = Arc::new(tokio::sync::RwLock::new(tool_registry));
-        browser_tool_for_warmup = shared_tool_registry.read().await.get_arc("browser");
+        browser_tool_for_warmup = shared_tool_registry.read().await.get("browser");
         let mut chat_service = LiveChatService::new(
             Arc::clone(&registry),
             Arc::clone(&model_store),
