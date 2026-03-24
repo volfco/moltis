@@ -1124,7 +1124,11 @@ mod tests {
             identity: true,
             ..Default::default()
         };
-        import(&detection, &selection, &config_dir, &data_dir);
+        let report = import(&detection, &selection, &config_dir, &data_dir);
+        assert!(
+            report.imported_identity.is_some(),
+            "identity should have been imported, report: {report:?}"
+        );
 
         let content = std::fs::read_to_string(config_dir.join("moltis.toml")).unwrap();
 
