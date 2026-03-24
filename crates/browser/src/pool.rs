@@ -744,20 +744,18 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn set_container_dir_permissions_makes_world_writable() {
+    fn set_container_dir_permissions_makes_world_writable() -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
 
-        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let tmp = tempfile::tempdir()?;
         let dir = tmp.path().join("browser-profile");
-        std::fs::create_dir_all(&dir).expect("failed to create dir");
+        std::fs::create_dir_all(&dir)?;
 
         set_container_dir_permissions(&dir);
 
-        let mode = std::fs::metadata(&dir)
-            .expect("failed to read metadata")
-            .permissions()
-            .mode();
+        let mode = std::fs::metadata(&dir)?.permissions().mode();
         assert_eq!(mode & 0o777, 0o777, "directory should be world-writable");
+        Ok(())
     }
 
     fn test_config() -> BrowserConfig {
