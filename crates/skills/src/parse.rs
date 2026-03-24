@@ -347,8 +347,9 @@ When asked to commit, run `git add` then `git commit`.
 
     #[test]
     fn test_invalid_name_no_slug_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
         let content = "---\nname: Bad-Name\n---\nbody\n";
-        let err = parse_metadata(content, Path::new("/tmp")).unwrap_err();
+        let err = parse_metadata(content, tmp.path()).unwrap_err();
         assert!(
             err.to_string().contains("no slug provided"),
             "error should mention missing slug: {err}"
@@ -376,8 +377,9 @@ Body.
 
     #[test]
     fn test_invalid_name_with_invalid_slug_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
         let content = "---\nname: Bad Name\nslug: Also Bad\n---\nbody\n";
-        let err = parse_metadata(content, Path::new("/tmp")).unwrap_err();
+        let err = parse_metadata(content, tmp.path()).unwrap_err();
         assert!(
             err.to_string().contains("also invalid"),
             "error should mention both are invalid: {err}"
