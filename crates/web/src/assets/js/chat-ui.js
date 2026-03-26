@@ -435,14 +435,37 @@ export function updateTokenBar() {
 
 // Message actions dropdown
 function toggleMessageActions(button) {
+	var wasOpen = button.classList.contains("menu-open");
+
 	// Remove any existing dropdowns
 	document.querySelectorAll(".msg-actions-dropdown").forEach((dropdown) => {
-		dropdown.remove();
+		if (typeof dropdown.closeDropdown === "function") {
+			dropdown.closeDropdown();
+		} else {
+			dropdown.remove();
+		}
 	});
+	document.querySelectorAll(".msg-actions-btn").forEach((btn) => {
+		btn.classList.remove("menu-open");
+	});
+
+	if (wasOpen) {
+		return;
+	}
+
+	button.classList.add("menu-open");
 
 	// Create dropdown
 	var dropdown = document.createElement("div");
 	dropdown.className = "msg-actions-dropdown";
+
+	function closeDropdown() {
+		dropdown.remove();
+		button.classList.remove("menu-open");
+		document.removeEventListener("click", closeOnClickOutside);
+		document.removeEventListener("keydown", closeOnEscape);
+	}
+	dropdown.closeDropdown = closeDropdown;
 
 	// Edit option
 	var editOption = document.createElement("div");
@@ -450,7 +473,7 @@ function toggleMessageActions(button) {
 	editOption.textContent = "Edit";
 	editOption.onclick = (e) => {
 		e.stopPropagation();
-		dropdown.remove();
+		closeDropdown();
 
 		var messageEl = button.closest(".msg");
 		if (!messageEl) return;
@@ -577,7 +600,7 @@ function toggleMessageActions(button) {
 				}
 			}
 		}
-		dropdown.remove();
+		closeDropdown();
 	};
 
 	dropdown.appendChild(editOption);
@@ -585,8 +608,8 @@ function toggleMessageActions(button) {
 
 	// Position dropdown below the button
 	var buttonRect = button.getBoundingClientRect();
-	dropdown.style.position = "fixed";
-	dropdown.style.left = buttonRect.left + "px";
+	dropdown.style.position = "absolute";
+	dropdown.style.left = buttonRect.left + window.scrollX + "px";
 	dropdown.style.top = buttonRect.bottom + window.scrollY + "px";
 	dropdown.style.zIndex = "1000";
 
@@ -595,17 +618,14 @@ function toggleMessageActions(button) {
 	// Close dropdown when clicking outside
 	function closeOnClickOutside(e) {
 		if (!dropdown.contains(e.target) && e.target !== button) {
-			dropdown.remove();
-			document.removeEventListener("click", closeOnClickOutside);
+			closeDropdown();
 		}
 	}
 
 	// Close on escape key
 	function closeOnEscape(e) {
 		if (e.key === "Escape") {
-			dropdown.remove();
-			document.removeEventListener("keydown", closeOnEscape);
-			document.removeEventListener("click", closeOnClickOutside);
+			closeDropdown();
 		}
 	}
 
