@@ -365,7 +365,7 @@
   border: none;
   color: var(--muted);
   cursor: pointer;
-  padding: 2px 6px;
+  padding: 0px 6px;
   font-size: 1.2rem;
   line-height: 1;
   border-radius: var(--radius-sm);
