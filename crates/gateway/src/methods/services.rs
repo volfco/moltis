@@ -2016,14 +2016,49 @@ pub(super) fn register(reg: &mut MethodRegistry) {
         "chat.delete_message",
         Box::new(|ctx| {
             Box::pin(async move {
-                let message_id = ctx.params.get("messageId").and_then(|v| v.as_str()).ok_or_else(|| {
-                    ErrorShape::new(error_codes::INVALID_REQUEST, "missing messageId")
-                })?;
+                let message_id = ctx
+                    .params
+                    .get("messageId")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        ErrorShape::new(error_codes::INVALID_REQUEST, "missing messageId")
+                    })?;
                 let session_key = active_session_key_for_ctx(&ctx).await.ok_or_else(|| {
                     ErrorShape::new(error_codes::UNAVAILABLE, "no active session")
                 })?;
                 let chat = ctx.state.chat().await;
-                chat.delete_message(&session_key, message_id).await.map_err(ErrorShape::from)
+                chat.delete_message(&session_key, message_id)
+                    .await
+                    .map_err(ErrorShape::from)
+            })
+        }),
+    );
+
+    reg.register(
+        "chat.edit_message",
+        Box::new(|ctx| {
+            Box::pin(async move {
+                let message_id = ctx
+                    .params
+                    .get("messageId")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        ErrorShape::new(error_codes::INVALID_REQUEST, "missing messageId")
+                    })?;
+                let content = ctx
+                    .params
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        ErrorShape::new(error_codes::INVALID_REQUEST, "missing content")
+                    })?;
+                let session_key = active_session_key_for_ctx(&ctx).await.ok_or_else(|| {
+                    ErrorShape::new(error_codes::UNAVAILABLE, "no active session")
+                })?;
+                let chat = ctx.state.chat().await;
+                chat.edit_message(&session_key, message_id, content)
+                    .await
+                    .map_err(ErrorShape::from)
             })
         }),
     );

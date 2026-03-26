@@ -326,10 +326,13 @@ impl moltis_service_traits::ChatService for MockChat {
     }
 
     async fn delete_message(&self, session_key: &str, message_id: &str) -> ServiceResult {
-        self.0.call("chat.delete_message", json!({
-            "sessionKey": session_key,
-            "messageId": message_id
-        }))
+        self.0.call(
+            "chat.delete_message",
+            json!({
+                "sessionKey": session_key,
+                "messageId": message_id
+            }),
+        )
     }
 }
 

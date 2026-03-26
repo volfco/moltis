@@ -1352,10 +1352,14 @@
 
   /* Model footer (shown below assistant messages) */
   .msg-model-footer {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 6px;
     font-size: 0.68rem;
     color: var(--muted);
     margin-top: 4px;
-    text-align: right;
   }
 
   /* Cron page */

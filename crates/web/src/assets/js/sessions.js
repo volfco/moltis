@@ -643,14 +643,14 @@ function renderHistoryUserMessage(msg) {
 
 	var el;
 	if (msg.audio) {
-		el = chatAddMsg("user", "", true, msg.historyIndex);
+		el = chatAddMsg("user", "", true, msg.historyIndex, text);
 		if (el) {
 			var filename = msg.audio.split("/").pop();
 			var audioSrc = `/api/sessions/${encodeURIComponent(S.activeSessionKey)}/media/${encodeURIComponent(filename)}`;
 			renderAudioPlayer(el, audioSrc);
 			if (text) {
 				var textWrap = document.createElement("div");
-				textWrap.className = "mt-2";
+				textWrap.className = "mt-2 msg-text-content";
 				// Safe: renderMarkdown escapes user input before formatting tags.
 				textWrap.innerHTML = renderMarkdown(text); // eslint-disable-line no-unsanitized/property
 				el.appendChild(textWrap);
@@ -669,24 +669,24 @@ function renderHistoryUserMessage(msg) {
 			}
 		}
 	} else if (images.length > 0) {
-		el = chatAddMsgWithImages("user", text ? renderMarkdown(text) : "", images, msg.historyIndex);
+		el = chatAddMsgWithImages("user", text ? renderMarkdown(text) : "", images, msg.historyIndex, text);
 	} else {
-		el = chatAddMsg("user", renderMarkdown(text), true, msg.historyIndex);
+		el = chatAddMsg("user", renderMarkdown(text), true, msg.historyIndex, text);
 	}
 	if (el && msg.channel) appendChannelFooter(el, msg.channel);
 	return el;
 }
 
-function createModelFooter(msg) {
-	var ft = document.createElement("div");
-	ft.className = "msg-model-footer";
+function populateModelFooter(ft, msg) {
+	var actionsBtn = ft.querySelector(".msg-actions-btn");
+
 	var ftText = msg.provider ? `${msg.provider} / ${msg.model}` : msg.model;
 	if (msg.inputTokens || msg.outputTokens) {
 		ftText += ` \u00b7 ${formatTokens(msg.inputTokens || 0)} in / ${formatTokens(msg.outputTokens || 0)} out`;
 	}
 	var textSpan = document.createElement("span");
 	textSpan.textContent = ftText;
-	ft.appendChild(textSpan);
+	ft.insertBefore(textSpan, actionsBtn);
 
 	var speedLabel = formatTokenSpeed(msg.outputTokens || 0, msg.durationMs || 0);
 	if (speedLabel) {
@@ -695,23 +695,22 @@ function createModelFooter(msg) {
 		var tone = tokenSpeedTone(msg.outputTokens || 0, msg.durationMs || 0);
 		if (tone) speed.classList.add(`msg-token-speed-${tone}`);
 		speed.textContent = ` \u00b7 ${speedLabel}`;
-		ft.appendChild(speed);
+		ft.insertBefore(speed, actionsBtn);
 	}
-	return ft;
 }
 
 function renderHistoryAssistantMessage(msg) {
 	var el;
 	if (msg.audio) {
 		// Voice response: render audio player first, then transcript text below.
-		el = chatAddMsg("assistant", "", true, msg.historyIndex);
+		el = chatAddMsg("assistant", "", true, msg.historyIndex, msg.content || "");
 		if (el) {
 			var filename = msg.audio.split("/").pop();
 			var audioSrc = `/api/sessions/${encodeURIComponent(S.activeSessionKey)}/media/${encodeURIComponent(filename)}`;
 			renderAudioPlayer(el, audioSrc);
 			if (msg.content) {
 				var textWrap = document.createElement("div");
-				textWrap.className = "mt-2";
+				textWrap.className = "mt-2 msg-text-content";
 				// Safe: renderMarkdown calls esc() first — all user input is HTML-escaped.
 				textWrap.innerHTML = renderMarkdown(msg.content); // eslint-disable-line no-unsanitized/property
 				el.appendChild(textWrap);
@@ -721,26 +720,28 @@ function renderHistoryAssistantMessage(msg) {
 			}
 		}
 	} else {
-		el = chatAddMsg("assistant", renderMarkdown(msg.content || ""), true, msg.historyIndex);
+		el = chatAddMsg("assistant", renderMarkdown(msg.content || ""), true, msg.historyIndex, msg.content || "");
 		if (el && msg.reasoning) {
 			appendReasoningDisclosure(el, msg.reasoning);
 		}
 	}
 	if (el && msg.model) {
-		var footer = createModelFooter(msg);
-		el.appendChild(footer);
-		void attachMessageVoiceControl({
-			messageEl: el,
-			footerEl: footer,
-			sessionKey: S.activeSessionKey,
-			text: msg.content || "",
-			runId: msg.run_id || null,
-			messageIndex: msg.historyIndex,
-			audioPath: msg.audio || null,
-			audioWarning: null,
-			forceAction: false,
-			autoplayOnGenerate: true,
-		});
+		var footer = el.querySelector(".msg-model-footer");
+		if (footer) {
+			populateModelFooter(footer, msg);
+			void attachMessageVoiceControl({
+				messageEl: el,
+				footerEl: footer,
+				sessionKey: S.activeSessionKey,
+				text: msg.content || "",
+				runId: msg.run_id || null,
+				messageIndex: msg.historyIndex,
+				audioPath: msg.audio || null,
+				audioWarning: null,
+				forceAction: false,
+				autoplayOnGenerate: true,
+			});
+		}
 	}
 	if (msg.inputTokens || msg.outputTokens) {
 		S.sessionTokens.input += msg.inputTokens || 0;

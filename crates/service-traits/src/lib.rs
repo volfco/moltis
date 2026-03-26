@@ -342,6 +342,13 @@ pub trait ChatService: Send + Sync {
     async fn full_context(&self, params: Value) -> ServiceResult;
     /// Delete a message from a session by its ID.
     async fn delete_message(&self, session_key: &str, message_id: &str) -> ServiceResult;
+    /// Edit a message in a session by its ID.
+    async fn edit_message(
+        &self,
+        session_key: &str,
+        message_id: &str,
+        new_content: &str,
+    ) -> ServiceResult;
     /// Return whether the given session has an active run (LLM responding).
     async fn active(&self, _params: Value) -> ServiceResult {
         Ok(serde_json::json!({ "active": false }))
@@ -412,6 +419,15 @@ impl ChatService for NoopChatService {
     }
 
     async fn delete_message(&self, _session_key: &str, _message_id: &str) -> ServiceResult {
+        Ok(serde_json::json!({ "ok": true }))
+    }
+
+    async fn edit_message(
+        &self,
+        _session_key: &str,
+        _message_id: &str,
+        _new_content: &str,
+    ) -> ServiceResult {
         Ok(serde_json::json!({ "ok": true }))
     }
 

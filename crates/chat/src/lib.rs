@@ -5050,9 +5050,9 @@ impl ChatService for LiveChatService {
 
     async fn delete_message(&self, session_key: &str, message_id: &str) -> ServiceResult {
         // Parse message_id as an index
-        let index: usize = message_id.parse().map_err(|_| {
-            ServiceError::message(format!("invalid message_id: {message_id}"))
-        })?;
+        let index: usize = message_id
+            .parse()
+            .map_err(|_| ServiceError::message(format!("invalid message_id: {message_id}")))?;
 
         // Read current messages
         let mut messages = self
@@ -5080,15 +5080,81 @@ impl ChatService for LiveChatService {
 
         // Update session metadata with new message count
         let new_count = self.session_store.count(session_key).await.unwrap_or(0);
-        self.session_metadata
-            .touch(session_key, new_count)
-            .await;
+        self.session_metadata.touch(session_key, new_count).await;
 
         info!(
             session = %session_key,
             deleted_index = index,
             new_count,
             "chat.delete_message: message deleted"
+        );
+
+        Ok(serde_json::json!({ "ok": true }))
+    }
+
+    async fn edit_message(
+        &self,
+        session_key: &str,
+        message_id: &str,
+        new_content: &str,
+    ) -> ServiceResult {
+        // Parse message_id as an index
+        let index: usize = message_id
+            .parse()
+            .map_err(|_| ServiceError::message(format!("invalid message_id: {message_id}")))?;
+
+        // Read current messages
+        let mut messages = self
+            .session_store
+            .read(session_key)
+            .await
+            .unwrap_or_default();
+
+        // Validate index
+        if index >= messages.len() {
+            return Err(ServiceError::message(format!(
+                "message index {index} out of bounds (total: {})",
+                messages.len()
+            )));
+        }
+
+        // Update the message content
+        if let Some(msg) = messages.get_mut(index) {
+            if let Some(content_arr) = msg.get_mut("content").and_then(|c| c.as_array_mut()) {
+                // Multimodal: find and update the text block, or add one if missing
+                let mut text_found = false;
+                for block in content_arr.iter_mut() {
+                    if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                        block["text"] = Value::String(new_content.to_string());
+                        text_found = true;
+                        break;
+                    }
+                }
+                if !text_found {
+                    content_arr.insert(
+                        0,
+                        serde_json::json!({
+                            "type": "text",
+                            "text": new_content
+                        }),
+                    );
+                }
+            } else {
+                // Plain text message
+                msg["content"] = Value::String(new_content.to_string());
+            }
+        }
+
+        // Write updated messages back to the session store
+        self.session_store
+            .replace_history(session_key, messages)
+            .await
+            .map_err(|e| ServiceError::message(format!("failed to update session: {e}")))?;
+
+        info!(
+            session = %session_key,
+            edited_index = index,
+            "chat.edit_message: message edited"
         );
 
         Ok(serde_json::json!({ "ok": true }))

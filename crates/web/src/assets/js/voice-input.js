@@ -236,13 +236,13 @@ function sendTranscribedMessage(text, audioFilename) {
 	// Add user message to chat (like sendChat does), including the recorded
 	// audio player when we have a saved filename from the upload endpoint.
 	if (audioFilename) {
-		var userEl = chatAddMsg("user", "", true);
+		var userEl = chatAddMsg("user", "", true, undefined, text);
 		if (userEl) {
 			var audioSrc = `/api/sessions/${encodeURIComponent(S.activeSessionKey)}/media/${encodeURIComponent(audioFilename)}`;
 			renderAudioPlayer(userEl, audioSrc);
 			if (text) {
 				var textWrap = document.createElement("div");
-				textWrap.className = "mt-2";
+				textWrap.className = "mt-2 msg-text-content";
 				// Safe: renderMarkdown escapes untrusted content before formatting tags.
 				textWrap.innerHTML = renderMarkdown(text); // eslint-disable-line no-unsanitized/property
 				userEl.appendChild(textWrap);

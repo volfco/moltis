@@ -434,13 +434,13 @@ function handleChatChannelUser(p, isActive, isChatPage, eventSession) {
 	var audioFilename = p.channel?.audio_filename;
 	var el;
 	if (audioFilename) {
-		el = chatAddMsg("user", "", true);
+		el = chatAddMsg("user", "", true, undefined, cleanText);
 		if (el) {
 			var audioSrc = `/api/sessions/${encodeURIComponent(sessionKey)}/media/${encodeURIComponent(audioFilename)}`;
 			renderAudioPlayer(el, audioSrc);
 			if (cleanText) {
 				var textWrap = document.createElement("div");
-				textWrap.className = "mt-2";
+				textWrap.className = "mt-2 msg-text-content";
 				// Safe: renderMarkdown calls esc() first — all user input is
 				// HTML-escaped before formatting tags are applied.
 				textWrap.innerHTML = renderMarkdown(cleanText); // eslint-disable-line no-unsanitized/property
@@ -489,11 +489,19 @@ function handleChatDelta(p, isActive, isChatPage, eventSession) {
 		S.setStreamText("");
 		S.setStreamEl(document.createElement("div"));
 		S.streamEl.className = "msg assistant";
+
+		// Create inner text container
+		var textContainer = document.createElement("div");
+		textContainer.className = "msg-text-content";
+		S.streamEl.appendChild(textContainer);
+
 		clearChatEmptyState();
 		S.chatMsgBox.appendChild(S.streamEl);
 	}
 	S.setStreamText(S.streamText + p.text);
-	setSafeMarkdownHtml(S.streamEl, S.streamText);
+	// Update text container, not the wrapper directly
+	var targetEl = S.streamEl.querySelector(".msg-text-content") || S.streamEl;
+	setSafeMarkdownHtml(targetEl, S.streamText);
 	S.chatMsgBox.scrollTop = S.chatMsgBox.scrollHeight;
 }
 
@@ -518,10 +526,12 @@ function resolveFinalMessageEl(p) {
 	var isEcho = hasFinalText && isPureToolOutputEcho(finalText, S.lastToolOutput);
 	if (!isEcho) {
 		if (hasFinalText && S.streamEl) {
-			setSafeMarkdownHtml(S.streamEl, finalText);
+			var targetEl = S.streamEl.querySelector(".msg-text-content") || S.streamEl;
+			setSafeMarkdownHtml(targetEl, finalText);
+			S.streamEl.dataset.rawContent = finalText;
 			return S.streamEl;
 		}
-		if (hasFinalText) return chatAddMsg("assistant", renderMarkdown(finalText), true);
+		if (hasFinalText) return chatAddMsg("assistant", renderMarkdown(finalText), true, undefined, finalText);
 		// No text (silent reply) — remove any leftover stream element.
 		if (S.streamEl) S.streamEl.remove();
 		return null;
@@ -532,15 +542,17 @@ function resolveFinalMessageEl(p) {
 
 function appendFinalFooter(msgEl, p, eventSession) {
 	if (!(msgEl && p.model)) return;
-	var footer = document.createElement("div");
-	footer.className = "msg-model-footer";
+	var footer = msgEl.querySelector(".msg-model-footer");
+	if (!footer) return;
+	var actionsBtn = footer.querySelector(".msg-actions-btn");
+
 	var footerText = p.provider ? `${p.provider} / ${p.model}` : p.model;
 	if (p.inputTokens || p.outputTokens) {
 		footerText += ` \u00b7 ${formatTokens(p.inputTokens || 0)} in / ${formatTokens(p.outputTokens || 0)} out`;
 	}
 	var textSpan = document.createElement("span");
 	textSpan.textContent = footerText;
-	footer.appendChild(textSpan);
+	footer.insertBefore(textSpan, actionsBtn);
 
 	var speedLabel = formatTokenSpeed(p.outputTokens || 0, p.durationMs || 0);
 	if (speedLabel) {
@@ -549,16 +561,15 @@ function appendFinalFooter(msgEl, p, eventSession) {
 		var tone = tokenSpeedTone(p.outputTokens || 0, p.durationMs || 0);
 		if (tone) speed.classList.add(`msg-token-speed-${tone}`);
 		speed.textContent = ` \u00b7 ${speedLabel}`;
-		footer.appendChild(speed);
+		footer.insertBefore(speed, actionsBtn);
 	}
 
 	if (p.replyMedium === "voice" || p.replyMedium === "text") {
 		var badge = document.createElement("span");
 		badge.className = "reply-medium-badge";
 		badge.textContent = p.replyMedium;
-		footer.appendChild(badge);
+		footer.insertBefore(badge, actionsBtn);
 	}
-	msgEl.appendChild(footer);
 
 	void attachMessageVoiceControl({
 		messageEl: msgEl,
@@ -634,6 +645,7 @@ function handleChatFinal(p, isActive, isChatPage, eventSession) {
 		var msgEl = S.streamEl || document.createElement("div");
 		msgEl.className = "msg assistant";
 		msgEl.textContent = "";
+		msgEl.dataset.rawContent = p.text || "";
 		if (!msgEl.parentNode) {
 			clearChatEmptyState();
 			S.chatMsgBox.appendChild(msgEl);
@@ -648,7 +660,7 @@ function handleChatFinal(p, isActive, isChatPage, eventSession) {
 		if (hasNonWhitespaceContent(p.text)) {
 			// Safe: renderMarkdown calls esc() first — all user input is HTML-escaped.
 			var textWrap = document.createElement("div");
-			textWrap.className = "mt-2";
+			textWrap.className = "mt-2 msg-text-content";
 			setSafeMarkdownHtml(textWrap, p.text);
 			msgEl.appendChild(textWrap);
 		}
@@ -852,10 +864,12 @@ function renderAbortedPartialInDom(eventSession, p, partialState) {
 	var partial = partialState.partial;
 	var partialEl = null;
 	if (hasNonWhitespaceContent(partialState.partialText) && S.streamEl) {
-		setSafeMarkdownHtml(S.streamEl, partialState.partialText);
+		var targetEl = S.streamEl.querySelector(".msg-text-content") || S.streamEl;
+		setSafeMarkdownHtml(targetEl, partialState.partialText);
+		S.streamEl.dataset.rawContent = partialState.partialText;
 		partialEl = S.streamEl;
 	} else if (hasNonWhitespaceContent(partialState.partialText)) {
-		partialEl = chatAddMsg("assistant", renderMarkdown(partialState.partialText), true);
+		partialEl = chatAddMsg("assistant", renderMarkdown(partialState.partialText), true, undefined, partialState.partialText);
 	} else if (hasNonWhitespaceContent(partialState.partialReasoning)) {
 		partialEl = chatAddMsg("assistant", "", false);
 	}

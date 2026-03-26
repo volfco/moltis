@@ -90,7 +90,8 @@ export async function attachMessageVoiceControl(options) {
 		actionBtn.type = "button";
 		actionBtn.className = "msg-voice-action";
 		actionBtn.textContent = "Voice it";
-		footerEl.appendChild(actionBtn);
+		var actionsBtn = footerEl.querySelector(".msg-actions-btn");
+		footerEl.insertBefore(actionBtn, actionsBtn);
 	}
 
 	actionBtn.onclick = async () => {

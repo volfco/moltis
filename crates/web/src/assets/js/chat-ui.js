@@ -1,6 +1,6 @@
 // ── Chat UI ─────────────────────────────────────────────────
 
-import { formatTokens, parseErrorMessage, sendRpc, updateCountdown } from "./helpers.js";
+import { formatTokens, parseErrorMessage, sendRpc, updateCountdown, renderMarkdown } from "./helpers.js";
 import * as S from "./state.js";
 
 function clearChatEmptyState() {
@@ -28,7 +28,7 @@ export function scrollChatToBottom() {
 	}, 500);
 }
 
-export function chatAddMsg(cls, content, isHtml, backendIndex) {
+export function chatAddMsg(cls, content, isHtml, backendIndex, rawContent) {
 	if (!S.chatMsgBox) return null;
 	clearChatEmptyState();
 	var el = document.createElement("div");
@@ -36,12 +36,22 @@ export function chatAddMsg(cls, content, isHtml, backendIndex) {
 	if (cls === "system") {
 		el.classList.add("system-notice");
 	}
+
+	var textContainer = document.createElement("div");
+	textContainer.className = "msg-text-content";
 	if (isHtml) {
 		// Safe: content is produced by renderMarkdown which escapes via esc() first,
 		// then only adds our own formatting tags (pre, code, strong).
-		el.innerHTML = content;
+		textContainer.innerHTML = content;
 	} else {
-		el.textContent = content;
+		textContainer.textContent = content;
+	}
+	el.appendChild(textContainer);
+
+	if (rawContent !== undefined) {
+		el.dataset.rawContent = rawContent;
+	} else if (!isHtml) {
+		el.dataset.rawContent = content;
 	}
 
 	// Only add message ID and actions to real backend messages, not UI errors or transient system notes.
@@ -58,7 +68,10 @@ export function chatAddMsg(cls, content, isHtml, backendIndex) {
 		}
 		el.dataset.messageId = messageIndex.toString();
 
-		// Add message actions dropdown
+		// Add message footer and actions dropdown
+		var footer = document.createElement("div");
+		footer.className = "msg-model-footer";
+
 		var actionsBtn = document.createElement("button");
 		actionsBtn.className = "msg-actions-btn";
 		actionsBtn.innerHTML = "⋮"; // Three dots
@@ -67,7 +80,8 @@ export function chatAddMsg(cls, content, isHtml, backendIndex) {
 			e.stopPropagation();
 			toggleMessageActions(this);
 		};
-		el.appendChild(actionsBtn);
+		footer.appendChild(actionsBtn);
+		el.appendChild(footer);
 	}
 
 	S.chatMsgBox.appendChild(el);
@@ -82,18 +96,22 @@ export function chatAddMsg(cls, content, isHtml, backendIndex) {
  * @param {Array<{dataUrl: string, name: string}>} images - Images to display
  * @returns {HTMLElement|null}
  */
-export function chatAddMsgWithImages(cls, htmlContent, images, backendIndex) {
+export function chatAddMsgWithImages(cls, htmlContent, images, backendIndex, rawContent) {
 	if (!S.chatMsgBox) return null;
 	clearChatEmptyState();
 	var el = document.createElement("div");
 	el.className = `msg ${cls}`;
 	if (htmlContent) {
 		var textDiv = document.createElement("div");
+		textDiv.className = "msg-text-content";
 		// Safe: htmlContent is produced by renderMarkdown which escapes user
 		// input via esc() first, then only adds our own formatting tags.
 		// This is the same pattern used in chatAddMsg above.
 		textDiv.innerHTML = htmlContent; // eslint-disable-line no-unsanitized/property
 		el.appendChild(textDiv);
+	}
+	if (rawContent !== undefined) {
+		el.dataset.rawContent = rawContent;
 	}
 	if (images && images.length > 0) {
 		var thumbRow = document.createElement("div");
@@ -122,7 +140,10 @@ export function chatAddMsgWithImages(cls, htmlContent, images, backendIndex) {
 		}
 		el.dataset.messageId = messageIndex.toString();
 
-		// Add message actions dropdown
+		// Add message footer and actions dropdown
+		var footer = document.createElement("div");
+		footer.className = "msg-model-footer";
+
 		var actionsBtn = document.createElement("button");
 		actionsBtn.className = "msg-actions-btn";
 		actionsBtn.innerHTML = "⋮"; // Three dots
@@ -131,7 +152,8 @@ export function chatAddMsgWithImages(cls, htmlContent, images, backendIndex) {
 			e.stopPropagation();
 			toggleMessageActions(this);
 		};
-		el.appendChild(actionsBtn);
+		footer.appendChild(actionsBtn);
+		el.appendChild(footer);
 	}
 
 	S.chatMsgBox.appendChild(el);
@@ -428,9 +450,98 @@ function toggleMessageActions(button) {
 	editOption.textContent = "Edit";
 	editOption.onclick = (e) => {
 		e.stopPropagation();
-		// For now, show a message that edit is not implemented
-		alert("Edit functionality is not yet implemented");
 		dropdown.remove();
+
+		var messageEl = button.closest(".msg");
+		if (!messageEl) return;
+
+		var messageId = messageEl.dataset.messageId;
+		if (!messageId) {
+			alert("Cannot edit this message.");
+			return;
+		}
+
+		var textContainer = messageEl.querySelector(".msg-text-content");
+		if (!textContainer) {
+			alert("Could not find message text to edit.");
+			return;
+		}
+
+		var rawContent = messageEl.dataset.rawContent || "";
+
+		// Hide original text content
+		textContainer.style.display = "none";
+
+		// Create edit container
+		var editContainer = document.createElement("div");
+		editContainer.className = "msg-edit-container";
+		editContainer.style.width = "100%";
+		editContainer.style.marginTop = "8px";
+
+		var textarea = document.createElement("textarea");
+		textarea.className = "w-full bg-[var(--surface2)] border border-[var(--border)] text-[var(--text)] px-3 py-2 rounded-lg text-sm resize-y min-h-[100px] leading-relaxed focus:outline-none focus:border-[var(--border-strong)] focus:ring-1 focus:ring-[var(--accent-subtle)] transition-colors font-[var(--font-body)]";
+		textarea.style.marginBottom = "8px";
+		textarea.value = rawContent;
+
+		var btnRow = document.createElement("div");
+		btnRow.style.display = "flex";
+		btnRow.style.gap = "8px";
+		btnRow.style.justifyContent = "flex-end";
+
+		var saveBtn = document.createElement("button");
+		saveBtn.className = "provider-btn provider-btn-sm";
+		saveBtn.textContent = "Save";
+
+		var cancelBtn = document.createElement("button");
+		cancelBtn.className = "provider-btn provider-btn-secondary provider-btn-sm";
+		cancelBtn.textContent = "Cancel";
+
+		btnRow.appendChild(cancelBtn);
+		btnRow.appendChild(saveBtn);
+		editContainer.appendChild(textarea);
+		editContainer.appendChild(btnRow);
+
+		// Insert before the text container so it takes its place visually
+		textContainer.parentNode.insertBefore(editContainer, textContainer.nextSibling);
+
+		// Focus and move cursor to end
+		textarea.focus();
+		textarea.selectionStart = textarea.value.length;
+
+		function closeEdit() {
+			editContainer.remove();
+			textContainer.style.display = "";
+		}
+
+		cancelBtn.onclick = () => {
+			closeEdit();
+		};
+
+		saveBtn.onclick = () => {
+			var newContent = textarea.value;
+			if (newContent === rawContent) {
+				closeEdit();
+				return;
+			}
+
+			saveBtn.disabled = true;
+			saveBtn.textContent = "Saving...";
+
+			sendRpc("chat.edit_message", { messageId: messageId, content: newContent })
+				.then(() => {
+					// Update local state
+					messageEl.dataset.rawContent = newContent;
+					
+					// Re-render HTML content
+					textContainer.innerHTML = renderMarkdown(newContent); // eslint-disable-line no-unsanitized/property
+					closeEdit();
+				})
+				.catch((err) => {
+					alert("Failed to edit message: " + (err.message || "Unknown error"));
+					saveBtn.disabled = false;
+					saveBtn.textContent = "Save";
+				});
+		};
 	};
 
 	// Delete option

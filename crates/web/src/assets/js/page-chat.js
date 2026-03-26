@@ -850,13 +850,13 @@ function buildChatMessage(text, seq, displayText) {
 			content.push({ type: "image_url", image_url: { url: img.dataUrl } });
 		}
 		var params = { content: content, _seq: seq };
-		var el = chatAddMsgWithImages("user", userText ? renderMarkdown(userText) : "", images);
+		var el = chatAddMsgWithImages("user", userText ? renderMarkdown(userText) : "", images, undefined, userText);
 		clearPendingImages();
 		return { params: params, el: el };
 	}
 	return {
 		params: { text: text, _seq: seq },
-		el: chatAddMsg("user", renderMarkdown(userText), true),
+		el: chatAddMsg("user", renderMarkdown(userText), true, undefined, userText),
 	};
 }
 

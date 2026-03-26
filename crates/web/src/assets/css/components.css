@@ -369,8 +369,6 @@
   font-size: 1.2rem;
   line-height: 1;
   border-radius: var(--radius-sm);
-  margin-left: auto;
-  margin-top: -2px;
   opacity: 0.7;
   transition: opacity 0.2s, color 0.2s;
 }
