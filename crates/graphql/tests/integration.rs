@@ -324,6 +324,13 @@ impl moltis_service_traits::ChatService for MockChat {
     async fn full_context(&self, p: Value) -> ServiceResult {
         self.0.call("chat.full_context", p)
     }
+
+    async fn delete_message(&self, session_key: &str, message_id: &str) -> ServiceResult {
+        self.0.call("chat.delete_message", json!({
+            "sessionKey": session_key,
+            "messageId": message_id
+        }))
+    }
 }
 
 #[async_trait::async_trait]

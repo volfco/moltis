@@ -340,6 +340,8 @@ pub trait ChatService: Send + Sync {
     async fn raw_prompt(&self, params: Value) -> ServiceResult;
     /// Return the full messages array (system prompt + history) in OpenAI format.
     async fn full_context(&self, params: Value) -> ServiceResult;
+    /// Delete a message from a session by its ID.
+    async fn delete_message(&self, session_key: &str, message_id: &str) -> ServiceResult;
     /// Return whether the given session has an active run (LLM responding).
     async fn active(&self, _params: Value) -> ServiceResult {
         Ok(serde_json::json!({ "active": false }))
@@ -407,6 +409,10 @@ impl ChatService for NoopChatService {
 
     async fn full_context(&self, _p: Value) -> ServiceResult {
         Err("chat not configured".into())
+    }
+
+    async fn delete_message(&self, _session_key: &str, _message_id: &str) -> ServiceResult {
+        Ok(serde_json::json!({ "ok": true }))
     }
 
     async fn active(&self, _p: Value) -> ServiceResult {

@@ -5047,6 +5047,52 @@ impl ChatService for LiveChatService {
             "toolCalls": tool_calls,
         }))
     }
+
+    async fn delete_message(&self, session_key: &str, message_id: &str) -> ServiceResult {
+        // Parse message_id as an index
+        let index: usize = message_id.parse().map_err(|_| {
+            ServiceError::message(format!("invalid message_id: {message_id}"))
+        })?;
+
+        // Read current messages
+        let mut messages = self
+            .session_store
+            .read(session_key)
+            .await
+            .unwrap_or_default();
+
+        // Validate index
+        if index >= messages.len() {
+            return Err(ServiceError::message(format!(
+                "message index {index} out of bounds (total: {})",
+                messages.len()
+            )));
+        }
+
+        // Remove the message at the specified index
+        messages.remove(index);
+
+        // Write updated messages back to the session store
+        self.session_store
+            .replace_history(session_key, messages)
+            .await
+            .map_err(|e| ServiceError::message(format!("failed to update session: {e}")))?;
+
+        // Update session metadata with new message count
+        let new_count = self.session_store.count(session_key).await.unwrap_or(0);
+        self.session_metadata
+            .touch(session_key, new_count)
+            .await;
+
+        info!(
+            session = %session_key,
+            deleted_index = index,
+            new_count,
+            "chat.delete_message: message deleted"
+        );
+
+        Ok(serde_json::json!({ "ok": true }))
+    }
 }
 
 // ── Agent loop mode ─────────────────────────────────────────────────────────

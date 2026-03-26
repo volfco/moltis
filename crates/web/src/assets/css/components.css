@@ -359,6 +359,50 @@
   overflow-y: auto;
 }
 
+/* Message actions dropdown */
+.msg-actions-btn {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 2px 6px;
+  font-size: 1.2rem;
+  line-height: 1;
+  border-radius: var(--radius-sm);
+  margin-left: auto;
+  margin-top: -2px;
+  opacity: 0.7;
+  transition: opacity 0.2s, color 0.2s;
+}
+
+.msg-actions-btn:hover {
+  opacity: 1;
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+.msg-actions-dropdown {
+  position: absolute;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
+  z-index: 1000;
+  min-width: 80px;
+  margin-top: 4px;
+}
+
+.msg-actions-option {
+  padding: 8px 12px;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 0.9rem;
+}
+
+.msg-actions-option:hover {
+  background: var(--bg-hover);
+}
+
 /* ── Logs Page ── */
 
 .logs-toolbar {

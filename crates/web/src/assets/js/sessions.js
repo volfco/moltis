@@ -556,7 +556,7 @@ export function clearAllSessions() {
 		return Promise.resolve({ ok: true, skipped: true });
 	}
 	return confirmDialog(
-		`Delete ${count} session${count !== 1 ? "s" : ""}? Main, channel-bound, and cron sessions will be kept.`,
+		`Delete ${count} session${count === 1 ? "" : "s"}? Main, channel-bound, and cron sessions will be kept.`,
 	).then((yes) => {
 		if (!yes) return { ok: false, cancelled: true };
 		return sendRpc("sessions.clear_all", {}).then((res) => {
@@ -643,7 +643,7 @@ function renderHistoryUserMessage(msg) {
 
 	var el;
 	if (msg.audio) {
-		el = chatAddMsg("user", "", true);
+		el = chatAddMsg("user", "", true, msg.historyIndex);
 		if (el) {
 			var filename = msg.audio.split("/").pop();
 			var audioSrc = `/api/sessions/${encodeURIComponent(S.activeSessionKey)}/media/${encodeURIComponent(filename)}`;
@@ -669,9 +669,9 @@ function renderHistoryUserMessage(msg) {
 			}
 		}
 	} else if (images.length > 0) {
-		el = chatAddMsgWithImages("user", text ? renderMarkdown(text) : "", images);
+		el = chatAddMsgWithImages("user", text ? renderMarkdown(text) : "", images, msg.historyIndex);
 	} else {
-		el = chatAddMsg("user", renderMarkdown(text), true);
+		el = chatAddMsg("user", renderMarkdown(text), true, msg.historyIndex);
 	}
 	if (el && msg.channel) appendChannelFooter(el, msg.channel);
 	return el;
@@ -704,7 +704,7 @@ function renderHistoryAssistantMessage(msg) {
 	var el;
 	if (msg.audio) {
 		// Voice response: render audio player first, then transcript text below.
-		el = chatAddMsg("assistant", "", true);
+		el = chatAddMsg("assistant", "", true, msg.historyIndex);
 		if (el) {
 			var filename = msg.audio.split("/").pop();
 			var audioSrc = `/api/sessions/${encodeURIComponent(S.activeSessionKey)}/media/${encodeURIComponent(filename)}`;
@@ -721,7 +721,7 @@ function renderHistoryAssistantMessage(msg) {
 			}
 		}
 	} else {
-		el = chatAddMsg("assistant", renderMarkdown(msg.content || ""), true);
+		el = chatAddMsg("assistant", renderMarkdown(msg.content || ""), true, msg.historyIndex);
 		if (el && msg.reasoning) {
 			appendReasoningDisclosure(el, msg.reasoning);
 		}
@@ -821,6 +821,10 @@ function renderHistoryToolResult(msg) {
 	// Append reasoning disclosure if this tool call carried thinking text.
 	if (msg.reasoning) {
 		appendReasoningDisclosure(card, msg.reasoning);
+	}
+
+	if (msg.historyIndex !== undefined) {
+		card.dataset.messageId = msg.historyIndex.toString();
 	}
 
 	if (S.chatMsgBox) S.chatMsgBox.appendChild(card);
@@ -1271,7 +1275,7 @@ function renderHistory(key, history, searchContext, thinkingText, totalCountHint
 		} else if (msg.role === "assistant") {
 			msgEls.push(renderHistoryAssistantMessage(msg));
 		} else if (msg.role === "notice") {
-			msgEls.push(chatAddMsg("system", renderMarkdown(msg.content || ""), true));
+			msgEls.push(chatAddMsg("system", renderMarkdown(msg.content || ""), true, msg.historyIndex));
 		} else if (msg.role === "tool_result") {
 			msgEls.push(renderHistoryToolResult(msg));
 		} else {

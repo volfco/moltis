@@ -28,7 +28,7 @@ export function scrollChatToBottom() {
 	}, 500);
 }
 
-export function chatAddMsg(cls, content, isHtml) {
+export function chatAddMsg(cls, content, isHtml, backendIndex) {
 	if (!S.chatMsgBox) return null;
 	clearChatEmptyState();
 	var el = document.createElement("div");
@@ -43,6 +43,33 @@ export function chatAddMsg(cls, content, isHtml) {
 	} else {
 		el.textContent = content;
 	}
+
+	// Only add message ID and actions to real backend messages, not UI errors or transient system notes.
+	var isRealMessage = backendIndex !== undefined || (cls !== "error" && cls !== "system");
+	if (isRealMessage) {
+		var messageIndex = backendIndex;
+		if (messageIndex === undefined) {
+			var maxId = -1;
+			S.chatMsgBox.querySelectorAll("[data-message-id]").forEach((msgEl) => {
+				var id = parseInt(msgEl.dataset.messageId, 10);
+				if (!Number.isNaN(id) && id > maxId) maxId = id;
+			});
+			messageIndex = maxId + 1;
+		}
+		el.dataset.messageId = messageIndex.toString();
+
+		// Add message actions dropdown
+		var actionsBtn = document.createElement("button");
+		actionsBtn.className = "msg-actions-btn";
+		actionsBtn.innerHTML = "⋮"; // Three dots
+		actionsBtn.title = "Message actions";
+		actionsBtn.onclick = function (e) {
+			e.stopPropagation();
+			toggleMessageActions(this);
+		};
+		el.appendChild(actionsBtn);
+	}
+
 	S.chatMsgBox.appendChild(el);
 	if (!S.chatBatchLoading) S.chatMsgBox.scrollTop = S.chatMsgBox.scrollHeight;
 	return el;
@@ -55,7 +82,7 @@ export function chatAddMsg(cls, content, isHtml) {
  * @param {Array<{dataUrl: string, name: string}>} images - Images to display
  * @returns {HTMLElement|null}
  */
-export function chatAddMsgWithImages(cls, htmlContent, images) {
+export function chatAddMsgWithImages(cls, htmlContent, images, backendIndex) {
 	if (!S.chatMsgBox) return null;
 	clearChatEmptyState();
 	var el = document.createElement("div");
@@ -80,6 +107,33 @@ export function chatAddMsgWithImages(cls, htmlContent, images) {
 		}
 		el.appendChild(thumbRow);
 	}
+
+	// Only add message ID and actions to real backend messages, not UI errors or transient system notes.
+	var isRealMessage = backendIndex !== undefined || (cls !== "error" && cls !== "system");
+	if (isRealMessage) {
+		var messageIndex = backendIndex;
+		if (messageIndex === undefined) {
+			var maxId = -1;
+			S.chatMsgBox.querySelectorAll("[data-message-id]").forEach((msgEl) => {
+				var id = parseInt(msgEl.dataset.messageId, 10);
+				if (!Number.isNaN(id) && id > maxId) maxId = id;
+			});
+			messageIndex = maxId + 1;
+		}
+		el.dataset.messageId = messageIndex.toString();
+
+		// Add message actions dropdown
+		var actionsBtn = document.createElement("button");
+		actionsBtn.className = "msg-actions-btn";
+		actionsBtn.innerHTML = "⋮"; // Three dots
+		actionsBtn.title = "Message actions";
+		actionsBtn.onclick = function (e) {
+			e.stopPropagation();
+			toggleMessageActions(this);
+		};
+		el.appendChild(actionsBtn);
+	}
+
 	S.chatMsgBox.appendChild(el);
 	if (!S.chatBatchLoading) S.chatMsgBox.scrollTop = S.chatMsgBox.scrollHeight;
 	return el;
@@ -355,4 +409,95 @@ export function updateTokenBar() {
 		text += " \u00b7 /sh mode";
 	}
 	bar.textContent = text;
+}
+
+// Message actions dropdown
+function toggleMessageActions(button) {
+	// Remove any existing dropdowns
+	document.querySelectorAll(".msg-actions-dropdown").forEach((dropdown) => {
+		dropdown.remove();
+	});
+
+	// Create dropdown
+	var dropdown = document.createElement("div");
+	dropdown.className = "msg-actions-dropdown";
+
+	// Edit option
+	var editOption = document.createElement("div");
+	editOption.className = "msg-actions-option";
+	editOption.textContent = "Edit";
+	editOption.onclick = (e) => {
+		e.stopPropagation();
+		// For now, show a message that edit is not implemented
+		alert("Edit functionality is not yet implemented");
+		dropdown.remove();
+	};
+
+	// Delete option
+	var deleteOption = document.createElement("div");
+	deleteOption.className = "msg-actions-option";
+	deleteOption.textContent = "Delete";
+	deleteOption.onclick = (e) => {
+		e.stopPropagation();
+		if (confirm("Are you sure you want to delete this message? This action cannot be undone.")) {
+			// Find the parent message element
+			var messageEl = button.closest(".msg");
+			if (messageEl) {
+				// Get message ID for backend deletion
+				var messageId = messageEl.dataset.messageId;
+				if (messageId) {
+					// Remove from frontend
+					messageEl.remove();
+
+					// Re-index all remaining messages that had an ID greater than the deleted one
+					var deletedId = parseInt(messageId, 10);
+					document.querySelectorAll(".msg[data-message-id]").forEach((el) => {
+						var currentId = parseInt(el.dataset.messageId, 10);
+						if (currentId > deletedId) {
+							el.dataset.messageId = (currentId - 1).toString();
+						}
+					});
+
+					// Send RPC to backend to delete message
+					sendRpc("chat.delete_message", { messageId: messageId });
+				} else {
+					// Fallback: just remove from frontend if no ID
+					messageEl.remove();
+				}
+			}
+		}
+		dropdown.remove();
+	};
+
+	dropdown.appendChild(editOption);
+	dropdown.appendChild(deleteOption);
+
+	// Position dropdown below the button
+	var buttonRect = button.getBoundingClientRect();
+	dropdown.style.position = "fixed";
+	dropdown.style.left = buttonRect.left + "px";
+	dropdown.style.top = buttonRect.bottom + window.scrollY + "px";
+	dropdown.style.zIndex = "1000";
+
+	document.body.appendChild(dropdown);
+
+	// Close dropdown when clicking outside
+	function closeOnClickOutside(e) {
+		if (!dropdown.contains(e.target) && e.target !== button) {
+			dropdown.remove();
+			document.removeEventListener("click", closeOnClickOutside);
+		}
+	}
+
+	// Close on escape key
+	function closeOnEscape(e) {
+		if (e.key === "Escape") {
+			dropdown.remove();
+			document.removeEventListener("keydown", closeOnEscape);
+			document.removeEventListener("click", closeOnClickOutside);
+		}
+	}
+
+	document.addEventListener("click", closeOnClickOutside);
+	document.addEventListener("keydown", closeOnEscape);
 }
