@@ -33,7 +33,7 @@ import { routes, settingsPath } from "./routes.js";
 import { connected } from "./signals.js";
 import * as S from "./state.js";
 import { fetchPhrase } from "./tts-phrases.js";
-import { Modal } from "./ui.js";
+import { Modal, showToast } from "./ui.js";
 import {
 	decodeBase64Safe,
 	fetchVoiceProviders,
@@ -1681,9 +1681,11 @@ function SshSection() {
 	var [generateName, setGenerateName] = useState("");
 	var [importName, setImportName] = useState("");
 	var [importPrivateKey, setImportPrivateKey] = useState("");
+	var [importPassphrase, setImportPassphrase] = useState("");
 	var [targetLabel, setTargetLabel] = useState("");
 	var [targetHost, setTargetHost] = useState("");
 	var [targetPort, setTargetPort] = useState("");
+	var [targetKnownHost, setTargetKnownHost] = useState("");
 	var [targetAuthMode, setTargetAuthMode] = useState("managed");
 	var [targetKeyId, setTargetKeyId] = useState("");
 	var [targetIsDefault, setTargetIsDefault] = useState(true);
@@ -1791,11 +1793,16 @@ function SshSection() {
 		runSshAction(
 			"import-key",
 			"/api/ssh/keys/import",
-			{ name, private_key: importPrivateKey },
+			{
+				name,
+				private_key: importPrivateKey,
+				passphrase: importPassphrase.trim() ? importPassphrase : null,
+			},
 			"Private key imported.",
 			() => {
 				setImportName("");
 				setImportPrivateKey("");
+				setImportPassphrase("");
 			},
 		);
 	}
@@ -1850,6 +1857,7 @@ function SshSection() {
 				port,
 				auth_mode: targetAuthMode,
 				key_id: keyId,
+				known_host: targetKnownHost.trim() ? targetKnownHost : null,
 				is_default: targetIsDefault,
 			},
 			"SSH target saved.",
@@ -1857,9 +1865,51 @@ function SshSection() {
 				setTargetLabel("");
 				setTargetHost("");
 				setTargetPort("");
+				setTargetKnownHost("");
 				setTargetIsDefault(targets.length === 0);
 			},
 		);
+	}
+
+	function onScanCreateTargetHost() {
+		var target = targetHost.trim();
+		var port = targetPort.trim() ? Number.parseInt(targetPort.trim(), 10) : null;
+		if (!target) {
+			setError("SSH target is required before scanning.");
+			return;
+		}
+		if (Number.isNaN(port)) {
+			setError("Port must be a valid number.");
+			return;
+		}
+		clearFlash();
+		setBusyAction("scan-create-target");
+		rerender();
+		fetch("/api/ssh/host-key/scan", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ target, port }),
+		})
+			.then(async (response) => {
+				if (!response.ok) {
+					throw new Error(localizedApiErrorMessage(await response.json(), "Failed to scan host key"));
+				}
+				return response.json();
+			})
+			.then((data) => {
+				setTargetKnownHost(data.known_host || "");
+				setMessage(`Scanned host key for ${data.host}${data.port ? `:${data.port}` : ""}.`);
+				showToast("Host key scanned", "success");
+				rerender();
+			})
+			.catch((error) => {
+				setError(error.message);
+				showToast(error.message, "error");
+			})
+			.finally(() => {
+				setBusyAction("");
+				rerender();
+			});
 	}
 
 	function onDeleteTarget(id) {
@@ -1911,6 +1961,69 @@ function SshSection() {
 			});
 	}
 
+	function onScanAndPinTarget(entry) {
+		clearFlash();
+		setBusyAction(`pin-target:${entry.id}`);
+		rerender();
+		fetch("/api/ssh/host-key/scan", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ target: entry.target, port: entry.port ?? null }),
+		})
+			.then(async (response) => {
+				if (!response.ok) {
+					throw new Error(localizedApiErrorMessage(await response.json(), "Failed to scan host key"));
+				}
+				return response.json();
+			})
+			.then(async (scanData) => {
+				var pinResponse = await fetch(`/api/ssh/targets/${entry.id}/pin`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ known_host: scanData.known_host }),
+				});
+				if (!pinResponse.ok) {
+					throw new Error(localizedApiErrorMessage(await pinResponse.json(), "Failed to pin host key"));
+				}
+				setMessage(
+					`${entry.known_host ? "Refreshed" : "Pinned"} host key for ${scanData.host}${scanData.port ? `:${scanData.port}` : ""}.`,
+				);
+				showToast(entry.known_host ? "Host pin refreshed" : "Host pinned", "success");
+				await fetchSshStatus();
+			})
+			.catch((error) => {
+				setError(error.message);
+				showToast(error.message, "error");
+			})
+			.finally(() => {
+				setBusyAction("");
+				rerender();
+			});
+	}
+
+	function onClearTargetPin(entry) {
+		clearFlash();
+		setBusyAction(`clear-pin:${entry.id}`);
+		rerender();
+		fetch(`/api/ssh/targets/${entry.id}/pin`, { method: "DELETE" })
+			.then(async (response) => {
+				if (!response.ok) {
+					throw new Error(localizedApiErrorMessage(await response.json(), "Failed to clear host pin"));
+				}
+				setMessage(`Cleared host pin for ${entry.label}.`);
+				showToast("Host pin cleared", "success");
+				await fetchSshStatus();
+			})
+			.catch((error) => {
+				setError(error.message);
+				showToast(error.message, "error");
+			})
+			.finally(() => {
+				setBusyAction("");
+				rerender();
+			});
+	}
+
 	function onCopyPublicKey(entry) {
 		navigator.clipboard
 			.writeText(entry.public_key)
@@ -1954,11 +2067,12 @@ function SshSection() {
 			<div class="rounded border border-[var(--border)] bg-[var(--surface)] p-4">
 				<h3 class="text-sm font-medium text-[var(--text-strong)] m-0 mb-2">Deploy Keys</h3>
 				<p class="text-xs text-[var(--muted)] m-0 mb-3">
-					Generate a new keypair for a host, or import an existing unencrypted private key.
+					Generate a new keypair for a host, or import an existing private key. Passphrase-protected imports are decrypted once and then stored under Moltis control.
 				</p>
 				<div class="mb-3 rounded border border-[var(--border)] bg-[var(--surface2)] p-2 text-xs text-[var(--muted)] leading-relaxed">
-					Recommended flow: generate one deploy key per remote host, copy the public key below, then add it to that
-					host&apos;s <code class="text-[var(--text)]">~/.ssh/authorized_keys</code>.
+					Recommended flow: generate one deploy key per remote host, copy the public key below, add it to that
+					host&apos;s <code class="text-[var(--text)]">~/.ssh/authorized_keys</code>, then pin the host key with
+					<code class="text-[var(--text)]">ssh-keyscan -H host</code> when creating the target.
 				</div>
 				<form onSubmit=${onGenerateKey} class="flex flex-col gap-2 mb-4">
 					<label class="text-xs text-[var(--muted)]">Generate deploy key</label>
@@ -1991,6 +2105,13 @@ function SshSection() {
 						onInput=${(e) => setImportPrivateKey(e.target.value)}
 						placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
 					></textarea>
+					<input
+						class="provider-key-input"
+						type="password"
+						value=${importPassphrase}
+						onInput=${(e) => setImportPassphrase(e.target.value)}
+						placeholder="Optional import passphrase"
+					/>
 					<button type="submit" class="provider-btn self-start" disabled=${busyAction === "import-key"}>
 						${busyAction === "import-key" ? "Importing…" : "Import Key"}
 					</button>
@@ -2071,6 +2192,23 @@ function SshSection() {
 							<option value="system">System OpenSSH</option>
 						</select>
 					</div>
+					<textarea
+						class="provider-key-input min-h-[96px] font-mono text-xs"
+						value=${targetKnownHost}
+						onInput=${(e) => setTargetKnownHost(e.target.value)}
+						placeholder="Optional known_hosts line from ssh-keyscan -H host"
+					></textarea>
+					<div class="text-xs text-[var(--muted)]">
+						If you paste a <code class="text-[var(--text)]">known_hosts</code> line here, Moltis will use strict host-key checking for this target instead of trusting your global SSH config.
+					</div>
+					<button
+						type="button"
+						class="provider-btn provider-btn-secondary self-start"
+						onClick=${onScanCreateTargetHost}
+						disabled=${busyAction === "scan-create-target"}
+					>
+						${busyAction === "scan-create-target" ? "Scanning…" : "Scan Host Key"}
+					</button>
 					${
 						targetAuthMode === "managed"
 							? html`<select
@@ -2116,6 +2254,7 @@ function SshSection() {
 												<span>${entry.label}</span>
 												${entry.is_default ? html`<span class="provider-item-badge configured">Default</span>` : null}
 												<span class="provider-item-badge muted">${entry.auth_mode === "managed" ? "Managed key" : "System SSH"}</span>
+												${entry.known_host ? html`<span class="provider-item-badge configured">Host pinned</span>` : html`<span class="provider-item-badge warning">Uses global known_hosts</span>`}
 											</div>
 											<div class="text-xs text-[var(--muted)] break-all">
 												${entry.target}${entry.port ? `:${entry.port}` : ""}
@@ -2135,6 +2274,26 @@ function SshSection() {
 											<button type="button" class="provider-btn provider-btn-secondary" onClick=${() => onTestTarget(entry.id)} disabled=${busyAction === `test-target:${entry.id}`}>
 												${busyAction === `test-target:${entry.id}` ? "Testing…" : "Test"}
 											</button>
+											<button
+												type="button"
+												class="provider-btn provider-btn-secondary"
+												onClick=${() => onScanAndPinTarget(entry)}
+												disabled=${busyAction === `pin-target:${entry.id}`}
+											>
+												${busyAction === `pin-target:${entry.id}` ? "Scanning…" : entry.known_host ? "Refresh Pin" : "Scan & Pin"}
+											</button>
+											${
+												entry.known_host
+													? html`<button
+															type="button"
+															class="provider-btn provider-btn-secondary"
+															onClick=${() => onClearTargetPin(entry)}
+															disabled=${busyAction === `clear-pin:${entry.id}`}
+														>
+															${busyAction === `clear-pin:${entry.id}` ? "Clearing…" : "Clear Pin"}
+														</button>`
+													: null
+											}
 											${
 												entry.is_default
 													? null

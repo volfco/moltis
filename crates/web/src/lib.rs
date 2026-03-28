@@ -131,6 +131,10 @@ fn build_api_routes() -> Router<AppState> {
         .route("/api/ssh", get(moltis_httpd::ssh_routes::ssh_status))
         .route("/api/ssh/doctor", get(moltis_httpd::ssh_routes::ssh_doctor))
         .route(
+            "/api/ssh/host-key/scan",
+            axum::routing::post(moltis_httpd::ssh_routes::ssh_scan_host_key),
+        )
+        .route(
             "/api/ssh/doctor/test-active",
             axum::routing::post(moltis_httpd::ssh_routes::ssh_doctor_test_active),
         )
@@ -161,6 +165,11 @@ fn build_api_routes() -> Router<AppState> {
         .route(
             "/api/ssh/targets/{id}/test",
             axum::routing::post(moltis_httpd::ssh_routes::ssh_test_target),
+        )
+        .route(
+            "/api/ssh/targets/{id}/pin",
+            axum::routing::post(moltis_httpd::ssh_routes::ssh_pin_target_host_key)
+                .delete(moltis_httpd::ssh_routes::ssh_clear_target_host_key),
         )
         .route(
             "/api/config",

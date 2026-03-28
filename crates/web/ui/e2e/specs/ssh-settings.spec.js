@@ -17,16 +17,27 @@ test.describe("SSH settings", () => {
 			timeout: 15_000,
 		});
 		await expect(page.getByRole("button", { name: "Copy Public Key", exact: true }).first()).toBeVisible();
+		const publicKey = await page.locator("pre").first().textContent();
+		expect(publicKey).toContain("ssh-ed25519 ");
 
 		await page.getByPlaceholder("prod-box").fill(targetLabel);
 		await page.getByPlaceholder("deploy@example.com").fill("deploy@example.com");
 		await page.locator("select").nth(0).selectOption("managed");
+		await page
+			.getByPlaceholder("Optional known_hosts line from ssh-keyscan -H host")
+			.fill(`prod.example.com ${publicKey.trim()}`);
 		await page.locator("select").nth(1).selectOption({ label: keyName });
 		await page.getByRole("button", { name: "Add Target", exact: true }).click();
 
 		const targetCard = page.locator(".provider-item", { hasText: targetLabel }).first();
 		await expect(targetCard).toBeVisible({ timeout: 15_000 });
 		await expect(targetCard.getByText("Managed key", { exact: true })).toBeVisible();
+		await expect(targetCard.getByText("Host pinned", { exact: true })).toBeVisible();
+
+		await targetCard.getByRole("button", { name: "Clear Pin", exact: true }).click();
+		await expect(targetCard.getByText("Uses global known_hosts", { exact: true })).toBeVisible({
+			timeout: 15_000,
+		});
 
 		expect(pageErrors).toEqual([]);
 	});

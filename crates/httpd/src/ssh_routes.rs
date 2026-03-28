@@ -29,6 +29,9 @@ const SSH_TARGET_CREATE_FAILED: &str = "SSH_TARGET_CREATE_FAILED";
 const SSH_TARGET_DELETE_FAILED: &str = "SSH_TARGET_DELETE_FAILED";
 const SSH_TARGET_DEFAULT_FAILED: &str = "SSH_TARGET_DEFAULT_FAILED";
 const SSH_TARGET_TEST_FAILED: &str = "SSH_TARGET_TEST_FAILED";
+const SSH_HOST_SCAN_FAILED: &str = "SSH_HOST_SCAN_FAILED";
+const SSH_HOST_PIN_FAILED: &str = "SSH_HOST_PIN_FAILED";
+const SSH_HOST_PIN_CLEAR_FAILED: &str = "SSH_HOST_PIN_CLEAR_FAILED";
 
 #[derive(Serialize)]
 pub struct SshStatusResponse {
@@ -55,6 +58,20 @@ impl SshMutationResponse {
 }
 
 impl IntoResponse for SshMutationResponse {
+    fn into_response(self) -> Response {
+        Json(self).into_response()
+    }
+}
+
+#[derive(Serialize)]
+pub struct SshHostScanResponse {
+    ok: bool,
+    host: String,
+    port: Option<u16>,
+    known_host: String,
+}
+
+impl IntoResponse for SshHostScanResponse {
     fn into_response(self) -> Response {
         Json(self).into_response()
     }
@@ -104,6 +121,7 @@ pub struct SshDoctorResponse {
     managed_key_count: usize,
     encrypted_key_count: usize,
     managed_target_count: usize,
+    pinned_target_count: usize,
     configured_node: Option<String>,
     legacy_target: Option<String>,
     active_route: Option<SshDoctorRoute>,
@@ -176,6 +194,7 @@ pub struct GenerateKeyRequest {
 pub struct ImportKeyRequest {
     name: String,
     private_key: String,
+    passphrase: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -183,10 +202,22 @@ pub struct CreateTargetRequest {
     label: String,
     target: String,
     port: Option<u16>,
+    known_host: Option<String>,
     auth_mode: SshAuthMode,
     key_id: Option<i64>,
     #[serde(default)]
     is_default: bool,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ScanHostRequest {
+    target: String,
+    port: Option<u16>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct PinHostRequest {
+    known_host: String,
 }
 
 pub async fn ssh_status(
@@ -256,11 +287,17 @@ pub async fn ssh_import_key(
         ));
     }
 
-    let (public_key, fingerprint) = inspect_imported_private_key(&body.private_key)
-        .await
-        .map_err(|err| ApiError::bad_request(SSH_KEY_IMPORT_FAILED, err.to_string()))?;
+    let import_passphrase = body
+        .passphrase
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let (private_key, public_key, fingerprint) =
+        inspect_imported_private_key(&body.private_key, import_passphrase)
+            .await
+            .map_err(|err| ApiError::bad_request(SSH_KEY_IMPORT_FAILED, err.to_string()))?;
     let id = store
-        .create_ssh_key(name, &body.private_key, &public_key, &fingerprint)
+        .create_ssh_key(name, &private_key, &public_key, &fingerprint)
         .await
         .map_err(|err| ApiError::internal(SSH_KEY_IMPORT_FAILED, err))?;
 
@@ -302,12 +339,23 @@ pub async fn ssh_create_target(
             "target is required",
         ));
     }
+    let known_host = body
+        .known_host
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(known_host) = known_host {
+        validate_known_host_entry(known_host)
+            .await
+            .map_err(|err| ApiError::bad_request(SSH_TARGET_CREATE_FAILED, err.to_string()))?;
+    }
 
     let id = store
         .create_ssh_target(
             &body.label,
             &body.target,
             body.port,
+            known_host,
             body.auth_mode,
             body.key_id,
             body.is_default,
@@ -388,6 +436,66 @@ pub async fn ssh_test_target(
     })
 }
 
+pub async fn ssh_scan_host_key(
+    Json(body): Json<ScanHostRequest>,
+) -> Result<SshHostScanResponse, ApiError> {
+    let target = body.target.trim();
+    if target.is_empty() {
+        return Err(ApiError::bad_request(
+            SSH_TARGET_REQUIRED,
+            "target is required",
+        ));
+    }
+    let scan = scan_target_known_host(target, body.port)
+        .await
+        .map_err(|err| ApiError::bad_request(SSH_HOST_SCAN_FAILED, err.to_string()))?;
+    Ok(SshHostScanResponse {
+        ok: true,
+        host: scan.host,
+        port: scan.port,
+        known_host: scan.known_host,
+    })
+}
+
+pub async fn ssh_pin_target_host_key(
+    State(state): State<crate::server::AppState>,
+    Path(id): Path<i64>,
+    Json(body): Json<PinHostRequest>,
+) -> Result<SshMutationResponse, ApiError> {
+    let store = state.gateway.credential_store.as_ref().ok_or_else(|| {
+        ApiError::service_unavailable(SSH_STORE_UNAVAILABLE, "no credential store")
+    })?;
+    let known_host = body.known_host.trim();
+    if known_host.is_empty() {
+        return Err(ApiError::bad_request(
+            SSH_HOST_PIN_FAILED,
+            "known host entry is required",
+        ));
+    }
+    validate_known_host_entry(known_host)
+        .await
+        .map_err(|err| ApiError::bad_request(SSH_HOST_PIN_FAILED, err.to_string()))?;
+    store
+        .update_ssh_target_known_host(id, Some(known_host))
+        .await
+        .map_err(|err| ApiError::bad_request(SSH_HOST_PIN_FAILED, err.to_string()))?;
+    Ok(SshMutationResponse::success(Some(id)))
+}
+
+pub async fn ssh_clear_target_host_key(
+    State(state): State<crate::server::AppState>,
+    Path(id): Path<i64>,
+) -> Result<SshMutationResponse, ApiError> {
+    let store = state.gateway.credential_store.as_ref().ok_or_else(|| {
+        ApiError::service_unavailable(SSH_STORE_UNAVAILABLE, "no credential store")
+    })?;
+    store
+        .update_ssh_target_known_host(id, None)
+        .await
+        .map_err(|err| ApiError::bad_request(SSH_HOST_PIN_CLEAR_FAILED, err.to_string()))?;
+    Ok(SshMutationResponse::success(Some(id)))
+}
+
 pub async fn ssh_doctor(
     State(state): State<crate::server::AppState>,
 ) -> Result<SshDoctorResponse, ApiError> {
@@ -425,6 +533,10 @@ pub async fn ssh_doctor(
         inner.nodes.list().len()
     };
     let encrypted_key_count = keys.iter().filter(|entry| entry.encrypted).count();
+    let pinned_target_count = targets
+        .iter()
+        .filter(|target| target.known_host.is_some())
+        .count();
     let vault_is_unsealed = match state.gateway.vault.as_ref() {
         Some(vault) => vault.is_unsealed().await,
         None => false,
@@ -461,6 +573,7 @@ pub async fn ssh_doctor(
         ssh_binary_available,
         paired_node_count,
         managed_target_count: targets.len(),
+        pinned_target_count,
         managed_key_count: keys.len(),
         encrypted_key_count,
         configured_node: configured_node.as_deref(),
@@ -478,6 +591,7 @@ pub async fn ssh_doctor(
         managed_key_count: keys.len(),
         encrypted_key_count,
         managed_target_count: targets.len(),
+        pinned_target_count,
         configured_node,
         legacy_target,
         active_route,
@@ -519,6 +633,7 @@ pub async fn ssh_doctor_test_active(
             label: target.clone(),
             target,
             port: None,
+            known_host: None,
             auth_mode: SshAuthMode::System,
             key_id: None,
             key_name: None,
@@ -593,7 +708,10 @@ async fn generate_ssh_key_material(name: &str) -> anyhow::Result<(String, String
     Ok((private_key, public_key.trim().to_string(), fingerprint))
 }
 
-async fn inspect_imported_private_key(private_key: &str) -> anyhow::Result<(String, String)> {
+async fn inspect_imported_private_key(
+    private_key: &str,
+    passphrase: Option<&str>,
+) -> anyhow::Result<(String, String, String)> {
     let dir = tempfile::tempdir()?;
     let key_path = dir.path().join("imported_key");
     tokio::fs::write(&key_path, private_key).await?;
@@ -613,16 +731,58 @@ async fn inspect_imported_private_key(private_key: &str) -> anyhow::Result<(Stri
         let stderr = String::from_utf8_lossy(&public_output.stderr)
             .trim()
             .to_string();
-        anyhow::bail!(if stderr.to_lowercase().contains("passphrase") {
-            "passphrase-protected private keys are not supported yet".to_string()
-        } else {
-            stderr
-        });
+        if stderr.to_lowercase().contains("passphrase") {
+            let Some(passphrase) = passphrase else {
+                anyhow::bail!(
+                    "this private key is passphrase-protected, provide the passphrase to import it"
+                );
+            };
+            let public_output = Command::new("ssh-keygen")
+                .arg("-y")
+                .arg("-P")
+                .arg(passphrase)
+                .arg("-f")
+                .arg(&key_path)
+                .output()
+                .await?;
+            if !public_output.status.success() {
+                anyhow::bail!(
+                    "{}",
+                    String::from_utf8_lossy(&public_output.stderr)
+                        .trim()
+                        .to_string()
+                );
+            }
+            let decrypt_output = Command::new("ssh-keygen")
+                .arg("-p")
+                .arg("-P")
+                .arg(passphrase)
+                .arg("-N")
+                .arg("")
+                .arg("-f")
+                .arg(&key_path)
+                .output()
+                .await?;
+            if !decrypt_output.status.success() {
+                anyhow::bail!(
+                    "{}",
+                    String::from_utf8_lossy(&decrypt_output.stderr)
+                        .trim()
+                        .to_string()
+                );
+            }
+            let fingerprint = ssh_keygen_fingerprint(&key_path).await?;
+            let decrypted_private_key = tokio::fs::read_to_string(&key_path).await?;
+            let public_key = String::from_utf8(public_output.stdout)?.trim().to_string();
+            return Ok((decrypted_private_key, public_key, fingerprint));
+        }
+        anyhow::bail!(stderr);
     }
 
     let fingerprint = ssh_keygen_fingerprint(&key_path).await?;
+    let decrypted_private_key = tokio::fs::read_to_string(&key_path).await?;
     let public_key = String::from_utf8(public_output.stdout)?.trim().to_string();
-    Ok((public_key, fingerprint))
+    Ok((decrypted_private_key, public_key, fingerprint))
 }
 
 async fn ssh_keygen_fingerprint(path: &std::path::Path) -> anyhow::Result<String> {
@@ -640,11 +800,136 @@ async fn ssh_keygen_fingerprint(path: &std::path::Path) -> anyhow::Result<String
     Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }
 
+async fn validate_known_host_entry(known_host: &str) -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let known_hosts_path = dir.path().join("known_hosts");
+    tokio::fs::write(&known_hosts_path, format!("{known_host}\n")).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&known_hosts_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    let _ = ssh_keygen_fingerprint(&known_hosts_path)
+        .await
+        .map_err(|_| anyhow::anyhow!("known host entry is not a valid known_hosts line"))?;
+    Ok(())
+}
+
+struct ResolvedScanTarget {
+    host: String,
+    port: Option<u16>,
+}
+
+struct ScannedKnownHost {
+    host: String,
+    port: Option<u16>,
+    known_host: String,
+}
+
+fn parse_ssh_g_output(config: &str) -> ResolvedScanTarget {
+    let mut host = None;
+    let mut port = None;
+    for line in config.lines() {
+        if let Some(value) = line.strip_prefix("hostname ") {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                host = Some(trimmed.to_string());
+            }
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("port ") {
+            port = value.trim().parse::<u16>().ok();
+        }
+    }
+
+    ResolvedScanTarget {
+        host: host.unwrap_or_default(),
+        port,
+    }
+}
+
+fn fallback_scan_host(target: &str) -> String {
+    target
+        .rsplit_once('@')
+        .map(|(_, host)| host)
+        .unwrap_or(target)
+        .trim()
+        .to_string()
+}
+
+async fn resolve_scan_target(
+    target: &str,
+    port: Option<u16>,
+) -> anyhow::Result<ResolvedScanTarget> {
+    let output = Command::new("ssh").arg("-G").arg(target).output().await;
+    if let Ok(output) = output
+        && output.status.success()
+    {
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut resolved = parse_ssh_g_output(&text);
+        if resolved.host.is_empty() {
+            resolved.host = fallback_scan_host(target);
+        }
+        if port.is_some() {
+            resolved.port = port;
+        }
+        return Ok(resolved);
+    }
+
+    Ok(ResolvedScanTarget {
+        host: fallback_scan_host(target),
+        port,
+    })
+}
+
+async fn scan_target_known_host(
+    target: &str,
+    port: Option<u16>,
+) -> anyhow::Result<ScannedKnownHost> {
+    let resolved = resolve_scan_target(target, port).await?;
+    if resolved.host.is_empty() {
+        anyhow::bail!("could not resolve a hostname for ssh target '{target}'");
+    }
+
+    let mut command = Command::new("ssh-keyscan");
+    command.arg("-H");
+    if let Some(port) = resolved.port {
+        command.arg("-p").arg(port.to_string());
+    }
+    command.arg(&resolved.host);
+    let output = command.output().await?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "{}",
+            String::from_utf8_lossy(&output.stderr).trim().to_string()
+        );
+    }
+    let known_host = String::from_utf8(output.stdout)?.trim().to_string();
+    if known_host.is_empty() {
+        anyhow::bail!(
+            "ssh-keyscan did not return any host keys for {}{}",
+            resolved.host,
+            resolved
+                .port
+                .map(|value| format!(":{value}"))
+                .unwrap_or_default()
+        );
+    }
+    validate_known_host_entry(&known_host).await?;
+
+    Ok(ScannedKnownHost {
+        host: resolved.host,
+        port: resolved.port,
+        known_host,
+    })
+}
+
 struct DoctorInputs<'a> {
     exec_host: &'a str,
     ssh_binary_available: bool,
     paired_node_count: usize,
     managed_target_count: usize,
+    pinned_target_count: usize,
     managed_key_count: usize,
     encrypted_key_count: usize,
     configured_node: Option<&'a str>,
@@ -701,6 +986,15 @@ fn build_doctor_checks(input: DoctorInputs<'_>) -> Vec<SshDoctorCheck> {
                     ),
                     hint: None,
                 });
+                if target.known_host.is_none() {
+                    checks.push(SshDoctorCheck {
+                        id: "ssh-host-pinning",
+                        level: "warn",
+                        title: "Host verification",
+                        message: "The active SSH target does not have a pinned host key.".to_string(),
+                        hint: Some("Paste a known_hosts line into Settings → SSH to force strict host-key verification for this target.".to_string()),
+                    });
+                }
                 if target.auth_mode == SshAuthMode::Managed
                     && input.encrypted_key_count > 0
                     && !input.vault_is_unsealed
@@ -788,8 +1082,11 @@ fn build_doctor_checks(input: DoctorInputs<'_>) -> Vec<SshDoctorCheck> {
             level: "ok",
             title: "Managed SSH inventory",
             message: format!(
-                "{} key(s), {} target(s), {} encrypted key(s).",
-                input.managed_key_count, input.managed_target_count, input.encrypted_key_count
+                "{} key(s), {} target(s), {} pinned target(s), {} encrypted key(s).",
+                input.managed_key_count,
+                input.managed_target_count,
+                input.pinned_target_count,
+                input.encrypted_key_count
             ),
             hint: None,
         });
@@ -830,9 +1127,55 @@ mod tests {
     #[tokio::test]
     async fn imported_key_is_validated() {
         let (private_key, ..) = generate_ssh_key_material("importable").await.unwrap();
-        let (public_key, fingerprint) = inspect_imported_private_key(&private_key).await.unwrap();
+        let (_, public_key, fingerprint) = inspect_imported_private_key(&private_key, None)
+            .await
+            .unwrap();
         assert!(public_key.starts_with("ssh-ed25519 "));
         assert!(fingerprint.contains("SHA256:"));
+    }
+
+    #[tokio::test]
+    async fn imported_encrypted_key_accepts_passphrase() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("encrypted");
+        let output = Command::new("ssh-keygen")
+            .arg("-q")
+            .arg("-t")
+            .arg("ed25519")
+            .arg("-N")
+            .arg("correct horse battery staple")
+            .arg("-C")
+            .arg("moltis-encrypted")
+            .arg("-f")
+            .arg(&key_path)
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success());
+
+        let private_key = tokio::fs::read_to_string(&key_path).await.unwrap();
+        let (decrypted_private_key, public_key, fingerprint) =
+            inspect_imported_private_key(&private_key, Some("correct horse battery staple"))
+                .await
+                .unwrap();
+        assert!(decrypted_private_key.contains("BEGIN OPENSSH PRIVATE KEY"));
+        assert!(public_key.starts_with("ssh-ed25519 "));
+        assert!(fingerprint.contains("SHA256:"));
+    }
+
+    #[test]
+    fn parse_ssh_g_output_extracts_host_and_port() {
+        let resolved = parse_ssh_g_output(
+            "host prod\nhostname app.internal.example\nport 2222\nuser deploy\n",
+        );
+        assert_eq!(resolved.host, "app.internal.example");
+        assert_eq!(resolved.port, Some(2222));
+    }
+
+    #[test]
+    fn fallback_scan_host_strips_user_prefix() {
+        assert_eq!(fallback_scan_host("deploy@example.com"), "example.com");
+        assert_eq!(fallback_scan_host("prod-box"), "prod-box");
     }
 
     #[test]
@@ -842,6 +1185,7 @@ mod tests {
             ssh_binary_available: true,
             paired_node_count: 0,
             managed_target_count: 0,
+            pinned_target_count: 0,
             managed_key_count: 0,
             encrypted_key_count: 0,
             configured_node: None,
@@ -864,6 +1208,7 @@ mod tests {
             label: "prod".to_string(),
             target: "deploy@example.com".to_string(),
             port: None,
+            known_host: None,
             auth_mode: SshAuthMode::Managed,
             key_id: Some(1),
             key_name: Some("prod-key".to_string()),
@@ -876,6 +1221,7 @@ mod tests {
             ssh_binary_available: true,
             paired_node_count: 0,
             managed_target_count: 1,
+            pinned_target_count: 0,
             managed_key_count: 1,
             encrypted_key_count: 1,
             configured_node: None,
@@ -888,6 +1234,42 @@ mod tests {
             checks
                 .iter()
                 .any(|check| check.id == "managed-key-vault" && check.level == "error")
+        );
+    }
+
+    #[test]
+    fn doctor_checks_warn_when_active_target_is_not_pinned() {
+        let default_target = SshTargetEntry {
+            id: 1,
+            label: "prod".to_string(),
+            target: "deploy@example.com".to_string(),
+            port: None,
+            known_host: None,
+            auth_mode: SshAuthMode::System,
+            key_id: None,
+            key_name: None,
+            is_default: true,
+            created_at: "2026-03-28T00:00:00Z".to_string(),
+            updated_at: "2026-03-28T00:00:00Z".to_string(),
+        };
+        let checks = build_doctor_checks(DoctorInputs {
+            exec_host: "ssh",
+            ssh_binary_available: true,
+            paired_node_count: 0,
+            managed_target_count: 1,
+            pinned_target_count: 0,
+            managed_key_count: 0,
+            encrypted_key_count: 0,
+            configured_node: None,
+            legacy_target: None,
+            default_target: Some(&default_target),
+            vault_is_unsealed: false,
+        });
+
+        assert!(
+            checks
+                .iter()
+                .any(|check| check.id == "ssh-host-pinning" && check.level == "warn")
         );
     }
 }

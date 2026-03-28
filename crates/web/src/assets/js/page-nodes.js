@@ -415,7 +415,7 @@ function RemoteExecStatusCard() {
 			</div>
 		</div>
 
-		<div class="grid gap-2 md:grid-cols-4">
+		<div class="grid gap-2 md:grid-cols-5">
 			<div class="rounded border border-[var(--border)] bg-[var(--bg)] px-3 py-2">
 				<div class="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">Backend</div>
 				<div class="text-sm text-[var(--text-strong)] mt-1">${execHost}</div>
@@ -426,7 +426,10 @@ function RemoteExecStatusCard() {
 			</div>
 			<div class="rounded border border-[var(--border)] bg-[var(--bg)] px-3 py-2">
 				<div class="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">Managed Targets</div>
-				<div class="text-sm text-[var(--text-strong)] mt-1">${snapshot?.managed_target_count ?? 0}</div>
+				<div class="text-sm text-[var(--text-strong)] mt-1">
+					${snapshot?.managed_target_count ?? 0}
+					${snapshot?.pinned_target_count ? html` <span class="text-xs text-[var(--text-muted)]">(${snapshot.pinned_target_count} pinned)</span>` : null}
+				</div>
 			</div>
 			<div class="rounded border border-[var(--border)] bg-[var(--bg)] px-3 py-2">
 				<div class="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">Managed Keys</div>

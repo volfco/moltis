@@ -124,6 +124,7 @@ pub struct SshTargetEntry {
     pub label: String,
     pub target: String,
     pub port: Option<u16>,
+    pub known_host: Option<String>,
     pub auth_mode: SshAuthMode,
     pub key_id: Option<i64>,
     pub key_name: Option<String>,
@@ -139,6 +140,7 @@ pub struct SshResolvedTarget {
     pub label: String,
     pub target: String,
     pub port: Option<u16>,
+    pub known_host: Option<String>,
     pub auth_mode: SshAuthMode,
     pub key_id: Option<i64>,
     pub key_name: Option<String>,
@@ -324,6 +326,7 @@ impl CredentialStore {
                 label       TEXT    NOT NULL UNIQUE,
                 target      TEXT    NOT NULL,
                 port        INTEGER,
+                known_host  TEXT,
                 auth_mode   TEXT    NOT NULL DEFAULT 'system',
                 key_id      INTEGER,
                 is_default  INTEGER NOT NULL DEFAULT 0,
@@ -874,6 +877,7 @@ impl CredentialStore {
             String,
             String,
             Option<i64>,
+            Option<String>,
             String,
             Option<i64>,
             Option<String>,
@@ -886,6 +890,7 @@ impl CredentialStore {
                 t.label,
                 t.target,
                 t.port,
+                t.known_host,
                 t.auth_mode,
                 t.key_id,
                 k.name,
@@ -906,6 +911,7 @@ impl CredentialStore {
                     label,
                     target,
                     port,
+                    known_host,
                     auth_mode,
                     key_id,
                     key_name,
@@ -919,6 +925,7 @@ impl CredentialStore {
                         label,
                         target,
                         port,
+                        known_host,
                         auth_mode: SshAuthMode::parse_db(&auth_mode)?,
                         key_id,
                         key_name,
@@ -936,12 +943,17 @@ impl CredentialStore {
         label: &str,
         target: &str,
         port: Option<u16>,
+        known_host: Option<&str>,
         auth_mode: SshAuthMode,
         key_id: Option<i64>,
         is_default: bool,
     ) -> anyhow::Result<i64> {
         let label = label.trim();
         let target = target.trim();
+        let known_host = known_host
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
         if label.is_empty() {
             anyhow::bail!("ssh target label is required");
         }
@@ -979,12 +991,13 @@ impl CredentialStore {
         }
 
         let result = sqlx::query(
-            "INSERT INTO ssh_targets (label, target, port, auth_mode, key_id, is_default)
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO ssh_targets (label, target, port, known_host, auth_mode, key_id, is_default)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(label)
         .bind(target)
         .bind(port.map(i64::from))
+        .bind(known_host)
         .bind(auth_mode.as_db_str())
         .bind(key_id)
         .bind(if should_be_default {
@@ -1050,6 +1063,28 @@ impl CredentialStore {
         Ok(())
     }
 
+    pub async fn update_ssh_target_known_host(
+        &self,
+        id: i64,
+        known_host: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let known_host = known_host
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        let result = sqlx::query(
+            "UPDATE ssh_targets SET known_host = ?, updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(known_host)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            anyhow::bail!("ssh target not found");
+        }
+        Ok(())
+    }
+
     pub async fn ssh_target_count(&self) -> anyhow::Result<usize> {
         let row: Option<(i64,)> = sqlx::query_as("SELECT COUNT(1) FROM ssh_targets")
             .fetch_optional(&self.pool)
@@ -1064,6 +1099,7 @@ impl CredentialStore {
             String,
             String,
             Option<i64>,
+            Option<String>,
             String,
             Option<i64>,
             Option<String>,
@@ -1073,6 +1109,7 @@ impl CredentialStore {
                     t.label,
                     t.target,
                     t.port,
+                    t.known_host,
                     t.auth_mode,
                     t.key_id,
                     k.name
@@ -1085,7 +1122,7 @@ impl CredentialStore {
         .fetch_optional(&self.pool)
         .await?;
 
-        let Some((id, label, target, port, auth_mode, key_id, key_name)) = row else {
+        let Some((id, label, target, port, known_host, auth_mode, key_id, key_name)) = row else {
             return Ok(None);
         };
 
@@ -1095,6 +1132,7 @@ impl CredentialStore {
             label,
             target,
             port: port.and_then(|value| u16::try_from(value).ok()),
+            known_host,
             auth_mode: SshAuthMode::parse_db(&auth_mode)?,
             key_id,
             key_name,
@@ -1126,6 +1164,7 @@ impl CredentialStore {
             label: entry.label,
             target: entry.target,
             port: entry.port,
+            known_host: entry.known_host,
             auth_mode: entry.auth_mode,
             key_id: entry.key_id,
             key_name: entry.key_name,
@@ -1141,6 +1180,7 @@ impl CredentialStore {
             String,
             String,
             Option<i64>,
+            Option<String>,
             String,
             Option<i64>,
             Option<String>,
@@ -1150,6 +1190,7 @@ impl CredentialStore {
                     t.label,
                     t.target,
                     t.port,
+                    t.known_host,
                     t.auth_mode,
                     t.key_id,
                     k.name
@@ -1161,7 +1202,7 @@ impl CredentialStore {
         .fetch_optional(&self.pool)
         .await?;
 
-        let Some((id, label, target, port, auth_mode, key_id, key_name)) = row else {
+        let Some((id, label, target, port, known_host, auth_mode, key_id, key_name)) = row else {
             return Ok(None);
         };
 
@@ -1171,6 +1212,7 @@ impl CredentialStore {
             label,
             target,
             port: port.and_then(|value| u16::try_from(value).ok()),
+            known_host,
             auth_mode: SshAuthMode::parse_db(&auth_mode)?,
             key_id,
             key_name,
@@ -1675,6 +1717,7 @@ mod tests {
                 "prod-box",
                 "deploy@example.com",
                 None,
+                None,
                 SshAuthMode::Managed,
                 Some(key_id),
                 true,
@@ -1773,6 +1816,7 @@ mod tests {
                 "prod-box",
                 "deploy@example.com",
                 Some(2222),
+                Some("|1|salt= ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMoltisHostPin"),
                 SshAuthMode::Managed,
                 Some(key_id),
                 true,
@@ -1790,6 +1834,10 @@ mod tests {
         assert_eq!(targets[0].id, target_id);
         assert_eq!(targets[0].label, "prod-box");
         assert_eq!(targets[0].port, Some(2222));
+        assert_eq!(
+            targets[0].known_host.as_deref(),
+            Some("|1|salt= ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMoltisHostPin")
+        );
         assert_eq!(targets[0].auth_mode, SshAuthMode::Managed);
         assert_eq!(targets[0].key_name.as_deref(), Some("prod-key"));
         assert!(targets[0].is_default);
@@ -1797,6 +1845,10 @@ mod tests {
         let resolved = store.resolve_ssh_target("prod-box").await.unwrap().unwrap();
         assert_eq!(resolved.node_id, format!("ssh:target:{target_id}"));
         assert_eq!(resolved.target, "deploy@example.com");
+        assert_eq!(
+            resolved.known_host.as_deref(),
+            Some("|1|salt= ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMoltisHostPin")
+        );
 
         let default_target = store.get_default_ssh_target().await.unwrap().unwrap();
         assert_eq!(default_target.id, target_id);
@@ -1835,6 +1887,7 @@ mod tests {
                 "first-box",
                 "deploy@first.example.com",
                 None,
+                None,
                 SshAuthMode::Managed,
                 Some(key_id),
                 false,
@@ -1845,6 +1898,7 @@ mod tests {
             .create_ssh_target(
                 "second-box",
                 "deploy@second.example.com",
+                None,
                 None,
                 SshAuthMode::Managed,
                 Some(key_id),
@@ -1860,6 +1914,53 @@ mod tests {
 
         let default_after_delete = store.get_default_ssh_target().await.unwrap().unwrap();
         assert_eq!(default_after_delete.id, second_target_id);
+    }
+
+    #[tokio::test]
+    async fn test_update_ssh_target_known_host_round_trips() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let store = CredentialStore::new(pool).await.unwrap();
+
+        let target_id = store
+            .create_ssh_target(
+                "prod-box",
+                "deploy@example.com",
+                None,
+                None,
+                SshAuthMode::System,
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+
+        store
+            .update_ssh_target_known_host(
+                target_id,
+                Some("prod.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMoltisHostPin"),
+            )
+            .await
+            .unwrap();
+        let pinned = store
+            .resolve_ssh_target_by_id(target_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            pinned.known_host.as_deref(),
+            Some("prod.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMoltisHostPin")
+        );
+
+        store
+            .update_ssh_target_known_host(target_id, None)
+            .await
+            .unwrap();
+        let cleared = store
+            .resolve_ssh_target_by_id(target_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(cleared.known_host.is_none());
     }
 
     #[cfg(feature = "vault")]

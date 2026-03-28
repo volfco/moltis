@@ -140,7 +140,9 @@ Currently encrypted:
 
 The `encrypted` column in `env_variables` and `ssh_keys` tracks whether each
 row is encrypted (1) or plaintext (0). When the vault is unsealed, new env vars
-and managed SSH private keys are written encrypted. When sealed or
+and managed SSH private keys are written encrypted. Imported passphrase-protected
+SSH keys are decrypted during import and then stored under the vault-managed
+key hierarchy. When sealed or
 uninitialized, they are written as plaintext.
 
 On the first successful vault unseal after enabling the feature, Moltis also

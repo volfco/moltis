@@ -153,6 +153,9 @@ Managed SSH targets now support:
 - a default target, used when a chat session does not pin a specific route
 - connectivity tests from the web UI
 - either **System OpenSSH** auth or a **managed deploy key**
+- optional host-key pinning via a pasted `known_hosts` line
+- one-click scan, refresh, and clear actions for saved host pins in Settings
+- passphrase-protected private-key imports during setup
 
 The Nodes page also includes a **Remote Exec Status** panel that acts like a
 lightweight doctor:
@@ -162,7 +165,15 @@ lightweight doctor:
 - flags obvious misconfigurations, such as `tools.exec.host = "ssh"` with no
   active target or a managed key that cannot be decrypted because the vault is
   locked
+- warns when the active managed SSH route is not host-pinned
 - lets you test the active SSH route without leaving the page
+
+The CLI now mirrors the basic setup view with `moltis doctor`, including:
+
+- active remote-exec backend (`local`, `node`, or `ssh`)
+- SSH client discovery and version
+- managed SSH key / target / host-pin inventory
+- warnings for legacy `tools.exec.ssh_target` config and unpinned active routes
 
 ## CLI Reference
 

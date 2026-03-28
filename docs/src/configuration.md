@@ -76,12 +76,20 @@ When `host = "ssh"`, Moltis can work in two modes:
 - **Managed targets**: create or import a deploy key in **Settings → SSH**,
   then bind that key to a named target. Moltis stores the private key in its
   credential store and encrypts it with the vault whenever the vault is
-  unsealed.
+  unsealed. Imported keys may be passphrase-protected, Moltis strips the
+  passphrase during import so runtime execution can stay non-interactive.
+
+For stricter SSH verification, managed targets also accept a pasted
+`known_hosts` line from `ssh-keyscan -H host`. The SSH settings page can scan
+that for you, and saved targets can refresh or clear their stored pin later.
+When present, Moltis uses that pin instead of your global OpenSSH known-host
+policy for that target.
 
 Managed targets appear in the Nodes page and chat node picker, so users can see
 where `exec` will run without digging through config. If multiple managed
 targets exist, the default one is used when `tools.exec.host = "ssh"` and no
-session-specific route is selected.
+session-specific route is selected. `moltis doctor` also reports remote-exec
+inventory, active backend mode, and obvious SSH setup problems from the CLI.
 
 ## Sandbox Configuration
 

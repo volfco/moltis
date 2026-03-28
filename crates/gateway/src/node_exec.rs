@@ -222,18 +222,41 @@ async fn exec_over_ssh(
     target: &str,
     port: Option<u16>,
     identity_file: Option<&Path>,
+    known_host: Option<&str>,
     command: &str,
     timeout_secs: u64,
     cwd: Option<&str>,
     env: Option<&HashMap<String, String>>,
     max_output_bytes: usize,
 ) -> anyhow::Result<NodeExecResult> {
+    let known_hosts_file = if let Some(known_host) = known_host {
+        let mut file = tempfile::NamedTempFile::new()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o600))?;
+        }
+        file.write_all(known_host.as_bytes())?;
+        file.write_all(b"\n")?;
+        file.flush()?;
+        Some(file)
+    } else {
+        None
+    };
     let mut ssh = Command::new("ssh");
     ssh.arg("-T")
         .arg("-o")
         .arg("BatchMode=yes")
         .arg("-o")
         .arg(format!("ConnectTimeout={}", timeout_secs.clamp(5, 30)));
+    if let Some(known_hosts_file) = known_hosts_file.as_ref() {
+        ssh.arg("-o").arg("StrictHostKeyChecking=yes");
+        ssh.arg("-o").arg(format!(
+            "UserKnownHostsFile={}",
+            known_hosts_file.path().display()
+        ));
+        ssh.arg("-o").arg("GlobalKnownHostsFile=/dev/null");
+    }
     if let Some(identity_file) = identity_file {
         ssh.arg("-o").arg("IdentitiesOnly=yes");
         ssh.arg("-i").arg(identity_file);
@@ -301,6 +324,7 @@ pub async fn exec_resolved_ssh_target(
                 &target.target,
                 target.port,
                 None,
+                target.known_host.as_deref(),
                 command,
                 timeout_secs,
                 cwd,
@@ -322,6 +346,7 @@ pub async fn exec_resolved_ssh_target(
                 &target.target,
                 target.port,
                 Some(temp_key.path()),
+                target.known_host.as_deref(),
                 command,
                 timeout_secs,
                 cwd,
@@ -604,6 +629,7 @@ impl moltis_tools::exec::NodeExecProvider for GatewayNodeExecProvider {
                     target,
                     None,
                     None,
+                    None,
                     command,
                     timeout_secs,
                     cwd,
@@ -733,6 +759,7 @@ impl moltis_tools::nodes::NodeInfoProvider for GatewayNodeInfoProvider {
                             label: target.label,
                             target: target.target,
                             port: target.port,
+                            known_host: target.known_host,
                             auth_mode: target.auth_mode,
                             key_id: target.key_id,
                             key_name: target.key_name,

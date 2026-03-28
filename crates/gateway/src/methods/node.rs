@@ -57,6 +57,7 @@ fn ssh_target_summary_json(target: &SshTargetEntry) -> serde_json::Value {
         "capabilities": ["system.run"],
         "commands": ["system.run"],
         "remoteIp": serde_json::Value::Null,
+        "hostPinned": target.known_host.is_some(),
         "telemetry": {
             "memTotal": serde_json::Value::Null,
             "memAvailable": serde_json::Value::Null,
@@ -116,6 +117,7 @@ fn ssh_target_detail_json(target: &SshResolvedTarget) -> serde_json::Value {
         "permissions": [],
         "pathEnv": serde_json::Value::Null,
         "remoteIp": serde_json::Value::Null,
+        "hostPinned": target.known_host.is_some(),
         "connectedAt": serde_json::Value::Null,
         "telemetry": {
             "memTotal": serde_json::Value::Null,
