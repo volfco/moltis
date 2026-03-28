@@ -4,9 +4,12 @@ use {
     std::{future::Future, time::Duration},
     teloxide::{
         ApiError, RequestError,
-        payloads::{SendLocationSetters, SendMessageSetters, SendVenueSetters},
+        payloads::{
+            SendAudioSetters, SendDocumentSetters, SendLocationSetters, SendMessageSetters,
+            SendPhotoSetters, SendVenueSetters, SendVoiceSetters,
+        },
         prelude::*,
-        types::{ChatAction, ChatId, InputFile, MessageId, ParseMode, ReplyParameters},
+        types::{ChatAction, ChatId, InputFile, MessageId, ParseMode, ReplyParameters, ThreadId},
     },
     tracing::{debug, info, warn},
 };
@@ -24,6 +27,23 @@ use crate::{
     markdown::{self, TELEGRAM_MAX_MESSAGE_LEN},
     state::AccountStateMap,
 };
+
+/// Parse a composite `to` address into `(ChatId, Option<ThreadId>)`.
+///
+/// Forum-topic sends encode the thread as `"chat_id:thread_id"`.
+/// Plain sends are just `"chat_id"`.
+fn parse_chat_target(to: &str) -> Result<(ChatId, Option<ThreadId>)> {
+    if let Some((chat_part, thread_part)) = to.split_once(':') {
+        let chat_id = ChatId(chat_part.parse::<i64>()?);
+        let thread_id = thread_part
+            .parse::<i32>()
+            .ok()
+            .map(|id| ThreadId(MessageId(id)));
+        Ok((chat_id, thread_id))
+    } else {
+        Ok((ChatId(to.parse::<i64>()?), None))
+    }
+}
 
 /// Outbound message sender for Telegram.
 pub struct TelegramOutbound {
@@ -93,6 +113,7 @@ impl TelegramOutbound {
         account_id: &str,
         to: &str,
         chat_id: ChatId,
+        thread_id: Option<ThreadId>,
         chunk: &str,
         reply_params: Option<&ReplyParameters>,
         silent: bool,
@@ -102,6 +123,9 @@ impl TelegramOutbound {
                 let mut html_req = bot.send_message(chat_id, chunk).parse_mode(ParseMode::Html);
                 if silent {
                     html_req = html_req.disable_notification(true);
+                }
+                if let Some(tid) = thread_id {
+                    html_req = html_req.message_thread_id(tid);
                 }
                 if let Some(rp) = reply_params {
                     html_req = html_req.reply_parameters(rp.clone());
@@ -124,6 +148,9 @@ impl TelegramOutbound {
                         let mut plain_req = bot.send_message(chat_id, &plain_chunk);
                         if silent {
                             plain_req = plain_req.disable_notification(true);
+                        }
+                        if let Some(tid) = thread_id {
+                            plain_req = plain_req.message_thread_id(tid);
                         }
                         if let Some(rp) = reply_params {
                             plain_req = plain_req.reply_parameters(rp.clone());
@@ -439,7 +466,7 @@ impl ChannelOutbound for TelegramOutbound {
         reply_to: Option<&str>,
     ) -> Result<()> {
         let bot = self.get_bot(account_id)?;
-        let chat_id = ChatId(to.parse::<i64>()?);
+        let (chat_id, thread_id) = parse_chat_target(to)?;
         let rp = self.reply_params(account_id, reply_to);
 
         // Send typing indicator
@@ -462,6 +489,7 @@ impl ChannelOutbound for TelegramOutbound {
                 account_id,
                 to,
                 chat_id,
+                thread_id,
                 chunk,
                 reply_params,
                 false,
@@ -489,7 +517,7 @@ impl ChannelOutbound for TelegramOutbound {
         reply_to: Option<&str>,
     ) -> Result<()> {
         let bot = self.get_bot(account_id)?;
-        let chat_id = ChatId(to.parse::<i64>()?);
+        let (chat_id, thread_id) = parse_chat_target(to)?;
         let rp = self.reply_params(account_id, reply_to);
 
         // Send typing indicator
@@ -522,6 +550,7 @@ impl ChannelOutbound for TelegramOutbound {
                         account_id,
                         to,
                         chat_id,
+                        thread_id,
                         chunk,
                         rp.as_ref(),
                         false,
@@ -533,6 +562,7 @@ impl ChannelOutbound for TelegramOutbound {
                         account_id,
                         to,
                         chat_id,
+                        thread_id,
                         suffix_html,
                         rp.as_ref(),
                         true,
@@ -557,6 +587,7 @@ impl ChannelOutbound for TelegramOutbound {
                 account_id,
                 to,
                 chat_id,
+                thread_id,
                 &content,
                 rp.as_ref(),
                 false,
@@ -584,21 +615,30 @@ impl ChannelOutbound for TelegramOutbound {
         reply_to: Option<&str>,
     ) -> Result<()> {
         let bot = self.get_bot(account_id)?;
-        let chat_id = ChatId(to.parse::<i64>()?);
+        let (chat_id, thread_id) = parse_chat_target(to)?;
         let rp = self.reply_params(account_id, reply_to);
 
         // Send raw HTML chunks without markdown conversion.
         let chunks = markdown::chunk_message(html, TELEGRAM_MAX_MESSAGE_LEN);
         for chunk in &chunks {
-            self.send_chunk_with_fallback(&bot, account_id, to, chat_id, chunk, rp.as_ref(), false)
-                .await?;
+            self.send_chunk_with_fallback(
+                &bot,
+                account_id,
+                to,
+                chat_id,
+                thread_id,
+                chunk,
+                rp.as_ref(),
+                false,
+            )
+            .await?;
         }
         Ok(())
     }
 
     async fn send_typing(&self, account_id: &str, to: &str) -> Result<()> {
         let bot = self.get_bot(account_id)?;
-        let chat_id = ChatId(to.parse::<i64>()?);
+        let (chat_id, _thread_id) = parse_chat_target(to)?;
         let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
         Ok(())
     }
@@ -611,7 +651,7 @@ impl ChannelOutbound for TelegramOutbound {
         reply_to: Option<&str>,
     ) -> Result<()> {
         let bot = self.get_bot(account_id)?;
-        let chat_id = ChatId(to.parse::<i64>()?);
+        let (chat_id, thread_id) = parse_chat_target(to)?;
         let rp = self.reply_params(account_id, reply_to);
 
         let chunks = markdown::chunk_markdown_html(text, TELEGRAM_MAX_MESSAGE_LEN);
@@ -625,8 +665,17 @@ impl ChannelOutbound for TelegramOutbound {
         );
 
         for chunk in chunks.iter() {
-            self.send_chunk_with_fallback(&bot, account_id, to, chat_id, chunk, rp.as_ref(), true)
-                .await?;
+            self.send_chunk_with_fallback(
+                &bot,
+                account_id,
+                to,
+                chat_id,
+                thread_id,
+                chunk,
+                rp.as_ref(),
+                true,
+            )
+            .await?;
         }
 
         info!(
@@ -648,7 +697,7 @@ impl ChannelOutbound for TelegramOutbound {
         reply_to: Option<&str>,
     ) -> Result<()> {
         let bot = self.get_bot(account_id)?;
-        let chat_id = ChatId(to.parse::<i64>()?);
+        let (chat_id, thread_id) = parse_chat_target(to)?;
         let rp = self.reply_params(account_id, reply_to);
         let media_mime = payload
             .media
@@ -698,6 +747,9 @@ impl ChannelOutbound for TelegramOutbound {
                 if media.mime_type.starts_with("image/") {
                     let input = InputFile::memory(bytes.clone()).file_name(filename.clone());
                     let mut req = bot.send_photo(chat_id, input);
+                    if let Some(tid) = thread_id {
+                        req = req.message_thread_id(tid);
+                    }
                     if !payload.text.is_empty() {
                         req = req.caption(&payload.text);
                     }
@@ -729,6 +781,9 @@ impl ChannelOutbound for TelegramOutbound {
                                 );
                                 let input = InputFile::memory(bytes).file_name(filename);
                                 let mut req = bot.send_document(chat_id, input);
+                                if let Some(tid) = thread_id {
+                                    req = req.message_thread_id(tid);
+                                }
                                 if !payload.text.is_empty() {
                                     req = req.caption(&payload.text);
                                 }
@@ -752,6 +807,9 @@ impl ChannelOutbound for TelegramOutbound {
                 if media.mime_type == "audio/ogg" {
                     let input = InputFile::memory(bytes).file_name("voice.ogg");
                     let mut req = bot.send_voice(chat_id, input);
+                    if let Some(tid) = thread_id {
+                        req = req.message_thread_id(tid);
+                    }
                     if !payload.text.is_empty() {
                         req = req.caption(&payload.text);
                     }
@@ -767,6 +825,9 @@ impl ChannelOutbound for TelegramOutbound {
                 } else if media.mime_type.starts_with("audio/") {
                     let input = InputFile::memory(bytes).file_name("audio.mp3");
                     let mut req = bot.send_audio(chat_id, input);
+                    if let Some(tid) = thread_id {
+                        req = req.message_thread_id(tid);
+                    }
                     if !payload.text.is_empty() {
                         req = req.caption(&payload.text);
                     }
@@ -782,6 +843,9 @@ impl ChannelOutbound for TelegramOutbound {
                 } else {
                     let input = InputFile::memory(bytes).file_name(filename);
                     let mut req = bot.send_document(chat_id, input);
+                    if let Some(tid) = thread_id {
+                        req = req.message_thread_id(tid);
+                    }
                     if !payload.text.is_empty() {
                         req = req.caption(&payload.text);
                     }
@@ -820,6 +884,9 @@ impl ChannelOutbound for TelegramOutbound {
                     },
                     "audio/ogg" => {
                         let mut req = bot.send_voice(chat_id, input);
+                        if let Some(tid) = thread_id {
+                            req = req.message_thread_id(tid);
+                        }
                         if !payload.text.is_empty() {
                             req = req.caption(&payload.text);
                         }
@@ -835,6 +902,9 @@ impl ChannelOutbound for TelegramOutbound {
                     },
                     t if t.starts_with("audio/") => {
                         let mut req = bot.send_audio(chat_id, input);
+                        if let Some(tid) = thread_id {
+                            req = req.message_thread_id(tid);
+                        }
                         if !payload.text.is_empty() {
                             req = req.caption(&payload.text);
                         }
@@ -850,6 +920,9 @@ impl ChannelOutbound for TelegramOutbound {
                     },
                     _ => {
                         let mut req = bot.send_document(chat_id, input);
+                        if let Some(tid) = thread_id {
+                            req = req.message_thread_id(tid);
+                        }
                         if !payload.text.is_empty() {
                             req = req.caption(&payload.text);
                         }
@@ -883,7 +956,7 @@ impl ChannelOutbound for TelegramOutbound {
         reply_to: Option<&str>,
     ) -> Result<()> {
         let bot = self.get_bot(account_id)?;
-        let chat_id = ChatId(to.parse::<i64>()?);
+        let (chat_id, thread_id) = parse_chat_target(to)?;
         let rp = self.reply_params(account_id, reply_to);
         info!(
             account_id,
@@ -899,12 +972,18 @@ impl ChannelOutbound for TelegramOutbound {
             // Venue shows the place name in the chat bubble.
             let address = format!("{latitude:.6}, {longitude:.6}");
             let mut req = bot.send_venue(chat_id, latitude, longitude, name, address);
+            if let Some(tid) = thread_id {
+                req = req.message_thread_id(tid);
+            }
             if let Some(ref rp) = rp {
                 req = req.reply_parameters(rp.clone());
             }
             req.await.channel_context("send venue")?;
         } else {
             let mut req = bot.send_location(chat_id, latitude, longitude);
+            if let Some(tid) = thread_id {
+                req = req.message_thread_id(tid);
+            }
             if let Some(ref rp) = rp {
                 req = req.reply_parameters(rp.clone());
             }
@@ -966,7 +1045,7 @@ impl ChannelStreamOutbound for TelegramOutbound {
         mut stream: StreamReceiver,
     ) -> Result<()> {
         let bot = self.get_bot(account_id)?;
-        let chat_id = ChatId(to.parse::<i64>()?);
+        let (chat_id, thread_id) = parse_chat_target(to)?;
         let rp = self.reply_params(account_id, reply_to);
         let stream_cfg = self.stream_send_config(account_id);
 
@@ -1003,6 +1082,7 @@ impl ChannelStreamOutbound for TelegramOutbound {
                                             account_id,
                                             to,
                                             chat_id,
+                                            thread_id,
                                             display,
                                             rp.as_ref(),
                                             false,
@@ -1060,6 +1140,7 @@ impl ChannelStreamOutbound for TelegramOutbound {
                         account_id,
                         to,
                         chat_id,
+                        thread_id,
                         first,
                         rp.as_ref(),
                         false,
@@ -1075,6 +1156,7 @@ impl ChannelStreamOutbound for TelegramOutbound {
                         account_id,
                         to,
                         chat_id,
+                        thread_id,
                         chunk,
                         rp.as_ref(),
                         false,
@@ -1094,6 +1176,7 @@ impl ChannelStreamOutbound for TelegramOutbound {
                     account_id,
                     to,
                     chat_id,
+                    thread_id,
                     "Reply complete.",
                     rp.as_ref(),
                     false,

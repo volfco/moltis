@@ -5,8 +5,8 @@ use {
         payloads::SendMessageSetters,
         prelude::*,
         types::{
-            CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, MediaKind, MessageKind,
-            ParseMode,
+            CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, MediaKind, MessageId,
+            MessageKind, ParseMode, ThreadId,
         },
     },
     tracing::{debug, info, warn},
@@ -28,6 +28,34 @@ use crate::{
     otp::{OtpInitResult, OtpVerifyResult},
     state::AccountStateMap,
 };
+
+/// Parse a composite `to` address into `(ChatId, Option<ThreadId>)`.
+fn parse_chat_target(to: &str) -> (ChatId, Option<ThreadId>) {
+    if let Some((chat_part, thread_part)) = to.split_once(':') {
+        let chat_id = ChatId(chat_part.parse::<i64>().unwrap_or(0));
+        let thread_id = thread_part
+            .parse::<i32>()
+            .ok()
+            .map(|id| ThreadId(MessageId(id)));
+        (chat_id, thread_id)
+    } else {
+        (ChatId(to.parse::<i64>().unwrap_or(0)), None)
+    }
+}
+
+/// Extract the forum-topic thread ID from a Telegram message, if present.
+fn extract_thread_id(msg: &Message) -> Option<String> {
+    msg.thread_id.map(|tid| tid.0.0.to_string())
+}
+
+/// Compose the outbound `to` address for a Telegram message, encoding the
+/// forum-topic thread ID when present: `"chat_id:thread_id"`.
+fn outbound_to_for_msg(msg: &Message) -> String {
+    match extract_thread_id(msg) {
+        Some(tid) => format!("{}:{}", msg.chat.id.0, tid),
+        None => msg.chat.id.0.to_string(),
+    }
+}
 
 /// Shared context injected into teloxide's dispatcher.
 #[derive(Clone)]
@@ -224,7 +252,7 @@ pub async fn handle_message_direct(
             if let Err(e) = outbound
                 .send_text(
                     account_id,
-                    &msg.chat.id.0.to_string(),
+                    &outbound_to_for_msg(&msg),
                     "I can't understand voice, you did not configure it, please visit Settings -> Voice",
                     None,
                 )
@@ -470,6 +498,7 @@ pub async fn handle_message_direct(
                 account_id: account_id.to_string(),
                 chat_id: msg.chat.id.0.to_string(),
                 message_id: Some(msg.id.0.to_string()),
+                thread_id: extract_thread_id(&msg),
             };
             sink.update_location(&reply_target, lat, lon).await
         } else {
@@ -492,7 +521,7 @@ pub async fn handle_message_direct(
             if let Err(e) = outbound
                 .send_text_silent(
                     account_id,
-                    &msg.chat.id.0.to_string(),
+                    &outbound_to_for_msg(&msg),
                     "Location updated.",
                     None,
                 )
@@ -509,7 +538,7 @@ pub async fn handle_message_direct(
             if let Err(e) = outbound
                 .send_text_silent(
                     account_id,
-                    &msg.chat.id.0.to_string(),
+                    &outbound_to_for_msg(&msg),
                     "Live location tracking started. Your location will be updated automatically.",
                     None,
                 )
@@ -557,6 +586,7 @@ pub async fn handle_message_direct(
             account_id: account_id.to_string(),
             chat_id: msg.chat.id.0.to_string(),
             message_id: Some(msg.id.0.to_string()),
+            thread_id: extract_thread_id(&msg),
         };
 
         info!(
@@ -585,7 +615,7 @@ pub async fn handle_message_direct(
                     if let Some(bot) = bot {
                         match context_result {
                             Ok(text) => {
-                                send_context_card(&bot, &reply_target.chat_id, &text).await;
+                                send_context_card(&bot, &reply_target.outbound_to(), &text).await;
                             },
                             Err(e) => {
                                 let _ = bot
@@ -610,7 +640,7 @@ pub async fn handle_message_direct(
                     if let Some(bot) = bot {
                         match list_result {
                             Ok(text) => {
-                                send_agent_keyboard(&bot, &reply_target.chat_id, &text).await;
+                                send_agent_keyboard(&bot, &reply_target.outbound_to(), &text).await;
                             },
                             Err(e) => {
                                 let _ = bot
@@ -635,7 +665,7 @@ pub async fn handle_message_direct(
                     if let Some(bot) = bot {
                         match list_result {
                             Ok(text) => {
-                                send_model_keyboard(&bot, &reply_target.chat_id, &text).await;
+                                send_model_keyboard(&bot, &reply_target.outbound_to(), &text).await;
                             },
                             Err(e) => {
                                 let _ = bot
@@ -660,7 +690,8 @@ pub async fn handle_message_direct(
                     if let Some(bot) = bot {
                         match list_result {
                             Ok(text) => {
-                                send_sandbox_keyboard(&bot, &reply_target.chat_id, &text).await;
+                                send_sandbox_keyboard(&bot, &reply_target.outbound_to(), &text)
+                                    .await;
                             },
                             Err(e) => {
                                 let _ = bot
@@ -687,7 +718,8 @@ pub async fn handle_message_direct(
                     if let Some(bot) = bot {
                         match list_result {
                             Ok(text) => {
-                                send_sessions_keyboard(&bot, &reply_target.chat_id, &text).await;
+                                send_sessions_keyboard(&bot, &reply_target.outbound_to(), &text)
+                                    .await;
                             },
                             Err(e) => {
                                 let _ = bot
@@ -717,7 +749,7 @@ pub async fn handle_message_direct(
                 };
                 if let Some(outbound) = outbound
                     && let Err(e) = outbound
-                        .send_text(account_id, &reply_target.chat_id, &response, None)
+                        .send_text(account_id, &reply_target.outbound_to(), &response, None)
                         .await
                 {
                     warn!(account_id, "failed to send command response: {e}");
@@ -1034,6 +1066,7 @@ pub async fn handle_edited_location(
             account_id: account_id.to_string(),
             chat_id: msg.chat.id.0.to_string(),
             message_id: Some(msg.id.0.to_string()),
+            thread_id: extract_thread_id(&msg),
         };
         sink.update_location(&reply_target, lat, lon).await;
     }
@@ -1055,8 +1088,8 @@ async fn handle_message(
 ///
 /// Parses the text response from `dispatch_command("sessions")` to extract
 /// session labels, then sends an inline keyboard with one button per session.
-async fn send_sessions_keyboard(bot: &Bot, chat_id: &str, sessions_text: &str) {
-    let chat = ChatId(chat_id.parse().unwrap_or(0));
+async fn send_sessions_keyboard(bot: &Bot, to: &str, sessions_text: &str) {
+    let (chat, thread_id) = parse_chat_target(to);
 
     // Parse numbered lines like "1. Session label (5 msgs) *"
     let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
@@ -1081,23 +1114,30 @@ async fn send_sessions_keyboard(bot: &Bot, chat_id: &str, sessions_text: &str) {
     }
 
     if buttons.is_empty() {
-        let _ = bot.send_message(chat, sessions_text).await;
+        let mut req = bot.send_message(chat, sessions_text);
+        if let Some(tid) = thread_id {
+            req = req.message_thread_id(tid);
+        }
+        let _ = req.await;
         return;
     }
 
     let keyboard = InlineKeyboardMarkup::new(buttons);
-    let _ = bot
+    let mut req = bot
         .send_message(chat, "Select a session:")
-        .reply_markup(keyboard)
-        .await;
+        .reply_markup(keyboard);
+    if let Some(tid) = thread_id {
+        req = req.message_thread_id(tid);
+    }
+    let _ = req.await;
 }
 
 /// Send agent selection as an inline keyboard.
 ///
 /// Parses numbered lines like:
 /// `1. 🤖 Main [main] (default) *`
-async fn send_agent_keyboard(bot: &Bot, chat_id: &str, agents_text: &str) {
-    let chat = ChatId(chat_id.parse().unwrap_or(0));
+async fn send_agent_keyboard(bot: &Bot, to: &str, agents_text: &str) {
+    let (chat, thread_id) = parse_chat_target(to);
     let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
     for line in agents_text.lines() {
         let trimmed = line.trim();
@@ -1119,23 +1159,30 @@ async fn send_agent_keyboard(bot: &Bot, chat_id: &str, agents_text: &str) {
     }
 
     if buttons.is_empty() {
-        let _ = bot.send_message(chat, agents_text).await;
+        let mut req = bot.send_message(chat, agents_text);
+        if let Some(tid) = thread_id {
+            req = req.message_thread_id(tid);
+        }
+        let _ = req.await;
         return;
     }
 
     let keyboard = InlineKeyboardMarkup::new(buttons);
-    let _ = bot
+    let mut req = bot
         .send_message(chat, "Select an agent:")
-        .reply_markup(keyboard)
-        .await;
+        .reply_markup(keyboard);
+    if let Some(tid) = thread_id {
+        req = req.message_thread_id(tid);
+    }
+    let _ = req.await;
 }
 
 /// Send context info as a formatted HTML card with blockquote sections.
 ///
 /// Parses the markdown context response from `dispatch_command("context")`
 /// and renders it as a structured Telegram HTML message.
-async fn send_context_card(bot: &Bot, chat_id: &str, context_text: &str) {
-    let chat = ChatId(chat_id.parse().unwrap_or(0));
+async fn send_context_card(bot: &Bot, to: &str, context_text: &str) {
+    let (chat, thread_id) = parse_chat_target(to);
 
     // Parse "**Key:** value" lines from the markdown response into a map.
     let mut fields: Vec<(&str, String)> = Vec::new();
@@ -1204,18 +1251,19 @@ Messages  {messages}
 Tokens    {tokens}</code>"
     );
 
-    let _ = bot
-        .send_message(chat, html)
-        .parse_mode(ParseMode::Html)
-        .await;
+    let mut req = bot.send_message(chat, html).parse_mode(ParseMode::Html);
+    if let Some(tid) = thread_id {
+        req = req.message_thread_id(tid);
+    }
+    let _ = req.await;
 }
 
 /// Send model selection as an inline keyboard.
 ///
 /// If the response starts with `providers:`, show a provider picker first.
 /// Otherwise show the model list directly.
-async fn send_model_keyboard(bot: &Bot, chat_id: &str, text: &str) {
-    let chat = ChatId(chat_id.parse().unwrap_or(0));
+async fn send_model_keyboard(bot: &Bot, to: &str, text: &str) {
+    let (chat, thread_id) = parse_chat_target(to);
 
     let is_provider_list = text.starts_with("providers:");
 
@@ -1254,7 +1302,11 @@ async fn send_model_keyboard(bot: &Bot, chat_id: &str, text: &str) {
     }
 
     if buttons.is_empty() {
-        let _ = bot.send_message(chat, "No models available.").await;
+        let mut req = bot.send_message(chat, "No models available.");
+        if let Some(tid) = thread_id {
+            req = req.message_thread_id(tid);
+        }
+        let _ = req.await;
         return;
     }
 
@@ -1265,15 +1317,19 @@ async fn send_model_keyboard(bot: &Bot, chat_id: &str, text: &str) {
     };
 
     let keyboard = InlineKeyboardMarkup::new(buttons);
-    let _ = bot.send_message(chat, heading).reply_markup(keyboard).await;
+    let mut req = bot.send_message(chat, heading).reply_markup(keyboard);
+    if let Some(tid) = thread_id {
+        req = req.message_thread_id(tid);
+    }
+    let _ = req.await;
 }
 
 /// Send sandbox status with toggle button and image picker.
 ///
 /// First line is `status:on` or `status:off`. Remaining lines are numbered
 /// images, with `*` marking the current one.
-async fn send_sandbox_keyboard(bot: &Bot, chat_id: &str, text: &str) {
-    let chat = ChatId(chat_id.parse().unwrap_or(0));
+async fn send_sandbox_keyboard(bot: &Bot, to: &str, text: &str) {
+    let (chat, thread_id) = parse_chat_target(to);
 
     let mut is_on = false;
     let mut image_buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
@@ -1321,10 +1377,13 @@ async fn send_sandbox_keyboard(bot: &Bot, chat_id: &str, text: &str) {
     buttons.extend(image_buttons);
 
     let keyboard = InlineKeyboardMarkup::new(buttons);
-    let _ = bot
+    let mut req = bot
         .send_message(chat, "⚙️ Sandbox settings:")
-        .reply_markup(keyboard)
-        .await;
+        .reply_markup(keyboard);
+    if let Some(tid) = thread_id {
+        req = req.message_thread_id(tid);
+    }
+    let _ = req.await;
 }
 
 fn escape_html_simple(s: &str) -> String {
@@ -1391,12 +1450,20 @@ pub async fn handle_callback_query(
         (state.event_sink.clone(), Arc::clone(&state.outbound))
     };
 
+    let callback_thread_id = query
+        .message
+        .as_ref()
+        .and_then(|m| m.regular_message())
+        .and_then(|m| m.thread_id)
+        .map(|tid| tid.0.0.to_string());
     let reply_target = ChannelReplyTarget {
         channel_type: ChannelType::Telegram,
         account_id: account_id.to_string(),
         chat_id: chat_id.clone(),
         message_id: None, // Callback queries don't have a message to reply-thread to.
+        thread_id: callback_thread_id,
     };
+    let outbound_to = reply_target.outbound_to().into_owned();
 
     // Provider selection → fetch models for that provider and show a new keyboard.
     if let Some(provider_name) = data.strip_prefix("model_provider:") {
@@ -1408,12 +1475,12 @@ pub async fn handle_callback_query(
             match sink.dispatch_command(&cmd, reply_target).await {
                 Ok(text) => {
                     if let Some(ref b) = bot {
-                        send_model_keyboard(b, &chat_id, &text).await;
+                        send_model_keyboard(b, &outbound_to, &text).await;
                     }
                 },
                 Err(e) => {
                     if let Err(err) = outbound
-                        .send_text(account_id, &chat_id, &format!("Error: {e}"), None)
+                        .send_text(account_id, &outbound_to, &format!("Error: {e}"), None)
                         .await
                     {
                         warn!(account_id, "failed to send callback response: {err}");
@@ -1441,7 +1508,7 @@ pub async fn handle_callback_query(
 
         // Also send as a regular message for visibility.
         if let Err(e) = outbound
-            .send_text(account_id, &chat_id, &response, None)
+            .send_text(account_id, &outbound_to, &response, None)
             .await
         {
             warn!(account_id, "failed to send callback response: {e}");
