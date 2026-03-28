@@ -4162,7 +4162,11 @@ mod tests {
     }
 
     #[test]
-    fn custom_provider_with_explicit_models_registers_without_discovery() {
+    fn custom_provider_with_explicit_models_registers_from_empty_prefetch() {
+        // After the fix, fire_discoveries() won't spawn a discovery task for
+        // a custom provider that already has explicit models.  This means the
+        // prefetched map will have no entry for that provider.  Verify the
+        // explicit model is still registered in that scenario.
         let mut config = ProvidersConfig::default();
         config.providers.insert(
             "custom-mylocal".into(),
@@ -4174,14 +4178,18 @@ mod tests {
                 ..Default::default()
             },
         );
-        let registry =
-            ProviderRegistry::from_env_with_config_and_overrides(&config, &HashMap::new());
+        // Empty prefetched — mirrors the real scenario after the fix.
+        let registry = ProviderRegistry::from_config_with_prefetched(
+            &config,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         let models = registry.list_models();
         assert!(
             models
                 .iter()
                 .any(|m| m.id == "custom-mylocal::my-model" && m.provider == "custom-mylocal"),
-            "explicit model should be registered even without discovery, got: {models:?}"
+            "explicit model should be registered even with empty prefetch, got: {models:?}"
         );
     }
 
