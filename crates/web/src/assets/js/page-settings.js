@@ -1951,7 +1951,9 @@ function SshSection() {
 					...testResults,
 					[id]: data,
 				});
-				setMessage(data.reachable ? "SSH connectivity test passed." : "SSH connectivity test failed.");
+				setMessage(
+					data.reachable ? "SSH connectivity test passed." : data.failure_hint || "SSH connectivity test failed.",
+				);
 				rerender();
 			})
 			.catch((error) => setError(error.message))
@@ -2264,8 +2266,17 @@ function SshSection() {
 											</div>
 											${
 												testResults[entry.id]
-													? html`<div class="text-xs ${testResults[entry.id].reachable ? "text-[var(--accent)]" : "text-[var(--error)]"} mt-1">
-														${testResults[entry.id].reachable ? "Reachable" : "Unreachable"}
+													? html`<div class="mt-1">
+														<div class="text-xs ${testResults[entry.id].reachable ? "text-[var(--accent)]" : "text-[var(--error)]"}">
+															${testResults[entry.id].reachable ? "Reachable" : "Unreachable"}
+														</div>
+														${
+															testResults[entry.id].failure_hint
+																? html`<div class="text-xs text-[var(--text-muted)] mt-1">
+																	Hint: ${testResults[entry.id].failure_hint}
+																</div>`
+																: null
+														}
 													</div>`
 													: null
 											}

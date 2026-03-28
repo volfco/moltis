@@ -85,6 +85,10 @@ pub struct SshTestResponse {
     stderr: String,
     exit_code: i32,
     route_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure_code: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure_hint: Option<String>,
 }
 
 impl IntoResponse for SshTestResponse {
@@ -428,17 +432,9 @@ pub async fn ssh_test_target(
         None,
         8 * 1024,
     )
-    .await
-    .map_err(|err| ApiError::bad_request(SSH_TARGET_TEST_FAILED, err.to_string()))?;
+    .await;
 
-    Ok(SshTestResponse {
-        ok: true,
-        reachable: result.exit_code == 0 && result.stdout.contains(probe),
-        stdout: result.stdout,
-        stderr: result.stderr,
-        exit_code: result.exit_code,
-        route_label: Some(target.label),
-    })
+    Ok(build_ssh_test_response(Some(target.label), &probe, result))
 }
 
 pub async fn ssh_scan_host_key(
@@ -666,17 +662,9 @@ pub async fn ssh_doctor_test_active(
         None,
         8 * 1024,
     )
-    .await
-    .map_err(|err| ApiError::bad_request(SSH_TARGET_TEST_FAILED, err.to_string()))?;
+    .await;
 
-    Ok(SshTestResponse {
-        ok: true,
-        reachable: result.exit_code == 0 && result.stdout.contains(probe),
-        stdout: result.stdout,
-        stderr: result.stderr,
-        exit_code: result.exit_code,
-        route_label: Some(route.label),
-    })
+    Ok(build_ssh_test_response(Some(route.label), &probe, result))
 }
 
 async fn refresh_ssh_target_count(state: &crate::server::AppState) {
@@ -689,6 +677,86 @@ async fn refresh_ssh_target_count(state: &crate::server::AppState) {
             .ssh_target_count
             .store(count, Ordering::Relaxed),
         Err(error) => tracing::warn!(%error, "failed to refresh ssh target count"),
+    }
+}
+
+fn classify_ssh_failure(stderr: &str) -> Option<(&'static str, String)> {
+    let normalized = stderr.trim();
+    if normalized.is_empty() {
+        return None;
+    }
+    let lower = normalized.to_lowercase();
+
+    if lower.contains("remote host identification has changed") || lower.contains("offending ") {
+        return Some((
+            "host_key_changed",
+            "The remote host key changed. Refresh the stored host pin if you expected this change, or investigate the server before reconnecting.".to_string(),
+        ));
+    }
+    if lower.contains("host key verification failed") {
+        return Some((
+            "host_key_verification_failed",
+            "SSH host verification failed. Refresh or clear the host pin if the server was rebuilt, otherwise inspect the host before trusting it.".to_string(),
+        ));
+    }
+    if lower.contains("permission denied") {
+        return Some((
+            "auth_failed",
+            "SSH authentication failed. Check the selected user, the managed key or ssh-agent state, and the remote authorized_keys file.".to_string(),
+        ));
+    }
+    if lower.contains("timed out") || lower.contains("operation timed out") {
+        return Some((
+            "timeout",
+            "SSH timed out. Check hostname resolution, port selection, firewall rules, and whether the remote host is reachable.".to_string(),
+        ));
+    }
+    if lower.contains("vault is locked") {
+        return Some((
+            "vault_locked",
+            "The vault is locked, so Moltis cannot decrypt the managed SSH key. Unlock the vault in Settings → Encryption and retry.".to_string(),
+        ));
+    }
+
+    None
+}
+
+fn build_ssh_test_response(
+    route_label: Option<String>,
+    probe: &str,
+    result: anyhow::Result<moltis_gateway::node_exec::NodeExecResult>,
+) -> SshTestResponse {
+    match result {
+        Ok(result) => {
+            let reachable = result.exit_code == 0 && result.stdout.contains(probe);
+            let classified_failure = (!reachable)
+                .then(|| classify_ssh_failure(&result.stderr))
+                .flatten();
+            SshTestResponse {
+                ok: true,
+                reachable,
+                stdout: result.stdout,
+                stderr: result.stderr,
+                exit_code: result.exit_code,
+                route_label,
+                failure_code: classified_failure.as_ref().map(|(code, _)| *code),
+                failure_hint: classified_failure.map(|(_, hint)| hint),
+            }
+        },
+        Err(error) => {
+            let stderr = error.to_string();
+            let classified_failure = classify_ssh_failure(&stderr);
+            SshTestResponse {
+                ok: false,
+                reachable: false,
+                stdout: String::new(),
+                stderr,
+                exit_code: -1,
+                route_label,
+                failure_code: classified_failure.as_ref().map(|(code, _)| *code),
+                failure_hint: classified_failure.map(|(_, hint)| hint),
+            }
+        },
     }
 }
 
@@ -1187,6 +1255,20 @@ mod tests {
     fn fallback_scan_host_strips_user_prefix() {
         assert_eq!(fallback_scan_host("deploy@example.com"), "example.com");
         assert_eq!(fallback_scan_host("prod-box"), "prod-box");
+    }
+
+    #[test]
+    fn classify_ssh_failure_recognizes_host_key_verification() {
+        let classified =
+            classify_ssh_failure("Host key verification failed.\r\n").expect("should classify");
+        assert_eq!(classified.0, "host_key_verification_failed");
+    }
+
+    #[test]
+    fn classify_ssh_failure_recognizes_permission_denied() {
+        let classified =
+            classify_ssh_failure("Permission denied (publickey).").expect("should classify");
+        assert_eq!(classified.0, "auth_failed");
     }
 
     #[test]

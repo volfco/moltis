@@ -152,7 +152,7 @@ async function testActiveSshRoute() {
 		}
 		doctorTest.value = data;
 		showToast(
-			data.reachable ? "Active SSH route is reachable" : "Active SSH route check failed",
+			data.reachable ? "Active SSH route is reachable" : data.failure_hint || "Active SSH route check failed",
 			data.reachable ? "success" : "error",
 		);
 	} catch (error) {
@@ -560,6 +560,13 @@ function RemoteExecStatusCard() {
 					<div class="${doctorTest.value.reachable ? "text-green-500" : "text-red-500"} mt-1">
 						${doctorTest.value.reachable ? "Reachable" : "Unreachable"}${doctorTest.value.exit_code != null ? ` (exit ${doctorTest.value.exit_code})` : ""}
 					</div>
+					${
+						doctorTest.value.failure_hint
+							? html`<div class="mt-1 text-[11px] text-[var(--text-muted)]">
+								Hint: ${doctorTest.value.failure_hint}
+							</div>`
+							: null
+					}
 					${
 						doctorTest.value.stderr
 							? html`<pre class="mt-2 whitespace-pre-wrap break-all text-[11px] text-[var(--text-muted)]">${doctorTest.value.stderr}</pre>`

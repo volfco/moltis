@@ -229,6 +229,68 @@ test.describe("Settings navigation", () => {
 		expect(pageErrors).toEqual([]);
 	});
 
+	test("nodes doctor shows actionable hint for active SSH route failures", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await page.route("**/api/ssh/doctor", async (route) => {
+			await route.fulfill({
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify({
+					ok: true,
+					exec_host: "ssh",
+					ssh_binary_available: true,
+					ssh_binary_version: "OpenSSH_9.9",
+					paired_node_count: 0,
+					managed_key_count: 1,
+					encrypted_key_count: 1,
+					managed_target_count: 1,
+					pinned_target_count: 1,
+					configured_node: null,
+					legacy_target: null,
+					active_route: {
+						target_id: 42,
+						label: "SSH: prod-box",
+						target: "deploy@example.com",
+						port: 22,
+						host_pinned: true,
+						auth_mode: "managed",
+						source: "managed",
+					},
+					checks: [],
+				}),
+			});
+		});
+		await page.route("**/api/ssh/doctor/test-active", async (route) => {
+			await route.fulfill({
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify({
+					ok: false,
+					reachable: false,
+					stdout: "",
+					stderr: "Host key verification failed.",
+					exit_code: 255,
+					route_label: "prod-box",
+					failure_code: "host_key_verification_failed",
+					failure_hint:
+						"SSH host verification failed. Refresh or clear the host pin if the server was rebuilt, otherwise inspect the host before trusting it.",
+				}),
+			});
+		});
+
+		await navigateAndWait(page, "/settings/nodes");
+		await page.getByRole("button", { name: "Test Active SSH Route", exact: true }).click();
+		await expect(page.getByText("Host key verification failed.", { exact: true })).toBeVisible();
+		await expect(
+			page.getByText(
+				"Hint: SSH host verification failed. Refresh or clear the host pin if the server was rebuilt, otherwise inspect the host before trusting it.",
+				{ exact: true },
+			),
+		).toBeVisible();
+
+		expect(pageErrors).toEqual([]);
+	});
+
 	test("identity name fields autosave on blur", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
 		await navigateAndWait(page, "/settings/identity");
