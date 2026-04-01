@@ -3597,7 +3597,6 @@ function RemoteAccessSection() {
 
 	function renderTailscaleModeButton(mode, currentMode) {
 		var active = currentMode === mode && !configuring;
-		var funnelBlocked = mode === "funnel" && !authReady;
 		var classes = active
 			? "ts-mode-active"
 			: "text-[var(--muted)] border-[var(--border)] bg-transparent hover:text-[var(--text)] hover:border-[var(--border-strong)]";
@@ -3606,7 +3605,7 @@ function RemoteAccessSection() {
 			class=${`text-xs border px-3 py-1.5 rounded-md cursor-pointer transition-colors font-medium ${classes}${
 				configuringMode === mode ? " ts-mode-configuring" : ""
 			}`}
-			disabled=${configuring || funnelBlocked}
+			disabled=${configuring}
 			onClick=${() => setMode(mode)}
 		>
 			${configuringMode === mode ? html`<span class="ts-spinner"></span>` : null}
@@ -3749,7 +3748,8 @@ function RemoteAccessSection() {
 								: html`<div class="flex flex-col gap-2 max-w-form">
 									<div class="alert-warning-text">
 										<span class="alert-label-warn">Warning:</span>
-										Funnel is blocked until password authentication is configured.
+										Funnel can be enabled now, but remote visitors will see the setup-required page until
+										authentication is configured.
 									</div>
 									<button
 										type="button"
@@ -3963,7 +3963,8 @@ function RemoteAccessSection() {
 								ngForm.enabled && !authReady
 									? html`<div class="alert-warning-text max-w-form">
 										<span class="alert-label-warn">Warning:</span>${" "}
-										Public endpoints should not be enabled before authentication is configured.
+										ngrok can be enabled now, but remote visitors will see the setup-required
+										page until authentication is configured.
 									</div>`
 									: null
 							}

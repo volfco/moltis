@@ -2068,8 +2068,6 @@ pub async fn start_gateway(
     let browser_tool_for_warmup = banner.browser_tool_for_warmup.clone();
     #[cfg(feature = "ngrok")]
     let ngrok_status = banner.ngrok_controller.apply(&config.ngrok).await?;
-    #[cfg(not(feature = "ngrok"))]
-    let ngrok_status: Option<NgrokRuntimeStatus> = None;
 
     #[cfg(feature = "tls")]
     if tls_active {
@@ -2189,12 +2187,19 @@ pub async fn start_gateway(
         format!("openclaw: {}", banner.openclaw_status),
     ];
     lines.extend(startup_passkey_origin_lines(&passkey_origins));
+    #[cfg(feature = "ngrok")]
     if let Some(status) = ngrok_status.as_ref() {
         lines.push(format!("ngrok: {}", status.public_url));
         if let Some(passkey_warning) = status.passkey_warning.as_ref() {
             lines.push(format!("ngrok note: {passkey_warning}"));
         }
     } else if config.ngrok.enabled {
+        lines.push(
+            "ngrok: enabled in config but this build does not include the ngrok feature".into(),
+        );
+    }
+    #[cfg(not(feature = "ngrok"))]
+    if config.ngrok.enabled {
         lines.push(
             "ngrok: enabled in config but this build does not include the ngrok feature".into(),
         );
