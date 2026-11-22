@@ -19,19 +19,26 @@ use {
 };
 
 use crate::{
+    pgvector::PgvectorStatus,
     schema::{ChunkRow, FileRow},
     search::{self, SearchResult},
     store::{CacheEntry, MemoryStore, MergeStrategy},
+    sync_lock::SyncLockGuard,
 };
 
 /// `MemoryStore` backed by SQLite or PostgreSQL.
 pub struct DbMemoryStore {
     db: Db,
+    /// Probe result cached from the first [`MemoryStore::pgvector_status`] call.
+    pgvector: tokio::sync::OnceCell<Option<PgvectorStatus>>,
 }
 
 impl DbMemoryStore {
     pub fn new(db: Db) -> Self {
-        Self { db }
+        Self {
+            db,
+            pgvector: tokio::sync::OnceCell::new(),
+        }
     }
 
     /// Wrap an existing SQLite pool (tests and SQLite-only call sites).
@@ -898,6 +905,19 @@ impl MemoryStore for DbMemoryStore {
         let mut final_results: Vec<SearchResult> = merged.into_iter().take(limit).collect();
         search::fill_missing_text(self, &mut final_results).await?;
         Ok(final_results)
+    }
+
+    async fn try_acquire_sync_lock(&self) -> crate::error::Result<Option<SyncLockGuard>> {
+        SyncLockGuard::try_acquire(&self.db).await
+    }
+
+    async fn pgvector_status(&self) -> crate::error::Result<Option<PgvectorStatus>> {
+        // Cached: the startup preflight result is not reachable here and the
+        // status RPC must not re-probe on every call.
+        self.pgvector
+            .get_or_try_init(|| crate::pgvector::probe(&self.db))
+            .await
+            .copied()
     }
 
     fn store_type(&self) -> &'static str {

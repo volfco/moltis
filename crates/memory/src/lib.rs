@@ -14,6 +14,7 @@ pub mod embeddings_local;
 pub mod embeddings_openai;
 pub mod error;
 pub mod manager;
+pub mod pgvector;
 pub mod reranking;
 pub mod runtime;
 pub mod schema;
@@ -21,6 +22,7 @@ pub mod search;
 pub mod session_export;
 pub mod store;
 pub mod store_db;
+pub mod sync_lock;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod tools;

@@ -155,6 +155,16 @@ if PostgreSQL is configured but unreachable, startup aborts with an error.
 
 Notes:
 
+- The `vector` extension is created automatically when the connecting role
+  may create extensions (e.g. the `postgres` superuser). Otherwise startup
+  aborts before the memory migrations with the exact fix instead of a raw
+  migration error: `pgvector extension is missing in PostgreSQL database
+  'moltis': run as superuser: CREATE EXTENSION vector;`
+
+- The Memory settings page shows a pgvector banner (`pgvector: available`, or
+  `missing — run CREATE EXTENSION vector as superuser`), and the `memory.status`
+  RPC reports the same as `pgvector: { "available": bool, "action": "CREATE
+  EXTENSION vector;" }` (omitted on SQLite).
 - The memory embedding column is deliberately untyped (`vector`, not
   `vector(1536)`), so a change of embedding provider or dimension does not
   require a re-index. Similarity search therefore runs as a sequential scan
@@ -612,9 +622,10 @@ systems.
 ### PostgreSQL backend not available
 
 1. Confirm `database.url` is set and the server is reachable
-2. Confirm the pgvector extension is installed on the server:
-   `psql -c "CREATE EXTENSION IF NOT EXISTS vector"` (needs superuser or the
-   extension pre-installed by your provider)
+2. The pgvector extension is created automatically when the connecting role
+   may create extensions; if startup fails with `pgvector extension is
+   missing … run as superuser: CREATE EXTENSION vector;`, run that command as
+   superuser and restart
 3. Check the startup error: moltis aborts when the connection or a migration
    fails — it never silently falls back to SQLite
 

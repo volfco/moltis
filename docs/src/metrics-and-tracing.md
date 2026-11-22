@@ -265,6 +265,7 @@ This allows you to:
 | `moltis_memory_searches_total` | Counter | search_type | Searches performed |
 | `moltis_memory_search_duration_seconds` | Histogram | search_type | Search latency |
 | `moltis_memory_embeddings_generated_total` | Counter | provider | Embeddings created |
+| `moltis_memory_sync_lock_skips_total` | Counter | — | Sync passes skipped (lock held by another instance) |
 
 ### Channel Metrics
 

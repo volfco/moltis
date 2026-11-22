@@ -15,6 +15,11 @@ interface MemoryStatus {
 	db_size_display?: string;
 	backend_type?: string;
 	hnsw_percent?: number | null;
+	/** PostgreSQL only; omitted on SQLite. */
+	pgvector?: {
+		available: boolean;
+		action: string;
+	};
 }
 
 interface MemoryConfig {
@@ -248,6 +253,23 @@ export function MemorySection(): VNode {
 							</span>
 						</div>
 					</div>
+				</div>
+			) : null}
+
+			{memStatus?.pgvector ? (
+				<div
+					className={`max-w-[600px] rounded-md border px-4 py-3 text-xs ${
+						memStatus.pgvector.available ? "border-[var(--border)]" : "border-[var(--warning)]"
+					}`}
+				>
+					<span className="text-[var(--muted)]">pgvector:</span>{" "}
+					{memStatus.pgvector.available ? (
+						<span className="font-semibold text-[var(--text)]">available</span>
+					) : (
+						<span className="font-semibold text-[var(--warning)]">
+							missing — run CREATE EXTENSION vector as superuser
+						</span>
+					)}
 				</div>
 			) : null}
 

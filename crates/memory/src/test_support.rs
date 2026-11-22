@@ -19,6 +19,16 @@ pub(crate) fn pg_lock() -> &'static tokio::sync::Mutex<()> {
 /// database was unreachable and nothing was tested". The caller must already
 /// hold [`pg_lock`].
 pub(crate) async fn pg_test_db() -> Option<Db> {
+    let db = pg_test_db_pre_migration().await?;
+    crate::schema::run_migrations(&db)
+        .await
+        .unwrap_or_else(|error| panic!("postgres test migrations failed: {error}"));
+    Some(db)
+}
+
+/// [`pg_test_db`] without the migration pass: the same empty schema for tests
+/// that need the pre-migration state. The caller must already hold [`pg_lock`].
+pub(crate) async fn pg_test_db_pre_migration() -> Option<Db> {
     let Ok(url) = std::env::var("TEST_POSTGRES_URL") else {
         return None;
     };
@@ -35,8 +45,5 @@ pub(crate) async fn pg_test_db() -> Option<Db> {
          _sqlx_migrations CASCADE"
     );
     reset.unwrap_or_else(|error| panic!("postgres test schema reset failed: {error}"));
-    crate::schema::run_migrations(&db)
-        .await
-        .unwrap_or_else(|error| panic!("postgres test migrations failed: {error}"));
     Some(db)
 }
