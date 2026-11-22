@@ -169,11 +169,12 @@ Notes:
   than a fresh check: startup already blocks the missing-extension case (see
   above), which makes the banner belt-and-braces for a database whose extension
   was dropped while moltis was running.
-- The memory embedding column is deliberately untyped (`vector`, not
-  `vector(1536)`), so a change of embedding provider or dimension does not
-  require a re-index. Similarity search therefore runs as a sequential scan
-  ordered by `<=>` instead of using an HNSW index. Adding `vector(N)` plus an
-  HNSW index is a future optimization, not a requirement.
+- The `embedding` column is typed `vector(N)` with an HNSW index (cosine),
+  where `N` comes from the recorded embedding identity. A dimension change is
+  handled by the re-index pass, which relaxes the column and index first,
+  re-embeds, then re-applies `vector(N)`. Until that pass runs, similarity
+  search falls back to a sequential scan ordered by `<=>`. See
+  [Re-indexing embeddings](#re-indexing-embeddings).
 - Keyword search uses `websearch_to_tsquery`, which tolerates arbitrary user
   text (quoted phrases, `OR`, leading `-`) without syntax errors.
 - `database.url` holds credentials: it is never returned by the settings API.
@@ -389,6 +390,79 @@ The local provider reads the context capacity from the GGUF model and sizes a
 single encoder batch for each input. Inputs longer than the model context are
 truncated at the token boundary so an oversized line or query cannot terminate
 the Moltis process.
+
+## Re-indexing embeddings
+
+Changing the embedding provider, model or dimension makes the vectors already
+in the index useless: they live in the old provider's embedding space and
+cannot be converted. Chunk *text* is the source of truth, so the fix is to
+re-embed every chunk from its text.
+
+The index records its embedding identity (provider key, model, dimensions) in
+`memory_meta`. A sync pass compares that against the configured provider and
+**re-indexes automatically** before it touches any chunk, so a provider or
+dimension change needs no manual step — the next sync (startup, file change,
+periodic pass) re-embeds the whole index once and rewrites the identity. Log
+lines say `memory: re-indexing chunks after an embedding identity change` with
+the reason and the dimension transition.
+
+When the recorded identity still matches, nothing is re-embedded. Use the CLI
+when you cannot wait for a sync, when there is no sync to trigger, or when the
+stored vectors are suspected bad:
+
+```bash
+moltis memory reindex            # re-embed only if the identity changed
+moltis memory reindex --force    # re-embed unconditionally
+```
+
+Both `[database]` engines are supported — SQLite rewrites the chunk vectors,
+PostgreSQL additionally retypes the `embedding` column to `vector(N)` and
+rebuilds the HNSW index as part of the run.
+
+**When to use it:**
+
+- You switched `memory.provider` or `memory.model` and do not want to wait for
+  the next sync (a change the identity records is also detected automatically)
+- The stored vectors are suspect while the config is unchanged, e.g. after a
+  crash mid-write, a restored or copied database, or an embedding endpoint
+  that started returning different vectors — use `--force`, because nothing in
+  the recorded identity tells those cases apart from a healthy index
+- You changed an embedding setting the identity does not cover (a new
+  `memory.api_key`, for example) and want the cache and vectors refreshed
+
+Output reports what happened, so a run is auditable:
+
+```
+Memory re-index (memory.db):
+  Re-embedded:     1842 chunks
+  Dimensions:      1536 -> 768
+  Reason:          dimensions changed
+```
+
+When the identity already matches, the run says so and points at `--force`:
+
+```
+Memory re-index (memory.db):
+  Nothing to re-embed: the recorded embedding identity already matches the configured provider.
+  Re-run with --force to re-embed the chunks anyway.
+```
+
+If another moltis instance holds the memory sync lock for the same database
+(see [Several instances on one database](#several-instances-on-one-database)),
+the run does nothing and **exits non-zero** with
+`re-index skipped: another moltis instance holds the memory sync lock …`, so a
+cron-driven re-index never looks like it succeeded. Stop the other instance or
+re-run it later.
+
+The command needs an explicit `memory.provider`; the gateway's provider
+auto-detection and fallback chain are not replicated on the CLI, so set the
+provider (and `memory.model` where relevant) to what the index was built with.
+
+The other `moltis memory` subcommands are `memory search <query>`,
+`memory status`, and `memory migrate-collection` (zvec — copies chunks from one
+collection to another with re-embedding; rename of the old
+`memory reindex --from/--to`, which the CLI now refuses with a pointer to the
+new name).
 
 ## Memory Directories
 
