@@ -655,7 +655,9 @@ pub async fn prepare_gateway_core_with_profile(
         db_pool.clone(),
         event_bus_for_metadata,
     ));
-    let session_share_store = Arc::new(crate::share_store::ShareStore::new(db_pool.clone()));
+    let session_share_store = Arc::new(crate::share_store::ShareStore::new(moltis_db::Db::from(
+        db_pool.clone(),
+    )));
     let session_state_store = Arc::new(moltis_sessions::state_store::SessionStateStore::new(
         db_pool.clone(),
     ));
