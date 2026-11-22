@@ -2,6 +2,56 @@
 
 Short entries recording *why* the code is the way it is. Newest first.
 
+## 2026-11-22 — Embedding identity in `memory_meta`, auto re-index, lazy HNSW
+
+**Scope:** major. `crates/memory` (`reindex.rs`, `store_db.rs`, new
+`memory_meta` migrations in both dialects).
+
+**Considered:** (1) typed `vector(N)` in the static migrations with a
+configured dimension; (2) untyped `vector` forever (the earlier decision);
+(3) record the embedding identity at runtime in a `memory_meta` K/V table and
+derive the schema from it.
+
+**Decision:** (3). `memory_meta` stores `embedding_provider_key`,
+`embedding_model`, `embedding_dims`. At the start of each full sync, recorded
+identity is compared with the configured provider: dimensions changed ⇒ drop
+the HNSW index, re-embed every chunk (chunk text is the source of truth — old
+vectors are never transformed), `ALTER COLUMN ... TYPE vector(N)`, recreate the
+index; provider/model changed at the same dimension ⇒ re-embed only; equal ⇒
+repair-only DDL check. `--force` (CLI) re-embeds with no identity change.
+Re-index runs inside the sync advisory lock and embeds per file in batches.
+
+**Why:** a fixed dimension in SQL cannot know the user's provider at migration
+time, and untyped `vector` cannot carry an HNSW index. Runtime-recorded
+identity keeps "any embedding dimension works" while giving sub-linear search
+where it matters. Absent `memory_meta` on an existing index re-embeds once
+(unknown vectors are not trusted), which is a one-time upgrade cost.
+
+## 2026-11-22 — pgvector is created at startup, then hard-fails with remediation
+
+**Scope:** minor. `crates/memory/src/pgvector.rs`, gateway startup, CLI memory
+paths, `memory.status`.
+
+**Considered:** (1) require the operator to run `CREATE EXTENSION vector`
+documented as a prerequisite; (2) let the migration's
+`CREATE EXTENSION IF NOT EXISTS` supply the raw error; (3) probe, attempt the
+create, and only fail with an actionable error when the read/create is denied;
+(4) add a `postgres`-style feature gate.
+
+**Decision:** (3). Startup (and the CLI paths that run memory migrations) probe
+`pg_extension`; when the extension is absent they attempt
+`CREATE EXTENSION IF NOT EXISTS vector` — keeping the documented zero-touch
+superuser flow — and abort with `run as superuser: CREATE EXTENSION vector;`
+plus the database name only if that attempt is refused. `memory.status` reports
+`{available, action}` (absent on SQLite), cached per store, and the Memory
+settings page renders it.
+
+**Why:** (2) surfaced an error that hid the fix for restricted roles; (1)
+broke a working deployment by demanding a manual step; (4) would let a binary
+silently fall back on a database that lacks the extension. A startup that
+cannot use pgvector is a startup that will fail later anyway — failing early
+with the exact command is the smallest honest behavior.
+
 ## 2026-11-22 — Memory sync takes a Postgres session advisory lock
 
 **Scope:** minor. `crates/memory` (`sync_lock.rs`, `manager.rs`, `store.rs`).

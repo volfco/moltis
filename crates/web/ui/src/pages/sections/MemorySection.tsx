@@ -3,7 +3,7 @@
 import type { VNode } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import { SaveButton, SectionHeading, StatusMessage, SubHeading, useSaveState } from "../../components/forms";
-import { sendRpc } from "../../helpers";
+import { sendRpc, sendRpcWhenReady } from "../../helpers";
 import { targetChecked, targetValue } from "../../typed-events";
 import type { RpcResponse } from "./_shared";
 import { rerender } from "./_shared";
@@ -73,23 +73,18 @@ export function MemorySection(): VNode {
 
 	useEffect(() => {
 		let cancelled = false;
-		let attempts = 0;
 
-		// The section can mount before the WebSocket is open; an UNAVAILABLE
-		// response must be retried or the form would silently show defaults
-		// that differ from the saved config.
+		// sendRpcWhenReady waits for the WebSocket handshake, so a cold mount
+		// cannot render defaults in place of the saved config (it also covers
+		// the TIMEOUT case a UNAVAILABLE-only retry loop would miss).
 		function load(): void {
-			Promise.all([sendRpc("memory.status", {}), sendRpc("memory.config.get", {}), sendRpc("memory.qmd.status", {})])
+			Promise.all([
+				sendRpcWhenReady("memory.status", {}),
+				sendRpcWhenReady("memory.config.get", {}),
+				sendRpcWhenReady("memory.qmd.status", {}),
+			])
 				.then(([statusRes, configRes, qmdRes]: [RpcResponse, RpcResponse, RpcResponse]) => {
 					if (cancelled) return;
-					const unavailable =
-						(statusRes as { error?: { code?: string } })?.error?.code === "UNAVAILABLE" ||
-						(configRes as { error?: { code?: string } })?.error?.code === "UNAVAILABLE";
-					if (unavailable && attempts < 20) {
-						attempts += 1;
-						setTimeout(load, 150);
-						return;
-					}
 
 					if (statusRes?.ok) {
 						setMemStatus(statusRes.payload as MemoryStatus);

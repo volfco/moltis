@@ -5,44 +5,55 @@ Forward-looking state only. Remove entries as they are completed.
 ## Where the docs are
 
 - `CLAUDE.md` / `AGENTS.md` — engineering rules (tests, style, commits, beads).
-- `decisions.md` — why PostgreSQL support is shaped the way it is.
-- `docs/src/memory.md` — user-facing memory backends (built-in, zvec, postgres, qmd).
-- `plans/postgres-pgvector-memory-backend.md` — original plan; its "feature-gate
-  the backend" and "HNSW index" sections are superseded (see `decisions.md`).
+- `decisions.md` — why the database/pairing/memory designs are shaped as they are.
+- `docs/src/memory.md` — memory backends, multi-instance sync, pgvector, reindex.
+- `docs/src/metrics-and-tracing.md` — metric catalog (memory sync/reindex rows).
+- `plans/postgres-pgvector-memory-backend.md` — original plan; superseded where
+  `decisions.md` differs (feature gate, untyped vector, HNSW timing).
 
 ## Current state
 
-The PostgreSQL port is complete on `feat/postgres-memory-backend`: every
-SQL-backed store (projects, sessions, cron, webhooks, vault, connectors,
-code-index, auth, gateway, memory) runs on the `moltis-db` dual-backend
-abstraction, and `[database]` selects the engine for the whole deployment
-(`backend = "sqlite" | "postgres"`, `url`) with hard failure on outages — no
-SQLite fallback, no mixed engines. Validated on both engines (per-crate test
-suites + negative harness checks + E2E) and reviewed lane-by-lane; see
-`decisions.md` for the design calls and `todo.md` for follow-ups.
+PostgreSQL is a supported backend for **every** SQL store, selected by
+`[database] { backend = "sqlite" | "postgres", url }` with hard failure on
+outage (no SQLite fallback, no mixed engines). Built on the `moltis-db`
+dual-backend abstraction (`Db`, `DbTx`, `moltis_db::*` macros) with per-crate
+`migrations_pg/` directories.
 
-PostgreSQL is a supported backend for the **memory index only**:
+Landed on the memory hardening wave:
 
-- `crates/db` — backend abstraction (`Db`, `DbTx`, `moltis_db::*` query macros).
-- `crates/memory` — one `MemoryStore` (`store_db::DbMemoryStore`) serves SQLite
-  and PostgreSQL; `migrations_pg/` holds the pgvector schema.
-- Config: `[memory] backend = "postgres"` + `database_url`.
-- Everything else (sessions, cron, projects, vault, webhooks, connectors,
-  code-index, gateway auth) still opens `moltis.db` as SQLite.
+- `crates/memory` — embedding identity in `memory_meta`, automatic re-index on
+  provider/dimension change (`reindex.rs`), lazy typed `vector(N)` + HNSW,
+  batched re-embedding, `MemoryManager::reindex(force)`.
+- `crates/memory/src/sync_lock.rs` — Postgres session advisory lock around full
+  sync passes (skipped passes log and count; the guard is armed across every
+  await so a cancelled sync can never pool a locked session).
+- `crates/memory/src/pgvector.rs` — startup preflight that attempts
+  `CREATE EXTENSION vector` and only fails when creation is denied; the same
+  probe feeds `memory.status` and the Memory settings banner.
+- `crates/gateway/src/pairing/` — `pairing.rs` (1,526 lines) decomposed into
+  types/store/state/crypto/expiry/tests, with atomic approve/reject and token
+  rotation (single-winner transitions), request-time input validation, and
+  redacted `Debug` for bearer tokens.
+- `crates/web/ui` — `sendRpcWhenReady()` in `helpers.ts` (waits for the
+  `hello-ok` handshake, bounded by one RPC budget) adopted for settings
+  cold-load fetches; `MemorySection` uses it too.
 
 ## Next items
 
 1. Open the PR from `feat/postgres-memory-backend` and run
    `./scripts/local-validate.sh <PR>` (the CI gate).
-2. Follow-ups live in `todo.md` (Settings UI for the engine, postgres
-   `db reset` with an ownership marker, pairing.rs decomposition, HNSW
-   indexing, portable-export parity).
+2. Run the Playwright specs listed in the ui-retry handoff (cold-load spec +
+   the settings/voice/phone/instrumentation specs) in a checkout with a built
+   gateway binary.
+3. Follow-ups live in `todo.md`; the largest are `moltis memory import-from-sqlite`,
+   retrying a skipped sync on headless profiles, and the Settings UI for the
+   `[database]` engine.
 
 ## Verification recipes
 
 ```bash
-# PostgreSQL-backed tests (skipped when the URL is unset; must FAIL loudly
-# when the URL is set but unreachable)
+# PostgreSQL-backed tests: skipped when the URL is unset, but they must FAIL
+# loudly when the URL is set and unreachable.
 docker run -d --name moltis-pg -e POSTGRES_PASSWORD=test -e POSTGRES_DB=moltis \
   -p 127.0.0.1:55433:5432 pgvector/pgvector:pg17
 TEST_POSTGRES_URL=postgres://postgres:test@127.0.0.1:55433/moltis_t_memory \
