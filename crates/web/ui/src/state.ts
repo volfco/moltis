@@ -123,7 +123,7 @@ const wsReadyWaiters = new Set<() => void>();
 export function onWsReady(cb: () => void): () => void {
 	if (connected && ws && ws.readyState === WebSocket.OPEN) {
 		cb();
-		return () => {};
+		return () => undefined;
 	}
 	wsReadyWaiters.add(cb);
 	return () => {

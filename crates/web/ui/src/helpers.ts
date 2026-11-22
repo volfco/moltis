@@ -338,8 +338,9 @@ export function sendRpc<T = unknown>(
  * Like sendRpc, but waits for the WebSocket handshake to complete first.
  * Initial page loads can run before the socket is ready; without the wait they
  * silently resolve UNAVAILABLE and show defaults instead of saved state.
- * Resolves the same UNAVAILABLE error as sendRpc when the connection is still
- * not ready after the RPC timeout budget.
+ * The wait and the delegated request share one RPC timeout budget: the request
+ * receives the remaining budget. If the connection is still not ready when the
+ * budget expires, this resolves the same UNAVAILABLE error as sendRpc.
  */
 export function sendRpcWhenReady<T = unknown>(
 	method: string,
@@ -351,16 +352,17 @@ export function sendRpcWhenReady<T = unknown>(
 	}
 	const requestedTimeoutMs = typeof timeout === "number" ? timeout : timeout?.timeoutMs;
 	const waitBudgetMs = rpcTimeoutMs(requestedTimeoutMs);
+	const startedAt = Date.now();
 	return new Promise((resolve) => {
 		let settled = false;
-		let off: () => void = () => {};
+		let off: (() => void) | undefined;
 		const finish = (ready: boolean): void => {
 			if (settled) return;
 			settled = true;
-			off();
+			off?.();
 			clearTimeout(timer);
 			if (ready) {
-				resolve(sendRpc<T>(method, params, timeout));
+				resolve(sendRpc<T>(method, params, Math.max(1, waitBudgetMs - (Date.now() - startedAt))));
 			} else {
 				resolve({
 					ok: false,
