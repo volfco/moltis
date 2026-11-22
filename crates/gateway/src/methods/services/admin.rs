@@ -817,8 +817,9 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                             });
                             if let Some(pgvector) = status.pgvector {
                                 // Absent (not null) on SQLite per the RPC contract.
-                                payload["pgvector"] = serde_json::to_value(pgvector)
-                                    .unwrap_or(serde_json::Value::Null);
+                                // PgvectorStatus is a plain bool + &'static str, so
+                                // serialization cannot fail.
+                                payload["pgvector"] = serde_json::json!(pgvector);
                             }
                             Ok(payload)
                         },

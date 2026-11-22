@@ -838,6 +838,56 @@ mod tests {
         );
     }
 
+    /// The SQLite test above pins the omission; this pins the PostgreSQL
+    /// shape, which is what the settings banner renders.
+    ///
+    /// Runs against the shared PostgreSQL test database, so it takes
+    /// [`crate::test_support::pg_lock`] and creates the memory schema itself
+    /// (the gateway migrations do not own it).
+    #[tokio::test]
+    async fn memory_status_reports_pgvector_available_on_postgres() {
+        let _guard = crate::test_support::pg_lock().lock().await;
+        let Some(db) = crate::test_support::pg_test_db().await else {
+            eprintln!("skipping: TEST_POSTGRES_URL not set");
+            return;
+        };
+        moltis_memory::pgvector::preflight(&db)
+            .await
+            .unwrap_or_else(|error| panic!("pgvector preflight failed: {error}"));
+        moltis_memory::schema::run_migrations(&db)
+            .await
+            .unwrap_or_else(|error| panic!("memory migrations should succeed: {error}"));
+        let manager = moltis_memory::manager::MemoryManager::keyword_only(
+            moltis_memory::config::MemoryConfig::default(),
+            Box::new(moltis_memory::store_db::DbMemoryStore::new(db)),
+        );
+        let state = memory_config_test_state(Some(Arc::new(manager)));
+
+        let response = dispatch_memory_method_response_with_state(
+            "memory.status",
+            serde_json::json!({}),
+            state,
+        )
+        .await;
+        assert!(
+            response.ok,
+            "memory.status should succeed: {:?}",
+            response.error
+        );
+        let payload = response
+            .payload
+            .unwrap_or_else(|| panic!("memory.status should return a payload"));
+        assert_eq!(
+            payload["pgvector"]["available"], true,
+            "the preflight above must leave pgvector usable: {payload}"
+        );
+        assert_eq!(
+            payload["pgvector"]["action"],
+            moltis_memory::pgvector::PGVECTOR_ACTION,
+            "the banner renders the RPC action verbatim: {payload}"
+        );
+    }
+
     #[test]
     fn memory_backend_names_match_update_contract() {
         // Values memory.config.update accepts.
