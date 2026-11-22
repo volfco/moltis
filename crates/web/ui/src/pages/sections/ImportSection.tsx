@@ -4,7 +4,7 @@ import type { VNode } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import { TabBar } from "../../components/forms";
 import * as gon from "../../gon";
-import { sendRpc } from "../../helpers";
+import { sendRpcWhenReady } from "../../helpers";
 import type { RpcResponse } from "./_shared";
 import { ClaudeImportSection } from "./ClaudeImportSection";
 import { CodexImportSection } from "./CodexImportSection";
@@ -100,7 +100,7 @@ export function ImportSection(): VNode {
 
 	useEffect(() => {
 		for (const tab of detectedTabs) {
-			sendRpc(tab.detectRpc, {}).then((res: RpcResponse) => {
+			sendRpcWhenReady(tab.detectRpc, {}).then((res: RpcResponse) => {
 				if (res?.ok && res.payload) {
 					const count = tab.countFn(res.payload as Record<string, unknown>);
 					if (count > 0) {

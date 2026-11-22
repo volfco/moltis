@@ -2,7 +2,7 @@
 
 import type { VNode } from "preact";
 import { useEffect, useState } from "preact/hooks";
-import { sendRpc } from "../../helpers";
+import { sendRpcWhenReady } from "../../helpers";
 import type { RpcResponse } from "./_shared";
 
 interface ToolEntry {
@@ -95,7 +95,7 @@ export function ToolsSection(): VNode {
 	function loadToolsOverview(): void {
 		setLoadingTools(true);
 		setToolsErr(null);
-		Promise.allSettled([sendRpc("chat.context", {}), sendRpc("node.list", {})])
+		Promise.allSettled([sendRpcWhenReady("chat.context", {}), sendRpcWhenReady("node.list", {})])
 			.then((results) => {
 				const contextResult = results[0];
 				if (contextResult.status !== "fulfilled" || !(contextResult.value as RpcResponse)?.ok) {

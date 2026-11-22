@@ -7,8 +7,7 @@
 
 import { signal } from "@preact/signals";
 import type { VNode } from "preact";
-import { sendRpc } from "../../helpers";
-import * as S from "../../state";
+import { sendRpcWhenReady } from "../../helpers";
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -100,9 +99,9 @@ export function isMissingMethodError(res: RpcResponse | null): boolean {
 }
 
 export function fetchMainIdentity(): Promise<RpcResponse> {
-	return sendRpc("agents.identity.get", { agent_id: "main" }).then((res: RpcResponse) => {
+	return sendRpcWhenReady("agents.identity.get", { agent_id: "main" }).then((res: RpcResponse) => {
 		if (res?.ok || !isMissingMethodError(res)) return res;
-		return sendRpc("agent.identity.get", {});
+		return sendRpcWhenReady("agent.identity.get", {});
 	});
 }
 
@@ -111,13 +110,8 @@ export function fetchIdentity(): void {
 	fetchMainIdentity().then((res: RpcResponse) => {
 		if (res?.ok) {
 			identity.value = res.payload as IdentityData;
-			loading.value = false;
-			rerender();
-		} else if (_mounted && !S.connected) {
-			setTimeout(fetchIdentity, 500);
-		} else {
-			loading.value = false;
-			rerender();
 		}
+		loading.value = false;
+		rerender();
 	});
 }
