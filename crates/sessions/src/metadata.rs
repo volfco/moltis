@@ -6,8 +6,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use serde::{Deserialize, Serialize};
-use moltis_db::{Db, execute, fetch_all, fetch_optional};
+use {
+    moltis_db::{Db, execute, fetch_all, fetch_optional},
+    serde::{Deserialize, Serialize},
+};
 
 use crate::Result;
 
@@ -425,9 +427,12 @@ impl DbSessionMetadata {
     }
 
     pub async fn get(&self, key: &str) -> Option<SessionEntry> {
-        match fetch_optional!(&self.db, SessionRow, "SELECT * FROM sessions WHERE key = ?", key)
-            .await
-        {
+        match fetch_optional!(
+            &self.db,
+            SessionRow,
+            "SELECT * FROM sessions WHERE key = ?",
+            key
+        ) {
             Ok(row) => row.map(Into::into),
             Err(e) => {
                 tracing::error!("sessions.get failed: {e}");
@@ -456,8 +461,7 @@ impl DbSessionMetadata {
             &label,
             now,
             now
-        )
-        .await?;
+        )?;
         let entry = self
             .get(key)
             .await
@@ -484,7 +488,6 @@ impl DbSessionMetadata {
             now,
             key
         )
-        .await
         .ok();
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
@@ -507,7 +510,7 @@ impl DbSessionMetadata {
             now,
             key
         )
-        .await
+
         .ok();
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
@@ -523,7 +526,7 @@ impl DbSessionMetadata {
             now,
             key
         )
-        .await
+
         .ok();
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
@@ -548,7 +551,7 @@ impl DbSessionMetadata {
             last_seen_message_count as i64,
             key
         )
-        .await
+
         .ok();
     }
 
@@ -560,7 +563,6 @@ impl DbSessionMetadata {
             preview,
             key
         )
-        .await
         .ok();
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
@@ -575,7 +577,7 @@ impl DbSessionMetadata {
             "UPDATE sessions SET last_seen_message_count = message_count, version = version + 1 WHERE key = ?",
             key
         )
-        .await
+
         .ok();
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
@@ -591,7 +593,7 @@ impl DbSessionMetadata {
             now,
             key
         )
-        .await
+
         .ok();
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
@@ -600,7 +602,11 @@ impl DbSessionMetadata {
 
     pub async fn set_archived(&self, key: &str, archived: bool) {
         let now = now_ms() as i64;
-        let val: i64 = if archived { 1 } else { 0 };
+        let val: i64 = if archived {
+            1
+        } else {
+            0
+        };
         execute!(
             &self.db,
             "UPDATE sessions SET archived = ?, updated_at = ?, version = version + 1 WHERE key = ?",
@@ -608,7 +614,6 @@ impl DbSessionMetadata {
             now,
             key
         )
-        .await
         .ok();
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
@@ -624,7 +629,7 @@ impl DbSessionMetadata {
             now,
             key
         )
-        .await
+
         .ok();
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
@@ -641,7 +646,7 @@ impl DbSessionMetadata {
             now,
             key
         )
-        .await
+
         .ok();
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
@@ -657,7 +662,7 @@ impl DbSessionMetadata {
             now,
             key
         )
-        .await
+
         .ok();
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
@@ -673,7 +678,7 @@ impl DbSessionMetadata {
             now,
             key
         )
-        .await
+
         .ok();
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
@@ -690,7 +695,7 @@ impl DbSessionMetadata {
             now,
             key
         )
-        .await
+
         .ok();
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
@@ -706,7 +711,7 @@ impl DbSessionMetadata {
             now,
             key
         )
-        .await
+
         .ok();
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
@@ -722,8 +727,7 @@ impl DbSessionMetadata {
             agent_id,
             now,
             key
-        )
-        .await?;
+        )?;
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
         });
@@ -739,8 +743,7 @@ impl DbSessionMetadata {
             mode_id,
             now,
             key
-        )
-        .await?;
+        )?;
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
         });
@@ -756,8 +759,7 @@ impl DbSessionMetadata {
             node_id,
             now,
             key
-        )
-        .await?;
+        )?;
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
         });
@@ -771,14 +773,17 @@ impl DbSessionMetadata {
             SessionRow,
             "SELECT * FROM sessions WHERE agent_id = ? ORDER BY created_at ASC",
             agent_id
-        )
-        .await?;
+        )?;
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
     /// Delete all sessions belonging to a given agent (cascade).
     pub async fn delete_by_agent_id(&self, agent_id: &str) -> Result<u64> {
-        let count = execute!(&self.db, "DELETE FROM sessions WHERE agent_id = ?", agent_id).await?;
+        let count = execute!(
+            &self.db,
+            "DELETE FROM sessions WHERE agent_id = ?",
+            agent_id
+        )?;
         Ok(count)
     }
 
@@ -794,7 +799,7 @@ impl DbSessionMetadata {
             now,
             key
         )
-        .await
+
         .ok();
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
@@ -809,7 +814,6 @@ impl DbSessionMetadata {
             "SELECT * FROM sessions WHERE parent_session_key = ? ORDER BY created_at ASC",
             parent_key
         )
-        .await
         .unwrap_or_default()
         .into_iter()
         .map(Into::into)
@@ -818,9 +822,7 @@ impl DbSessionMetadata {
 
     pub async fn remove(&self, key: &str) -> Option<SessionEntry> {
         let entry = self.get(key).await;
-        execute!(&self.db, "DELETE FROM sessions WHERE key = ?", key)
-            .await
-            .ok();
+        execute!(&self.db, "DELETE FROM sessions WHERE key = ?", key).ok();
         if entry.is_some() {
             self.emit(crate::session_events::SessionEvent::Deleted {
                 session_key: key.to_string(),
@@ -835,7 +837,7 @@ impl DbSessionMetadata {
             SessionRow,
             "SELECT * FROM sessions ORDER BY CASE WHEN key = 'main' THEN 0 ELSE 1 END ASC, updated_at DESC, created_at DESC, key ASC",
         )
-            .await
+
             .unwrap_or_default()
             .into_iter()
             .map(Into::into)
@@ -860,7 +862,7 @@ impl DbSessionMetadata {
             chat_id,
             tid
         )
-        .await
+
         .ok()
         .flatten()
         .map(|(session_key,)| session_key)
@@ -891,7 +893,7 @@ impl DbSessionMetadata {
             session_key,
             now
         )
-        .await
+
         .ok();
     }
 
@@ -903,7 +905,6 @@ impl DbSessionMetadata {
             "DELETE FROM channel_sessions WHERE session_key = ?",
             session_key
         )
-        .await
         .ok();
     }
 
@@ -927,7 +928,7 @@ impl DbSessionMetadata {
             "SELECT * FROM sessions WHERE LOWER(channel_binding) LIKE LOWER(?) ORDER BY created_at ASC",
             &binding_pattern
         )
-        .await
+
         .unwrap_or_default()
         .into_iter()
         .map(Into::into)
@@ -949,7 +950,7 @@ impl DbSessionMetadata {
             "SELECT * FROM sessions WHERE LOWER(channel_binding) LIKE LOWER(?) ORDER BY created_at ASC",
             &pattern
         )
-        .await
+
         .unwrap_or_default()
         .into_iter()
         .map(Into::into)
@@ -969,7 +970,7 @@ impl DbSessionMetadata {
             channel_type,
             account_id
         )
-        .await
+
         .unwrap_or_default()
     }
 

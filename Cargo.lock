@@ -8641,6 +8641,7 @@ dependencies = [
  "hex",
  "libc",
  "moltis-common",
+ "moltis-db",
  "moltis-metrics",
  "moltis-protocol",
  "serde",

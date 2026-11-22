@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use super::*;
+use {super::*, crate::test_support::backend_test};
 
 #[test]
 fn test_upsert_and_list() {
@@ -120,21 +120,11 @@ fn external_agent_kind_parses_named_acp_variants() {
     }
 }
 
-async fn sqlite_pool() -> sqlx::SqlitePool {
-    let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
-    // sessions table references projects, so create a stub projects table.
-    sqlx::query("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY)")
-        .execute(&pool)
-        .await
-        .unwrap();
-    SqliteSessionMetadata::init(&pool).await.unwrap();
-    pool
-}
+// Store tests are written once as `run_*` bodies taking a `Db` and run on
+// both engines via `backend_test!` below.
 
-#[tokio::test]
-async fn test_sqlite_upsert_and_list() {
-    let pool = sqlite_pool().await;
-    let meta = SqliteSessionMetadata::new(pool);
+async fn run_upsert_and_list(db: &Db) {
+    let meta = DbSessionMetadata::new(db.clone());
 
     meta.upsert("main", None).await.unwrap();
     meta.upsert("session:abc", Some("My Chat".to_string()))
@@ -147,10 +137,8 @@ async fn test_sqlite_upsert_and_list() {
     assert_eq!(abc.label.as_deref(), Some("My Chat"));
 }
 
-#[tokio::test]
-async fn test_sqlite_list_pins_main_then_sorts_by_recency() {
-    let pool = sqlite_pool().await;
-    let meta = SqliteSessionMetadata::new(pool);
+async fn run_list_pins_main_then_sorts_by_recency(db: &Db) {
+    let meta = DbSessionMetadata::new(db.clone());
 
     meta.upsert("main", None).await.unwrap();
     meta.upsert("session:older", None).await.unwrap();
@@ -171,10 +159,8 @@ async fn test_sqlite_list_pins_main_then_sorts_by_recency() {
     assert_eq!(keys, vec!["main", "session:newer", "session:older"]);
 }
 
-#[tokio::test]
-async fn test_sqlite_remove() {
-    let pool = sqlite_pool().await;
-    let meta = SqliteSessionMetadata::new(pool);
+async fn run_remove(db: &Db) {
+    let meta = DbSessionMetadata::new(db.clone());
 
     meta.upsert("main", None).await.unwrap();
     assert!(meta.get("main").await.is_some());
@@ -182,20 +168,16 @@ async fn test_sqlite_remove() {
     assert!(meta.get("main").await.is_none());
 }
 
-#[tokio::test]
-async fn test_sqlite_touch() {
-    let pool = sqlite_pool().await;
-    let meta = SqliteSessionMetadata::new(pool);
+async fn run_touch(db: &Db) {
+    let meta = DbSessionMetadata::new(db.clone());
 
     meta.upsert("main", None).await.unwrap();
     meta.touch("main", 5).await;
     assert_eq!(meta.get("main").await.unwrap().message_count, 5);
 }
 
-#[tokio::test]
-async fn test_sqlite_set_external_agent() {
-    let pool = sqlite_pool().await;
-    let meta = SqliteSessionMetadata::new(pool);
+async fn run_set_external_agent(db: &Db) {
+    let meta = DbSessionMetadata::new(db.clone());
 
     meta.upsert("main", None).await.unwrap();
     meta.set_external_agent(
@@ -215,10 +197,8 @@ async fn test_sqlite_set_external_agent() {
     assert_eq!(entry.external_session_id, None);
 }
 
-#[tokio::test]
-async fn test_sqlite_set_timestamps_and_counts() {
-    let pool = sqlite_pool().await;
-    let meta = SqliteSessionMetadata::new(pool);
+async fn run_set_timestamps_and_counts(db: &Db) {
+    let meta = DbSessionMetadata::new(db.clone());
 
     meta.upsert("main", None).await.unwrap();
     meta.set_timestamps_and_counts("main", 100, 200, 5, 3).await;
@@ -230,10 +210,8 @@ async fn test_sqlite_set_timestamps_and_counts() {
     assert_eq!(entry.last_seen_message_count, 3);
 }
 
-#[tokio::test]
-async fn test_sqlite_mark_seen() {
-    let pool = sqlite_pool().await;
-    let meta = SqliteSessionMetadata::new(pool);
+async fn run_mark_seen(db: &Db) {
+    let meta = DbSessionMetadata::new(db.clone());
 
     meta.upsert("main", None).await.unwrap();
     // New session starts with last_seen_message_count = 0.
@@ -257,11 +235,9 @@ async fn test_sqlite_mark_seen() {
     assert_eq!(entry.last_seen_message_count, 5);
 }
 
-#[tokio::test]
-async fn test_sqlite_mark_seen_emits_patched_event() {
-    let pool = sqlite_pool().await;
+async fn run_mark_seen_emits_patched_event(db: &Db) {
     let bus = crate::session_events::SessionEventBus::new();
-    let meta = SqliteSessionMetadata::with_event_bus(pool, bus.clone());
+    let meta = DbSessionMetadata::with_event_bus(db.clone(), bus.clone());
     let mut rx = bus.subscribe();
 
     meta.upsert("main", None).await.unwrap();
@@ -363,10 +339,8 @@ fn test_worktree_branch() {
     );
 }
 
-#[tokio::test]
-async fn test_sqlite_worktree_branch() {
-    let pool = sqlite_pool().await;
-    let meta = SqliteSessionMetadata::new(pool);
+async fn run_worktree_branch(db: &Db) {
+    let meta = DbSessionMetadata::new(db.clone());
 
     meta.upsert("main", None).await.unwrap();
     assert!(meta.get("main").await.unwrap().worktree_branch.is_none());
@@ -382,10 +356,8 @@ async fn test_sqlite_worktree_branch() {
     assert!(meta.get("main").await.unwrap().worktree_branch.is_none());
 }
 
-#[tokio::test]
-async fn test_sqlite_archived() {
-    let pool = sqlite_pool().await;
-    let meta = SqliteSessionMetadata::new(pool);
+async fn run_archived(db: &Db) {
+    let meta = DbSessionMetadata::new(db.clone());
 
     meta.upsert("main", None).await.unwrap();
     assert!(!meta.get("main").await.unwrap().archived);
@@ -425,10 +397,8 @@ fn test_sandbox_image() {
     );
 }
 
-#[tokio::test]
-async fn test_sqlite_sandbox_image() {
-    let pool = sqlite_pool().await;
-    let meta = SqliteSessionMetadata::new(pool);
+async fn run_sandbox_image(db: &Db) {
+    let meta = DbSessionMetadata::new(db.clone());
 
     meta.upsert("main", None).await.unwrap();
     assert!(meta.get("main").await.unwrap().sandbox_image.is_none());
@@ -491,10 +461,8 @@ fn test_channel_binding() {
     );
 }
 
-#[tokio::test]
-async fn test_sqlite_active_session() {
-    let pool = sqlite_pool().await;
-    let meta = SqliteSessionMetadata::new(pool);
+async fn run_active_session(db: &Db) {
+    let meta = DbSessionMetadata::new(db.clone());
 
     // No active session initially.
     assert!(
@@ -548,10 +516,8 @@ async fn test_sqlite_active_session() {
     );
 }
 
-#[tokio::test]
-async fn test_sqlite_list_channel_sessions() {
-    let pool = sqlite_pool().await;
-    let meta = SqliteSessionMetadata::new(pool);
+async fn run_list_channel_sessions(db: &Db) {
+    let meta = DbSessionMetadata::new(db.clone());
 
     let binding = r#"{"channel_type":"telegram","account_id":"bot1","chat_id":"123"}"#.to_string();
 
@@ -579,10 +545,8 @@ async fn test_sqlite_list_channel_sessions() {
     assert!(other.is_empty());
 }
 
-#[tokio::test]
-async fn test_sqlite_clear_active_session_mappings() {
-    let pool = sqlite_pool().await;
-    let meta = SqliteSessionMetadata::new(pool);
+async fn run_clear_active_session_mappings(db: &Db) {
+    let meta = DbSessionMetadata::new(db.clone());
 
     meta.set_active_session("telegram", "bot1", "123", None, "session:abc")
         .await;
@@ -611,10 +575,8 @@ async fn test_sqlite_clear_active_session_mappings() {
     );
 }
 
-#[tokio::test]
-async fn test_sqlite_channel_binding() {
-    let pool = sqlite_pool().await;
-    let meta = SqliteSessionMetadata::new(pool);
+async fn run_channel_binding(db: &Db) {
+    let meta = DbSessionMetadata::new(db.clone());
 
     meta.upsert("tg:bot1:123", None).await.unwrap();
     assert!(
@@ -672,10 +634,8 @@ fn test_mcp_disabled() {
     assert_eq!(reloaded.get("main").unwrap().mcp_disabled, Some(true));
 }
 
-#[tokio::test]
-async fn test_sqlite_mcp_disabled() {
-    let pool = sqlite_pool().await;
-    let meta = SqliteSessionMetadata::new(pool);
+async fn run_mcp_disabled(db: &Db) {
+    let meta = DbSessionMetadata::new(db.clone());
 
     meta.upsert("main", None).await.unwrap();
     assert!(meta.get("main").await.unwrap().mcp_disabled.is_none());
@@ -690,19 +650,15 @@ async fn test_sqlite_mcp_disabled() {
     assert!(meta.get("main").await.unwrap().mcp_disabled.is_none());
 }
 
-#[tokio::test]
-async fn test_version_starts_at_zero() {
-    let pool = sqlite_pool().await;
-    let meta = SqliteSessionMetadata::new(pool);
+async fn run_version_starts_at_zero(db: &Db) {
+    let meta = DbSessionMetadata::new(db.clone());
 
     let entry = meta.upsert("main", None).await.unwrap();
     assert_eq!(entry.version, 0);
 }
 
-#[tokio::test]
-async fn test_version_increments_on_mutation() {
-    let pool = sqlite_pool().await;
-    let meta = SqliteSessionMetadata::new(pool);
+async fn run_version_increments_on_mutation(db: &Db) {
+    let meta = DbSessionMetadata::new(db.clone());
 
     meta.upsert("main", None).await.unwrap();
     assert_eq!(meta.get("main").await.unwrap().version, 0);
@@ -714,10 +670,7 @@ async fn test_version_increments_on_mutation() {
     assert_eq!(meta.get("main").await.unwrap().version, 2);
 
     // Insert a project row so the FK constraint is satisfied.
-    sqlx::query("INSERT INTO projects (id) VALUES ('proj1')")
-        .execute(&meta.pool)
-        .await
-        .unwrap();
+    execute!(&meta.db, "INSERT INTO projects (id) VALUES ('proj1')").unwrap();
     meta.set_project_id("main", Some("proj1".to_string())).await;
     assert_eq!(meta.get("main").await.unwrap().version, 3);
 
@@ -756,10 +709,8 @@ async fn test_version_increments_on_mutation() {
     assert_eq!(meta.get("main").await.unwrap().version, 13);
 }
 
-#[tokio::test]
-async fn test_version_increments_on_upsert_update() {
-    let pool = sqlite_pool().await;
-    let meta = SqliteSessionMetadata::new(pool);
+async fn run_version_increments_on_upsert_update(db: &Db) {
+    let meta = DbSessionMetadata::new(db.clone());
 
     meta.upsert("main", Some("First".to_string()))
         .await
@@ -773,10 +724,8 @@ async fn test_version_increments_on_upsert_update() {
     assert_eq!(meta.get("main").await.unwrap().version, 1);
 }
 
-#[tokio::test]
-async fn test_version_in_list() {
-    let pool = sqlite_pool().await;
-    let meta = SqliteSessionMetadata::new(pool);
+async fn run_version_in_list(db: &Db) {
+    let meta = DbSessionMetadata::new(db.clone());
 
     meta.upsert("main", None).await.unwrap();
     meta.touch("main", 3).await;
@@ -920,10 +869,8 @@ fn test_delete_by_agent_id() {
     assert_eq!(deleted, 0);
 }
 
-#[tokio::test]
-async fn test_sqlite_agent_id() {
-    let pool = sqlite_pool().await;
-    let meta = SqliteSessionMetadata::new(pool);
+async fn run_agent_id(db: &Db) {
+    let meta = DbSessionMetadata::new(db.clone());
 
     meta.upsert("main", None).await.unwrap();
     assert!(meta.get("main").await.unwrap().agent_id.is_none());
@@ -938,10 +885,8 @@ async fn test_sqlite_agent_id() {
     assert!(meta.get("main").await.unwrap().agent_id.is_none());
 }
 
-#[tokio::test]
-async fn test_sqlite_mode_id() {
-    let pool = sqlite_pool().await;
-    let meta = SqliteSessionMetadata::new(pool);
+async fn run_mode_id(db: &Db) {
+    let meta = DbSessionMetadata::new(db.clone());
 
     meta.upsert("main", None).await.unwrap();
     assert!(meta.get("main").await.unwrap().mode_id.is_none());
@@ -956,10 +901,8 @@ async fn test_sqlite_mode_id() {
     assert!(meta.get("main").await.unwrap().mode_id.is_none());
 }
 
-#[tokio::test]
-async fn test_sqlite_list_by_agent_id() {
-    let pool = sqlite_pool().await;
-    let meta = SqliteSessionMetadata::new(pool);
+async fn run_list_by_agent_id(db: &Db) {
+    let meta = DbSessionMetadata::new(db.clone());
 
     meta.upsert("s1", Some("Session 1".to_string()))
         .await
@@ -989,10 +932,8 @@ async fn test_sqlite_list_by_agent_id() {
     assert!(none.is_empty());
 }
 
-#[tokio::test]
-async fn test_sqlite_delete_by_agent_id() {
-    let pool = sqlite_pool().await;
-    let meta = SqliteSessionMetadata::new(pool);
+async fn run_delete_by_agent_id(db: &Db) {
+    let meta = DbSessionMetadata::new(db.clone());
 
     meta.upsert("s1", None).await.unwrap();
     meta.upsert("s2", None).await.unwrap();
@@ -1027,3 +968,106 @@ fn test_agent_id_serde_compat() {
     assert!(meta.get("main").unwrap().agent_id.is_none());
     assert!(meta.get("main").unwrap().mode_id.is_none());
 }
+
+// Cross-backend runners: every store test above runs on SQLite and, when
+// TEST_POSTGRES_URL is set, on PostgreSQL with the same assertions.
+backend_test!(
+    test_sqlite_upsert_and_list,
+    test_postgres_upsert_and_list,
+    run_upsert_and_list
+);
+backend_test!(
+    test_sqlite_list_pins_main_then_sorts_by_recency,
+    test_postgres_list_pins_main_then_sorts_by_recency,
+    run_list_pins_main_then_sorts_by_recency
+);
+backend_test!(test_sqlite_remove, test_postgres_remove, run_remove);
+backend_test!(test_sqlite_touch, test_postgres_touch, run_touch);
+backend_test!(
+    test_sqlite_set_external_agent,
+    test_postgres_set_external_agent,
+    run_set_external_agent
+);
+backend_test!(
+    test_sqlite_set_timestamps_and_counts,
+    test_postgres_set_timestamps_and_counts,
+    run_set_timestamps_and_counts
+);
+backend_test!(
+    test_sqlite_mark_seen,
+    test_postgres_mark_seen,
+    run_mark_seen
+);
+backend_test!(
+    test_sqlite_mark_seen_emits_patched_event,
+    test_postgres_mark_seen_emits_patched_event,
+    run_mark_seen_emits_patched_event
+);
+backend_test!(
+    test_sqlite_worktree_branch,
+    test_postgres_worktree_branch,
+    run_worktree_branch
+);
+backend_test!(test_sqlite_archived, test_postgres_archived, run_archived);
+backend_test!(
+    test_sqlite_sandbox_image,
+    test_postgres_sandbox_image,
+    run_sandbox_image
+);
+backend_test!(
+    test_sqlite_active_session,
+    test_postgres_active_session,
+    run_active_session
+);
+backend_test!(
+    test_sqlite_list_channel_sessions,
+    test_postgres_list_channel_sessions,
+    run_list_channel_sessions
+);
+backend_test!(
+    test_sqlite_clear_active_session_mappings,
+    test_postgres_clear_active_session_mappings,
+    run_clear_active_session_mappings
+);
+backend_test!(
+    test_sqlite_channel_binding,
+    test_postgres_channel_binding,
+    run_channel_binding
+);
+backend_test!(
+    test_sqlite_mcp_disabled,
+    test_postgres_mcp_disabled,
+    run_mcp_disabled
+);
+backend_test!(
+    test_version_starts_at_zero,
+    test_postgres_version_starts_at_zero,
+    run_version_starts_at_zero
+);
+backend_test!(
+    test_version_increments_on_mutation,
+    test_postgres_version_increments_on_mutation,
+    run_version_increments_on_mutation
+);
+backend_test!(
+    test_version_increments_on_upsert_update,
+    test_postgres_version_increments_on_upsert_update,
+    run_version_increments_on_upsert_update
+);
+backend_test!(
+    test_version_in_list,
+    test_postgres_version_in_list,
+    run_version_in_list
+);
+backend_test!(test_sqlite_agent_id, test_postgres_agent_id, run_agent_id);
+backend_test!(test_sqlite_mode_id, test_postgres_mode_id, run_mode_id);
+backend_test!(
+    test_sqlite_list_by_agent_id,
+    test_postgres_list_by_agent_id,
+    run_list_by_agent_id
+);
+backend_test!(
+    test_sqlite_delete_by_agent_id,
+    test_postgres_delete_by_agent_id,
+    run_delete_by_agent_id
+);

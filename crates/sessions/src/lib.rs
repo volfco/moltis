@@ -10,10 +10,10 @@ pub mod key;
 pub mod metadata;
 pub mod session_events;
 pub mod state_store;
-#[cfg(test)]
-pub(crate) mod test_support;
 mod storage_layout;
 pub mod store;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 /// Persisted message types live in `moltis-protocol` so clients can share them
 /// without depending on session storage.
