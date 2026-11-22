@@ -162,9 +162,13 @@ Notes:
   'moltis': run as superuser: CREATE EXTENSION vector;`
 
 - The Memory settings page shows a pgvector banner (`pgvector: available`, or
-  `missing — run CREATE EXTENSION vector as superuser`), and the `memory.status`
-  RPC reports the same as `pgvector: { "available": bool, "action": "CREATE
-  EXTENSION vector;" }` (omitted on SQLite).
+  the action from the `memory.status` RPC), and the `memory.status` RPC reports
+  the same as `pgvector: { "available": bool, "action": "CREATE EXTENSION
+  vector;" }` (omitted on SQLite). The probe runs once when the memory store is
+  opened and the result is cached on it, so the banner is a confirmation rather
+  than a fresh check: startup already blocks the missing-extension case (see
+  above), which makes the banner belt-and-braces for a database whose extension
+  was dropped while moltis was running.
 - The memory embedding column is deliberately untyped (`vector`, not
   `vector(1536)`), so a change of embedding provider or dimension does not
   require a re-index. Similarity search therefore runs as a sequential scan
@@ -179,6 +183,30 @@ Notes:
 To move an existing SQLite memory index to PostgreSQL, stop moltis, switch
 `[database]`, and start again — the memory index is derived data and re-syncs
 from your memory files on the first sync (`moltis memory status` shows it).
+
+### Several instances on one database
+
+The sync lock is per database, not per process: every instance pointing at the
+same PostgreSQL `database.url` shares one advisory lock key. A full sync pass
+that starts while another instance is already syncing skips instead of
+interleaving — it logs `memory: initial sync skipped; another instance holds
+the memory sync lock` (or the `periodic sync skipped` variant) and does no
+work at all, including no re-index of a shared qmd index. Skipped passes are
+counted in `moltis_memory_sync_lock_skips_total`. The next pass tries again; a
+skipping instance converges as soon as the holder finishes.
+
+The lock holds one pooled connection for the length of the pass, so a
+PostgreSQL pool of one connection deadlocks a sync that also needs the pool:
+keep `server.db_pool_max_connections` at 2 or more.
+
+Single-file updates (`sync_path`/`remove_path`, e.g. from the file watcher)
+are serialized only inside one process; the advisory lock covers full passes
+(`sync` and `reindex`, including their re-embedding work).
+
+Skipping is a normal, non-retrying outcome for the headless startup profile
+(`--no-background-tasks`): it syncs once at startup, so an instance that starts
+while another one is mid-pass stays at its last synced state until the next
+start.
 
 ## Features
 

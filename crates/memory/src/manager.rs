@@ -360,6 +360,8 @@ impl MemoryManager {
 
     /// Sync a single file by path. Returns true if it was updated.
     pub async fn sync_path(&self, path: &Path) -> Result<bool> {
+        // In-process serialization only: the cross-instance advisory lock
+        // guards full passes (`sync`/`reindex`), not single-file updates.
         let _sync_permit = self.acquire_sync_lock().await?;
         let path_str = path.to_string_lossy().to_string();
         let mut report = SyncReport::default();
@@ -368,6 +370,8 @@ impl MemoryManager {
 
     /// Remove a file path from the memory index after the backing file is gone.
     pub async fn remove_path(&self, path: &Path) -> Result<bool> {
+        // In-process serialization only: the cross-instance advisory lock
+        // guards full passes (`sync`/`reindex`), not single-file removals.
         let _sync_permit = self.acquire_sync_lock().await?;
         let path_str = path.to_string_lossy().to_string();
         let had_file = self.store.get_file(&path_str).await?.is_some();
