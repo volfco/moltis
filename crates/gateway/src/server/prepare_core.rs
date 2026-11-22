@@ -478,7 +478,7 @@ pub async fn prepare_gateway_core_with_profile(
     moltis_webhooks::run_migrations(&db_pool)
         .await
         .expect("failed to run webhooks migrations");
-    crate::run_migrations(&db_pool)
+    crate::run_migrations(&moltis_db::Db::from(db_pool.clone()))
         .await
         .expect("failed to run gateway migrations");
 

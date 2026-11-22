@@ -692,8 +692,9 @@ mod tests {
     #[tokio::test]
     async fn pair_verify_accepts_valid_signature_from_sqlite_store() -> anyhow::Result<()> {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
-        crate::run_migrations(&pool).await?;
-        let pairing_store = std::sync::Arc::new(PairingStore::new(pool));
+        let db = moltis_db::Db::from(pool);
+        crate::run_migrations(&db).await?;
+        let pairing_store = std::sync::Arc::new(PairingStore::new(db));
         let state = test_state_with_pairing_store(std::sync::Arc::clone(&pairing_store));
         let signing_key = SigningKey::from_bytes(&[7; 32]);
         let public_key = public_key(&signing_key);
@@ -727,8 +728,9 @@ mod tests {
     #[tokio::test]
     async fn pair_verify_rejects_expired_request_from_sqlite_store() -> anyhow::Result<()> {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
-        crate::run_migrations(&pool).await?;
-        let pairing_store = std::sync::Arc::new(PairingStore::new(pool.clone()));
+        let db = moltis_db::Db::from(pool);
+        crate::run_migrations(&db).await?;
+        let pairing_store = std::sync::Arc::new(PairingStore::new(db.clone()));
         let state = test_state_with_pairing_store(std::sync::Arc::clone(&pairing_store));
         let signing_key = SigningKey::from_bytes(&[7; 32]);
         let public_key = public_key(&signing_key);
@@ -740,11 +742,12 @@ mod tests {
                 Some(&public_key),
             )
             .await?;
-        sqlx::query("UPDATE pair_requests SET expires_at = ? WHERE id = ?")
-            .bind("2000-01-01T00:00:00Z")
-            .bind(&request.id)
-            .execute(&pool)
-            .await?;
+        moltis_db::execute!(
+            &db,
+            "UPDATE pair_requests SET expires_at = ? WHERE id = ?",
+            "2000-01-01T00:00:00Z",
+            &request.id,
+        )?;
 
         let response = dispatch_pair_verify(state, signed_params(&request, &signing_key)).await;
 

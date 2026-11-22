@@ -255,7 +255,9 @@ pub(super) async fn complete_startup(
             .configure_channel_registry(Arc::clone(channel_registry))
             .context("failed to initialize connector channel registry")?;
     }
-    let pairing_store = Arc::new(crate::pairing::PairingStore::new(db_pool.clone()));
+    let pairing_store = Arc::new(crate::pairing::PairingStore::new(moltis_db::Db::from(
+        db_pool.clone(),
+    )));
     #[cfg(feature = "tls")]
     let tls_enabled_for_gateway = config.tls.enabled;
     #[cfg(not(feature = "tls"))]
