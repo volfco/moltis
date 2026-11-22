@@ -12,6 +12,8 @@ pub mod normalize;
 pub mod profiles;
 pub mod rate_limit;
 pub mod store;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod types;
 pub mod worker;
 
@@ -21,13 +23,15 @@ pub use error::{Error, Result};
 ///
 /// Creates the `webhooks`, `webhook_deliveries`, and `webhook_response_actions`
 /// tables. Call at application startup.
-pub async fn run_migrations(pool: &sqlx::SqlitePool) -> Result<()> {
+pub async fn run_migrations(db: &moltis_db::Db) -> Result<()> {
     // Foreign key enforcement (for ON DELETE CASCADE) is enabled via
-    // `.foreign_keys(true)` on the pool's SqliteConnectOptions, which
-    // applies to every connection — not per-query PRAGMA.
-    sqlx::migrate!("./migrations")
-        .set_ignore_missing(true)
-        .run(pool)
-        .await?;
+    // `.foreign_keys(true)` on SQLite connections (PostgreSQL always enforces
+    // foreign keys), not per-query PRAGMA.
+    moltis_db::run_migrations(
+        db,
+        sqlx::migrate!("./migrations"),
+        sqlx::migrate!("./migrations_pg"),
+    )
+    .await?;
     Ok(())
 }

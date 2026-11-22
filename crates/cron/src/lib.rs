@@ -8,11 +8,14 @@ pub mod parse;
 pub mod schedule;
 pub mod service;
 pub mod store;
+pub mod store_db;
 pub mod store_file;
 pub mod store_memory;
-pub mod store_sqlite;
 pub mod system_events;
 pub mod types;
+
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use {
     error::{Error, Result},
@@ -22,11 +25,13 @@ pub use {
 /// Run database migrations for the cron crate.
 ///
 /// This creates the `cron_jobs` and `cron_runs` tables. Should be called at
-/// application startup when using [`store_sqlite::SqliteStore`].
-pub async fn run_migrations(pool: &sqlx::SqlitePool) -> Result<()> {
-    sqlx::migrate!("./migrations")
-        .set_ignore_missing(true)
-        .run(pool)
-        .await?;
+/// application startup when using [`store_db::DbStore`].
+pub async fn run_migrations(db: &moltis_db::Db) -> Result<()> {
+    moltis_db::run_migrations(
+        db,
+        sqlx::migrate!("./migrations"),
+        sqlx::migrate!("./migrations_pg"),
+    )
+    .await?;
     Ok(())
 }

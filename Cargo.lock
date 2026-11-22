@@ -7761,6 +7761,7 @@ dependencies = [
  "moltis-agents",
  "moltis-common",
  "moltis-config",
+ "moltis-db",
  "moltis-metrics",
  "rstest",
  "serde",
@@ -8482,6 +8483,7 @@ name = "moltis-projects"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "moltis-db",
  "moltis-metrics",
  "serde",
  "serde_json",
@@ -9056,6 +9058,7 @@ dependencies = [
  "ipnet",
  "moltis-common",
  "moltis-config",
+ "moltis-db",
  "moltis-metrics",
  "rand 0.10.1",
  "rstest",

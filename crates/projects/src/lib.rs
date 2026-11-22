@@ -9,12 +9,14 @@ pub mod context;
 pub mod detect;
 pub mod error;
 pub mod store;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod types;
 pub mod worktree;
 
 pub use {
     error::{Error, Result},
-    store::{ProjectStore, SqliteProjectStore, TomlProjectStore},
+    store::{DbProjectStore, ProjectStore, TomlProjectStore},
     types::{ContextFile, Project, ProjectContext},
     worktree::WorktreeManager,
 };
@@ -22,11 +24,13 @@ pub use {
 /// Run database migrations for the projects crate.
 ///
 /// This creates the `projects` table and indexes. Should be called at
-/// application startup before using [`SqliteProjectStore`].
-pub async fn run_migrations(pool: &sqlx::SqlitePool) -> Result<()> {
-    sqlx::migrate!("./migrations")
-        .set_ignore_missing(true)
-        .run(pool)
-        .await?;
+/// application startup before using [`DbProjectStore`].
+pub async fn run_migrations(db: &moltis_db::Db) -> Result<()> {
+    moltis_db::run_migrations(
+        db,
+        sqlx::migrate!("./migrations"),
+        sqlx::migrate!("./migrations_pg"),
+    )
+    .await?;
     Ok(())
 }
