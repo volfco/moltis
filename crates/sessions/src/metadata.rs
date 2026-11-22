@@ -790,7 +790,7 @@ impl DbSessionMetadata {
     /// Set the parent session key and fork point for a branched session.
     pub async fn set_parent(&self, key: &str, parent_key: Option<String>, fork_point: Option<u32>) {
         let now = now_ms() as i64;
-        let fp = fork_point.map(|v| i64::from(v));
+        let fp = fork_point.map(i64::from);
         execute!(
             &self.db,
             "UPDATE sessions SET parent_session_key = ?, fork_point = ?, updated_at = ?, version = version + 1 WHERE key = ?",
