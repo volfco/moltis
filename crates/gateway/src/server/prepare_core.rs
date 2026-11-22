@@ -589,7 +589,7 @@ pub async fn prepare_gateway_core_with_profile(
     }
 
     let message_log: Arc<dyn moltis_channels::message_log::MessageLog> = Arc::new(
-        crate::message_log_store::SqliteMessageLog::new(db_pool.clone()),
+        crate::message_log_store::SqliteMessageLog::new(moltis_db::Db::from(db_pool.clone())),
     );
 
     // Migrate from projects.toml if it exists.

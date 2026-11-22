@@ -4,21 +4,27 @@ use {
         Error as ChannelError, Result as ChannelResult,
         message_log::{MessageLog, MessageLogEntry, SenderSummary},
     },
-    sqlx::SqlitePool,
+    moltis_db::{Db, execute, fetch_all, fetch_optional},
 };
 
-fn channel_db_error(context: &'static str, source: sqlx::Error) -> ChannelError {
-    ChannelError::external(context, source)
+fn channel_db_error(
+    context: &'static str,
+    source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+) -> ChannelError {
+    ChannelError::External {
+        context: context.into(),
+        source: source.into(),
+    }
 }
 
-/// SQLite-backed message log.
+/// Database-backed message log (SQLite or PostgreSQL).
 pub struct SqliteMessageLog {
-    pool: SqlitePool,
+    db: Db,
 }
 
 impl SqliteMessageLog {
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(db: Db) -> Self {
+        Self { db }
     }
 
     /// Initialize the message_log table schema.
@@ -26,59 +32,33 @@ impl SqliteMessageLog {
     /// **Deprecated**: Schema is now managed by sqlx migrations.
     /// This method is retained for tests that use in-memory databases.
     #[doc(hidden)]
-    pub async fn init(pool: &SqlitePool) -> ChannelResult<()> {
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS message_log (
-                id             INTEGER PRIMARY KEY AUTOINCREMENT,
-                account_id     TEXT    NOT NULL,
-                channel_type   TEXT    NOT NULL,
-                peer_id        TEXT    NOT NULL,
-                username       TEXT,
-                sender_name    TEXT,
-                chat_id        TEXT    NOT NULL,
-                chat_type      TEXT    NOT NULL,
-                body           TEXT    NOT NULL,
-                access_granted INTEGER NOT NULL DEFAULT 0,
-                created_at     INTEGER NOT NULL
-            )",
-        )
-        .execute(pool)
-        .await
-        .map_err(|e| channel_db_error("init message_log table", e))?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_message_log_channel_account_created
-             ON message_log (channel_type, account_id, created_at DESC)",
-        )
-        .execute(pool)
-        .await
-        .map_err(|e| channel_db_error("init message_log indexes", e))?;
-
-        Ok(())
+    pub async fn init(db: &Db) -> ChannelResult<()> {
+        crate::run_migrations(db)
+            .await
+            .map_err(|e| channel_db_error("init message_log schema", e))
     }
 }
 
 #[async_trait]
 impl MessageLog for SqliteMessageLog {
     async fn log(&self, entry: MessageLogEntry) -> ChannelResult<()> {
-        sqlx::query(
+        execute!(
+            &self.db,
             "INSERT INTO message_log
              (account_id, channel_type, peer_id, username, sender_name,
               chat_id, chat_type, body, access_granted, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            &entry.account_id,
+            &entry.channel_type,
+            &entry.peer_id,
+            &entry.username,
+            &entry.sender_name,
+            &entry.chat_id,
+            &entry.chat_type,
+            &entry.body,
+            entry.access_granted,
+            entry.created_at,
         )
-        .bind(&entry.account_id)
-        .bind(&entry.channel_type)
-        .bind(&entry.peer_id)
-        .bind(&entry.username)
-        .bind(&entry.sender_name)
-        .bind(&entry.chat_id)
-        .bind(&entry.chat_type)
-        .bind(&entry.body)
-        .bind(entry.access_granted)
-        .bind(entry.created_at)
-        .execute(&self.pool)
-        .await
         .map_err(|e| channel_db_error("log channel message", e))?;
         Ok(())
     }
@@ -89,8 +69,8 @@ impl MessageLog for SqliteMessageLog {
         account_id: &str,
         limit: u32,
     ) -> ChannelResult<Vec<MessageLogEntry>> {
-        let rows = sqlx::query_as::<
-            _,
+        let rows = fetch_all!(
+            &self.db,
             (
                 i64,
                 String,
@@ -104,19 +84,16 @@ impl MessageLog for SqliteMessageLog {
                 bool,
                 i64,
             ),
-        >(
             "SELECT id, account_id, channel_type, peer_id, username, sender_name,
                     chat_id, chat_type, body, access_granted, created_at
              FROM message_log
              WHERE channel_type = ? AND account_id = ?
              ORDER BY created_at DESC
              LIMIT ?",
+            channel_type,
+            account_id,
+            i64::from(limit),
         )
-        .bind(channel_type)
-        .bind(account_id)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await
         .map_err(|e| channel_db_error("list channel messages", e))?;
 
         Ok(rows
@@ -142,20 +119,20 @@ impl MessageLog for SqliteMessageLog {
         channel_type: &str,
         account_id: &str,
     ) -> ChannelResult<Vec<SenderSummary>> {
-        let rows = sqlx::query_as::<_, (String, Option<String>, Option<String>, i64, i64, bool)>(
+        let rows = fetch_all!(
+            &self.db,
+            (String, Option<String>, Option<String>, i64, i64, bool),
             "SELECT peer_id, username, sender_name,
                     COUNT(*) as message_count,
                     MAX(created_at) as last_seen,
-                    MAX(CASE WHEN access_granted THEN 1 ELSE 0 END) as last_access_granted
+                    MAX(CASE WHEN access_granted THEN 1 ELSE 0 END) > 0 as last_access_granted
              FROM message_log
              WHERE channel_type = ? AND account_id = ?
              GROUP BY peer_id
              ORDER BY last_seen DESC",
+            channel_type,
+            account_id,
         )
-        .bind(channel_type)
-        .bind(account_id)
-        .fetch_all(&self.pool)
-        .await
         .map_err(|e| channel_db_error("list channel senders", e))?;
 
         Ok(rows
@@ -177,10 +154,11 @@ impl MessageLog for SqliteMessageLog {
 mod tests {
     use super::*;
 
-    async fn test_pool() -> SqlitePool {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        SqliteMessageLog::init(&pool).await.unwrap();
-        pool
+    async fn test_db() -> Db {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let db = Db::from(pool);
+        SqliteMessageLog::init(&db).await.unwrap();
+        db
     }
 
     fn sample_entry(account_id: &str, peer_id: &str, granted: bool) -> MessageLogEntry {
@@ -201,8 +179,8 @@ mod tests {
 
     #[tokio::test]
     async fn log_and_list() {
-        let pool = test_pool().await;
-        let store = SqliteMessageLog::new(pool);
+        let db = test_db().await;
+        let store = SqliteMessageLog::new(db);
 
         store
             .log(sample_entry("bot1", "user1", true))
@@ -226,8 +204,8 @@ mod tests {
 
     #[tokio::test]
     async fn list_respects_limit() {
-        let pool = test_pool().await;
-        let store = SqliteMessageLog::new(pool);
+        let db = test_db().await;
+        let store = SqliteMessageLog::new(db);
 
         for i in 0..5 {
             let mut e = sample_entry("bot1", "user1", true);
@@ -243,8 +221,8 @@ mod tests {
 
     #[tokio::test]
     async fn unique_senders_groups() {
-        let pool = test_pool().await;
-        let store = SqliteMessageLog::new(pool);
+        let db = test_db().await;
+        let store = SqliteMessageLog::new(db);
 
         store
             .log(sample_entry("bot1", "user1", true))
@@ -267,8 +245,8 @@ mod tests {
 
     #[tokio::test]
     async fn unique_senders_includes_denied_matrix_senders() {
-        let pool = test_pool().await;
-        let store = SqliteMessageLog::new(pool);
+        let db = test_db().await;
+        let store = SqliteMessageLog::new(db);
 
         let entry = MessageLogEntry {
             id: 0,
