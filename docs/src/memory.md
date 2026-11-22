@@ -147,14 +147,27 @@ if PostgreSQL is configured but unreachable, startup aborts with an error.
    url = "postgres://postgres:moltis@localhost/moltis"
    ```
 
-3. Restart moltis. Migrations run automatically and create the `vector`
-   extension, all store tables, and the GIN index used for memory keyword
-   search. In SQLite mode the files stay as today (`moltis.db`, `memory.db`,
+3. Create the pgvector extension once per database (needs superuser):
+   ```bash
+   psql -d moltis -c 'CREATE EXTENSION vector;'
+   ```
+   moltis probes for the extension before running its memory migrations and
+   refuses to start when it is missing, with the exact fix instead of a raw
+   migration error:
+   `pgvector extension is missing in PostgreSQL database 'moltis': run as superuser: CREATE EXTENSION vector;`
+
+4. Restart moltis. Migrations run automatically and create all store tables
+   and the GIN index used for memory keyword search. In SQLite mode the files
+   stay as today (`moltis.db`, `memory.db`,
    `connectors.db`, …); in PostgreSQL mode everything lives in the one
    database.
 
 Notes:
 
+- The Memory settings page shows a pgvector banner (`pgvector: available`, or
+  `missing — run CREATE EXTENSION vector as superuser`), and the `memory.status`
+  RPC reports the same as `pgvector: { "available": bool, "action": "CREATE
+  EXTENSION vector;" }` (omitted on SQLite).
 - The memory embedding column is deliberately untyped (`vector`, not
   `vector(1536)`), so a change of embedding provider or dimension does not
   require a re-index. Similarity search therefore runs as a sequential scan
@@ -612,9 +625,9 @@ systems.
 ### PostgreSQL backend not available
 
 1. Confirm `database.url` is set and the server is reachable
-2. Confirm the pgvector extension is installed on the server:
-   `psql -c "CREATE EXTENSION IF NOT EXISTS vector"` (needs superuser or the
-   extension pre-installed by your provider)
+2. Confirm the pgvector extension is installed on the server — startup fails
+   with `pgvector extension is missing … run as superuser: CREATE EXTENSION
+   vector;` when it is not; run that command as superuser and restart
 3. Check the startup error: moltis aborts when the connection or a migration
    fails — it never silently falls back to SQLite
 
