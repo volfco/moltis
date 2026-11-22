@@ -71,9 +71,9 @@ impl PairingState {
         self.approve_at(pair_id, OffsetDateTime::now_utc())
     }
 
-    /// pub(crate) so tests can pin the expiry-boundary semantics with a fixed
-    /// `now` (mirrors [`super::PairingStore::list_pending_at`]).
-    pub(crate) fn approve_at(&mut self, pair_id: &str, now: OffsetDateTime) -> Result<DeviceToken> {
+    /// pub(super) so pairing tests can pin the expiry-boundary semantics with
+    /// a fixed `now` (mirrors [`super::PairingStore::list_pending_at`]).
+    pub(super) fn approve_at(&mut self, pair_id: &str, now: OffsetDateTime) -> Result<DeviceToken> {
         let req = self
             .pending
             .get_mut(pair_id)
