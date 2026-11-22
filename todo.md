@@ -3,7 +3,7 @@
 Short summaries only; details live in `continue.md`, `decisions.md`, and the
 tracker (`bd ready`).
 
-## Integration step (before this branch reaches main)
+## Integration step (before this branch reaches main) — see continue.md for the executable spec
 
 Call sites still passing `sqlx::SqlitePool` where `moltis_db::Db` is now required
 (inventory from the ports-a-small review; workspace does not compile until done):

@@ -27,6 +27,34 @@ PostgreSQL is a supported backend for the **memory index only**:
 - Everything else (sessions, cron, projects, vault, webhooks, connectors,
   code-index, gateway auth) still opens `moltis.db` as SQLite.
 
+## Integration wave (next, after ports-e-auth lands)
+
+One integration lane, in this order:
+
+1. **Callers (mechanical, ~72 errors)**: gateway's `SqliteSessionMetadata` →
+   `DbSessionMetadata` (29 refs), `SqliteWebhookStore` → `DbWebhookStore` (3),
+   constructor wraps to `moltis_db::Db`, plus the same for moltis-auth's new
+   API in gateway/httpd/cli callers once its port lands. Note: the wraps will
+   be *replaced* by passing the global `Db` in step 2 — do step 2 first where
+   practical to avoid writing the wrap twice.
+2. **Single engine switch**: new `[database]` config block
+   (`backend = "sqlite" | "postgres"`, `url`, reuse
+   `server.db_pool_max_connections`). Every SQL store follows it. Remove
+   `MemoryBackend::Postgres` and `memory.database_url` (the memory *system*
+   stays `builtin | qmd | zvec`; builtin now means "the built-in store over
+   whatever engine `[database]` chose"). Update: schema, validate
+   (+remove the postgres-memory tests), template, config-reference,
+   memory.md, MemorySection UI (drop the PostgreSQL button + URL field; a
+   Settings UI for the engine is follow-up work), services.rs parse fns,
+   swift-bridge, cli.
+3. **Hard fail**: postgres configured but unreachable/migrations fail →
+   startup exits with a clear error. No SQLite fallback anywhere (init_memory's
+   memory-disabled path goes away with the config removal; the main pool
+   creation is the single failure point).
+4. **Validation**: fmt, clippy, workspace check --all-targets, per-crate tests
+   on both engines (per-crate TEST_POSTGRES_URL databases), E2E
+   settings-memory spec, then a fresh-context review lane.
+
 ## Next items
 
 1. Port the remaining stores to `moltis_db` macros, one crate per PR, smallest

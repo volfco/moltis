@@ -2,6 +2,29 @@
 
 Short entries recording *why* the code is the way it is. Newest first.
 
+## 2026-11-22 — Postgres test harness must fail loudly when the URL is set
+
+**Scope:** minor. `test_support.rs` in every ported crate.
+
+**Decision:** `pg_test_db()` skips tests only when `TEST_POSTGRES_URL` is
+*unset*. When it is set, connect/reset/migration failures panic so the test
+fails.
+
+**Why:** a silent skip (`Option`, `?` on errors) turns a typo'd URL into a
+green run that tested nothing — the harness would defeat its own purpose. Found
+by two independent review lanes.
+
+## 2026-11-22 — moltis-auth is part of the database port
+
+**Scope:** major. New port lane for `crates/auth` (81 query sites).
+
+**Decision:** treat `moltis-auth` as a first-class store crate in the port.
+
+**Why:** it was missed in the initial lane partition because it has no
+`migrations/` directory — its tables live in `crates/gateway/migrations`. The
+workspace compile surfaced it. Lesson recorded: partition by *query sites*, not
+by migration directories.
+
 ## 2026-10-24 — Database backend abstraction (crates/db) instead of per-crate cfg duplication
 
 **Scope:** major. New crate `moltis-db`, `crates/memory`, `crates/gateway`.
