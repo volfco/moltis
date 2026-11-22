@@ -4,7 +4,7 @@ use tracing::info;
 
 use {
     moltis_channels::{ChannelReplyTarget, Error as ChannelError, Result as ChannelResult},
-    moltis_sessions::metadata::SqliteSessionMetadata,
+    moltis_sessions::metadata::DbSessionMetadata,
 };
 
 use crate::{
@@ -21,7 +21,7 @@ use super::super::{
 
 pub(in crate::channel_events) async fn handle_new(
     state: &Arc<GatewayState>,
-    session_metadata: &SqliteSessionMetadata,
+    session_metadata: &DbSessionMetadata,
     session_key: &str,
     reply_to: &ChannelReplyTarget,
     sender_id: Option<&str>,
@@ -342,7 +342,7 @@ pub(in crate::channel_events) async fn handle_context(
 
 pub(in crate::channel_events) async fn handle_sessions(
     state: &Arc<GatewayState>,
-    session_metadata: &SqliteSessionMetadata,
+    session_metadata: &DbSessionMetadata,
     session_key: &str,
     reply_to: &ChannelReplyTarget,
     args: &str,
@@ -412,7 +412,7 @@ pub(in crate::channel_events) async fn handle_sessions(
 
 pub(in crate::channel_events) async fn handle_attach(
     state: &Arc<GatewayState>,
-    session_metadata: &SqliteSessionMetadata,
+    session_metadata: &DbSessionMetadata,
     session_key: &str,
     reply_to: &ChannelReplyTarget,
     args: &str,

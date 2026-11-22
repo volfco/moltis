@@ -1,13 +1,13 @@
 #![allow(clippy::expect_used)]
 
-use {super::*, moltis_sessions::metadata::SqliteSessionMetadata, sqlx::sqlite::SqlitePoolOptions};
+use {super::*, moltis_sessions::metadata::DbSessionMetadata, sqlx::sqlite::SqlitePoolOptions};
 
 #[tokio::test]
 async fn default_registry_includes_minimax_code_acp() {
     let pool = SqlitePoolOptions::new()
         .connect_lazy("sqlite::memory:")
         .expect("create in-memory SQLite pool");
-    let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+    let metadata = Arc::new(DbSessionMetadata::new(moltis_db::Db::from(pool)));
     let service = GatewayExternalAgentService::new(
         ExternalAgentsConfig::default(),
         metadata,

@@ -158,7 +158,7 @@ mod tests {
         moltis_agents::model::{ChatMessage, CompletionResponse, LlmProvider, StreamEvent, Usage},
         moltis_auth::{AuthMode, ResolvedAuth},
         moltis_providers::{ModelCapabilities, ModelInfo, ProviderRegistry},
-        moltis_sessions::{metadata::SqliteSessionMetadata, store::SessionStore},
+        moltis_sessions::{metadata::DbSessionMetadata, store::SessionStore},
         tokio::sync::RwLock,
         tokio_stream::Stream,
     };
@@ -208,9 +208,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session_store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
-        moltis_projects::run_migrations(&pool).await.unwrap();
-        SqliteSessionMetadata::init(&pool).await.unwrap();
-        let session_metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        let db = moltis_db::Db::from(pool);
+        moltis_projects::run_migrations(&db).await.unwrap();
+        DbSessionMetadata::init(&db).await.unwrap();
+        let session_metadata = Arc::new(DbSessionMetadata::new(db));
         let services = GatewayServices::noop()
             .with_session_store(Arc::clone(&session_store))
             .with_session_metadata(Arc::clone(&session_metadata));

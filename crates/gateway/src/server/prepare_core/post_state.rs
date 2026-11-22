@@ -19,7 +19,7 @@ use credential_env::{
 use {
     moltis_providers::{PendingDiscoveries, ProviderRegistry},
     moltis_sessions::{
-        metadata::SqliteSessionMetadata, session_events::SessionEventBus, store::SessionStore,
+        metadata::DbSessionMetadata, session_events::SessionEventBus, store::SessionStore,
     },
 };
 
@@ -84,9 +84,9 @@ pub(super) struct PostStateInputs {
     #[cfg(any(feature = "qmd", feature = "code-index-builtin"))]
     pub project_store: Arc<dyn moltis_projects::ProjectStore>,
     pub credential_store: Arc<auth::CredentialStore>,
-    pub db_pool: sqlx::SqlitePool,
+    pub db: moltis_db::Db,
     pub session_store: Arc<SessionStore>,
-    pub session_metadata: Arc<SqliteSessionMetadata>,
+    pub session_metadata: Arc<DbSessionMetadata>,
     pub session_share_store: Arc<crate::share_store::ShareStore>,
     pub session_state_store: Arc<moltis_sessions::state_store::SessionStateStore>,
     pub agent_persona_store: Arc<crate::agent_persona::AgentPersonaStore>,
@@ -147,7 +147,7 @@ pub(super) async fn complete_startup(
         live_mcp,
         memory_manager,
         credential_store,
-        db_pool,
+        db,
         session_store,
         session_metadata,
         session_share_store: _session_share_store,
@@ -255,9 +255,7 @@ pub(super) async fn complete_startup(
             .configure_channel_registry(Arc::clone(channel_registry))
             .context("failed to initialize connector channel registry")?;
     }
-    let pairing_store = Arc::new(crate::pairing::PairingStore::new(moltis_db::Db::from(
-        db_pool.clone(),
-    )));
+    let pairing_store = Arc::new(crate::pairing::PairingStore::new(db.clone()));
     #[cfg(feature = "tls")]
     let tls_enabled_for_gateway = config.tls.enabled;
     #[cfg(not(feature = "tls"))]
@@ -372,13 +370,13 @@ pub(super) async fn complete_startup(
         }
     }
 
-    install_feedback(&state, &db_pool);
+    install_feedback(&state, &db);
 
     if !profile.is_headless() {
         let (webhook_tx, webhook_rx) = tokio::sync::mpsc::channel::<i64>(256);
         let webhook_store: Arc<dyn moltis_webhooks::store::WebhookStore> = {
             let inner: Arc<dyn moltis_webhooks::store::WebhookStore> = Arc::new(
-                moltis_webhooks::store::SqliteWebhookStore::with_pool(db_pool.clone()),
+                moltis_webhooks::store::DbWebhookStore::with_pool(db.clone()),
             );
             #[cfg(feature = "vault")]
             {

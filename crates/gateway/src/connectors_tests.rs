@@ -1298,8 +1298,9 @@ async fn enabled_vault_without_an_instance_never_stores_plaintext_passwords() {
 async fn sealed_vault_preserves_encrypted_password_on_redacted_update() {
     crate::vault_lifecycle::set_vault_encryption_runtime_enabled(true);
     let vault_pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
-    moltis_vault::run_migrations(&vault_pool).await.unwrap();
-    let vault = Arc::new(moltis_vault::Vault::new(vault_pool).await.unwrap());
+    let vault_db = moltis_db::Db::from(vault_pool);
+    moltis_vault::run_migrations(&vault_db).await.unwrap();
+    let vault = Arc::new(moltis_vault::Vault::new(vault_db).await.unwrap());
     let vault_password = test_password();
     vault.initialize(&vault_password).await.unwrap();
 

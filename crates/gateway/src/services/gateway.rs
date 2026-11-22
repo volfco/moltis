@@ -40,7 +40,7 @@ pub struct GatewayServices {
     /// Optional channel stream outbound for edit-in-place channel streaming.
     channel_stream_outbound: Option<Arc<dyn moltis_channels::ChannelStreamOutbound>>,
     /// Optional session metadata for cross-service access (e.g. channel binding).
-    pub session_metadata: Option<Arc<moltis_sessions::metadata::SqliteSessionMetadata>>,
+    pub session_metadata: Option<Arc<moltis_sessions::metadata::DbSessionMetadata>>,
     /// Optional session store for message-index lookups (e.g. deduplication).
     pub session_store: Option<Arc<moltis_sessions::store::SessionStore>>,
     /// Optional session share store for immutable snapshot links.
@@ -219,7 +219,7 @@ impl GatewayServices {
 
     pub fn with_session_metadata(
         mut self,
-        meta: Arc<moltis_sessions::metadata::SqliteSessionMetadata>,
+        meta: Arc<moltis_sessions::metadata::DbSessionMetadata>,
     ) -> Self {
         self.session_metadata = Some(meta);
         self

@@ -81,7 +81,8 @@ pub(crate) async fn init_code_index(
             .as_deref()
             .unwrap_or(default_index_root.as_path());
         let db_path = index_root.join("index.db");
-        match moltis_code_index::store_sqlite::SqliteCodeIndexStore::new(&db_path).await {
+        let opened = open_builtin_store(&db_path).await;
+        match opened {
             Ok(store) => {
                 info!(path = %db_path.display(), "code-index: builtin SQLite backend initialized");
                 return Arc::new(moltis_code_index::CodeIndex::new_builtin(
@@ -109,4 +110,25 @@ pub(crate) async fn init_code_index(
     }
 
     Arc::new(moltis_code_index::CodeIndex::config_only(code_index_config))
+}
+
+/// Open the builtin code-index store on its own SQLite file.
+///
+/// The store takes a connected [`moltis_db::Db`]; opening the per-index
+/// `index.db` file is the caller's job.
+#[cfg(feature = "code-index-builtin")]
+async fn open_builtin_store(
+    db_path: &std::path::Path,
+) -> anyhow::Result<moltis_code_index::store_db::DbCodeIndexStore> {
+    // SQLite only creates the file, not its parent directory.
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(db_path)
+        .create_if_missing(true);
+    let pool = sqlx::SqlitePool::connect_with(options).await?;
+    let store =
+        moltis_code_index::store_db::DbCodeIndexStore::new(moltis_db::Db::from(pool)).await?;
+    Ok(store)
 }

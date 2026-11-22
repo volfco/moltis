@@ -13,9 +13,9 @@ const ATTACH_BINDING: &str = r#"{"channel_type":"telegram","account_id":"bot1","
 async fn service_with_attached_session(
     dir: &tempfile::TempDir,
     key: &str,
-) -> (LiveSessionService, Arc<SqliteSessionMetadata>) {
+) -> (LiveSessionService, Arc<DbSessionMetadata>) {
     let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
-    let metadata = Arc::new(SqliteSessionMetadata::new(sqlite_pool().await));
+    let metadata = Arc::new(DbSessionMetadata::new(sqlite_pool().await));
     metadata.upsert(key, None).await.unwrap();
     metadata
         .set_channel_binding(key, Some(ATTACH_BINDING.to_string()))

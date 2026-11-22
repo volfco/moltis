@@ -8,7 +8,7 @@ use std::{
 use {
     moltis_providers::ProviderRegistry,
     moltis_sessions::{
-        metadata::SqliteSessionMetadata, session_events::SessionEventBus, store::SessionStore,
+        metadata::DbSessionMetadata, session_events::SessionEventBus, store::SessionStore,
     },
 };
 
@@ -20,7 +20,7 @@ pub(crate) struct BridgeState {
     pub runtime: tokio::runtime::Runtime,
     pub registry: RwLock<ProviderRegistry>,
     pub session_store: SessionStore,
-    pub session_metadata: SqliteSessionMetadata,
+    pub session_metadata: DbSessionMetadata,
     pub credential_store: Arc<moltis_gateway::auth::CredentialStore>,
     pub sandbox_default_image_override: RwLock<Option<String>>,
 }
@@ -74,21 +74,22 @@ impl BridgeState {
             let pool = sqlx::SqlitePool::connect_with(opts)
                 .await
                 .unwrap_or_else(|e| panic!("failed to open moltis.db: {e}"));
+            let db = moltis_db::Db::from(pool);
             // Run migrations so the sessions table exists even if the gateway
             // hasn't been started yet. Order: projects first (FK dependency).
-            if let Err(e) = moltis_projects::run_migrations(&pool).await {
+            if let Err(e) = moltis_projects::run_migrations(&db).await {
                 emit_log("WARN", "bridge", &format!("projects migration: {e}"));
             }
-            if let Err(e) = moltis_sessions::run_migrations(&pool).await {
+            if let Err(e) = moltis_sessions::run_migrations(&db).await {
                 emit_log("WARN", "bridge", &format!("sessions migration: {e}"));
             }
-            if let Err(e) = moltis_gateway::run_migrations(&pool).await {
+            if let Err(e) = moltis_gateway::run_migrations(&db).await {
                 emit_log("WARN", "bridge", &format!("gateway migration: {e}"));
             }
-            pool
+            db
         });
         let event_bus = SessionEventBus::new();
-        let session_metadata = SqliteSessionMetadata::with_event_bus(db_pool.clone(), event_bus);
+        let session_metadata = DbSessionMetadata::with_event_bus(db_pool.clone(), event_bus);
         let credential_store = runtime.block_on(async {
             // Keep vault metadata up to date so env var encryption status works
             // even when the full gateway server is not running.

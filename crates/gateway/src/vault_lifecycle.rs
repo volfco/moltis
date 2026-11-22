@@ -668,8 +668,14 @@ mod tests {
 
     async fn test_vault() -> Arc<moltis_vault::Vault> {
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        moltis_vault::run_migrations(&pool).await.unwrap();
-        Arc::new(moltis_vault::Vault::new(pool).await.unwrap())
+        moltis_vault::run_migrations(&moltis_db::Db::from(pool.clone()))
+            .await
+            .unwrap();
+        Arc::new(
+            moltis_vault::Vault::new(moltis_db::Db::from(pool))
+                .await
+                .unwrap(),
+        )
     }
 
     struct VaultRuntimeFlagGuard;
@@ -778,9 +784,15 @@ mod tests {
         let config_dir = tempfile::tempdir().unwrap();
         moltis_config::set_config_dir(config_dir.path().to_path_buf());
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        moltis_vault::run_migrations(&pool).await.unwrap();
+        moltis_vault::run_migrations(&moltis_db::Db::from(pool.clone()))
+            .await
+            .unwrap();
         create_disable_test_tables(&pool).await;
-        let vault = Arc::new(moltis_vault::Vault::new(pool.clone()).await.unwrap());
+        let vault = Arc::new(
+            moltis_vault::Vault::new(moltis_db::Db::from(pool.clone()))
+                .await
+                .unwrap(),
+        );
         vault.initialize(&test_password()).await.unwrap();
 
         let env_ciphertext = vault
@@ -923,9 +935,15 @@ mod tests {
         let config_dir = tempfile::tempdir().unwrap();
         moltis_config::set_config_dir(config_dir.path().to_path_buf());
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        moltis_vault::run_migrations(&pool).await.unwrap();
+        moltis_vault::run_migrations(&moltis_db::Db::from(pool.clone()))
+            .await
+            .unwrap();
         create_disable_test_tables(&pool).await;
-        let vault = Arc::new(moltis_vault::Vault::new(pool.clone()).await.unwrap());
+        let vault = Arc::new(
+            moltis_vault::Vault::new(moltis_db::Db::from(pool.clone()))
+                .await
+                .unwrap(),
+        );
         vault.initialize(&test_password()).await.unwrap();
 
         let config = serde_json::json!({

@@ -4,7 +4,7 @@ use {
     moltis_channels::{ChannelReplyTarget, Error as ChannelError, Result as ChannelResult},
     moltis_config::ModePreset,
     moltis_external_agents::AgentTransportKind,
-    moltis_sessions::metadata::SqliteSessionMetadata,
+    moltis_sessions::metadata::DbSessionMetadata,
     moltis_tools::image_cache::ImageBuilder,
 };
 
@@ -140,7 +140,7 @@ pub(in crate::channel_events) async fn handle_approve_deny(
 
 pub(in crate::channel_events) async fn handle_agent(
     state: &Arc<GatewayState>,
-    session_metadata: &SqliteSessionMetadata,
+    session_metadata: &DbSessionMetadata,
     session_key: &str,
     args: &str,
 ) -> ChannelResult<String> {
@@ -235,7 +235,7 @@ pub(in crate::channel_events) async fn handle_agent(
 
 pub(in crate::channel_events) async fn handle_mode(
     state: &Arc<GatewayState>,
-    session_metadata: &SqliteSessionMetadata,
+    session_metadata: &DbSessionMetadata,
     session_key: &str,
     args: &str,
 ) -> ChannelResult<String> {
@@ -347,7 +347,7 @@ pub(in crate::channel_events) async fn handle_mode(
 
 pub(in crate::channel_events) async fn handle_model(
     state: &Arc<GatewayState>,
-    session_metadata: &SqliteSessionMetadata,
+    session_metadata: &DbSessionMetadata,
     session_key: &str,
     args: &str,
 ) -> ChannelResult<String> {
@@ -665,7 +665,7 @@ fn external_agent_display_name(kind: &str) -> &'static str {
 
 pub(in crate::channel_events) async fn handle_sandbox(
     state: &Arc<GatewayState>,
-    session_metadata: &SqliteSessionMetadata,
+    session_metadata: &DbSessionMetadata,
     session_key: &str,
     args: &str,
 ) -> ChannelResult<String> {

@@ -117,7 +117,7 @@ async fn start_auth_server_impl(
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
     let auth_config = moltis_config::AuthConfig::default();
     let cred_store = Arc::new(
-        CredentialStore::with_config(pool, &auth_config)
+        CredentialStore::with_config(moltis_db::Db::from(pool), &auth_config)
             .await
             .unwrap(),
     );
@@ -188,13 +188,23 @@ async fn start_localhost_server_with_vault() -> (
     std::mem::forget(tmp);
 
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
-    moltis_vault::run_migrations(&pool).await.unwrap();
+    moltis_vault::run_migrations(&moltis_db::Db::from(pool.clone()))
+        .await
+        .unwrap();
     let auth_config = moltis_config::AuthConfig::default();
-    let vault = Arc::new(moltis_vault::Vault::new(pool.clone()).await.unwrap());
-    let cred_store = Arc::new(
-        CredentialStore::with_vault(pool, &auth_config, Some(Arc::clone(&vault)))
+    let vault = Arc::new(
+        moltis_vault::Vault::new(moltis_db::Db::from(pool.clone()))
             .await
             .unwrap(),
+    );
+    let cred_store = Arc::new(
+        CredentialStore::with_vault(
+            moltis_db::Db::from(pool),
+            &auth_config,
+            Some(Arc::clone(&vault)),
+        )
+        .await
+        .unwrap(),
     );
 
     let resolved_auth = auth::resolve_auth(None, None);
@@ -265,13 +275,23 @@ async fn start_localhost_server_with_vault_and_session_store() -> (
     std::mem::forget(tmp);
 
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
-    moltis_vault::run_migrations(&pool).await.unwrap();
+    moltis_vault::run_migrations(&moltis_db::Db::from(pool.clone()))
+        .await
+        .unwrap();
     let auth_config = moltis_config::AuthConfig::default();
-    let vault = Arc::new(moltis_vault::Vault::new(pool.clone()).await.unwrap());
-    let cred_store = Arc::new(
-        CredentialStore::with_vault(pool, &auth_config, Some(Arc::clone(&vault)))
+    let vault = Arc::new(
+        moltis_vault::Vault::new(moltis_db::Db::from(pool.clone()))
             .await
             .unwrap(),
+    );
+    let cred_store = Arc::new(
+        CredentialStore::with_vault(
+            moltis_db::Db::from(pool),
+            &auth_config,
+            Some(Arc::clone(&vault)),
+        )
+        .await
+        .unwrap(),
     );
     let session_store = Arc::new(moltis_sessions::store::SessionStore::new(sessions_dir));
 

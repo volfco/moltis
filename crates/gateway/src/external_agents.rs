@@ -43,7 +43,7 @@ use self::{
 pub struct GatewayExternalAgentService {
     registry: ExternalAgentRegistry,
     config: ExternalAgentsConfig,
-    session_metadata: Arc<moltis_sessions::metadata::SqliteSessionMetadata>,
+    session_metadata: Arc<moltis_sessions::metadata::DbSessionMetadata>,
     live_sessions: Mutex<HashMap<LiveSessionKey, LiveSessionEntry>>,
 }
 
@@ -65,7 +65,7 @@ struct LiveSessionKey {
 impl GatewayExternalAgentService {
     pub fn new(
         config: ExternalAgentsConfig,
-        session_metadata: Arc<moltis_sessions::metadata::SqliteSessionMetadata>,
+        session_metadata: Arc<moltis_sessions::metadata::DbSessionMetadata>,
         approval_manager: Arc<ApprovalManager>,
     ) -> Self {
         let mut registry = ExternalAgentRegistry::new();
@@ -133,7 +133,7 @@ impl GatewayExternalAgentService {
     #[cfg(test)]
     fn with_registry(
         config: ExternalAgentsConfig,
-        session_metadata: Arc<moltis_sessions::metadata::SqliteSessionMetadata>,
+        session_metadata: Arc<moltis_sessions::metadata::DbSessionMetadata>,
         registry: ExternalAgentRegistry,
     ) -> Self {
         Self {
@@ -525,7 +525,7 @@ pub struct ExternalAgentChatService {
     external_agents: Arc<GatewayExternalAgentService>,
     state: Arc<GatewayState>,
     session_store: Arc<moltis_sessions::store::SessionStore>,
-    session_metadata: Arc<moltis_sessions::metadata::SqliteSessionMetadata>,
+    session_metadata: Arc<moltis_sessions::metadata::DbSessionMetadata>,
 }
 
 impl ExternalAgentChatService {
@@ -534,7 +534,7 @@ impl ExternalAgentChatService {
         external_agents: Arc<GatewayExternalAgentService>,
         state: Arc<GatewayState>,
         session_store: Arc<moltis_sessions::store::SessionStore>,
-        session_metadata: Arc<moltis_sessions::metadata::SqliteSessionMetadata>,
+        session_metadata: Arc<moltis_sessions::metadata::DbSessionMetadata>,
     ) -> Self {
         Self {
             inner,

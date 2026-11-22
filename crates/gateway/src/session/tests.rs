@@ -641,7 +641,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
         let pool = sqlite_pool().await;
-        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        let metadata = Arc::new(DbSessionMetadata::new(pool));
         let existing_path = store
             .save_media("main", "voice-msg-1.ogg", b"OggSreuse")
             .await
@@ -692,7 +692,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
         let pool = sqlite_pool().await;
-        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        let metadata = Arc::new(DbSessionMetadata::new(pool));
 
         store
             .append(
@@ -764,7 +764,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
         let pool = sqlite_pool().await;
-        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        let metadata = Arc::new(DbSessionMetadata::new(pool));
 
         store
             .append(
@@ -823,7 +823,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
         let pool = sqlite_pool().await;
-        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        let metadata = Arc::new(DbSessionMetadata::new(pool));
 
         store
             .append(
@@ -853,7 +853,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
         let pool = sqlite_pool().await;
-        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        let metadata = Arc::new(DbSessionMetadata::new(pool));
         let existing_path = store
             .save_media("main", "voice-msg-2.ogg", b"OggSreuse")
             .await
@@ -938,12 +938,13 @@ mod tests {
         }
     }
 
-    async fn sqlite_pool() -> sqlx::SqlitePool {
+    async fn sqlite_pool() -> moltis_db::Db {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let db = moltis_db::Db::from(pool);
         // Projects table must exist before sessions (FK constraint).
-        moltis_projects::run_migrations(&pool).await.unwrap();
-        SqliteSessionMetadata::init(&pool).await.unwrap();
-        pool
+        moltis_projects::run_migrations(&db).await.unwrap();
+        DbSessionMetadata::init(&db).await.unwrap();
+        db
     }
 
     #[cfg(not(feature = "voice"))]
@@ -951,7 +952,7 @@ mod tests {
     async fn voice_generate_reports_not_configured_without_voice() {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
-        let metadata = Arc::new(SqliteSessionMetadata::new(sqlite_pool().await));
+        let metadata = Arc::new(DbSessionMetadata::new(sqlite_pool().await));
         let service = LiveSessionService::new(store, metadata);
 
         let error = SessionService::voice_generate(&service, serde_json::json!({}))
@@ -969,7 +970,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
         let pool = sqlite_pool().await;
-        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        let metadata = Arc::new(DbSessionMetadata::new(pool));
         metadata
             .upsert("session:abc", Some("Cloud session".to_string()))
             .await
@@ -1013,7 +1014,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
         let pool = sqlite_pool().await;
-        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        let metadata = Arc::new(DbSessionMetadata::new(pool));
         let key = "telegram:bot-main:-100123";
         metadata.upsert(key, None).await.unwrap();
         let binding_json = serde_json::to_string(&moltis_channels::ChannelReplyTarget {
@@ -1063,7 +1064,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
         let pool = sqlite_pool().await;
-        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        let metadata = Arc::new(DbSessionMetadata::new(pool));
         metadata.upsert("main", None).await.unwrap();
 
         let payloads = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1100,7 +1101,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
         let pool = sqlite_pool().await;
-        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        let metadata = Arc::new(DbSessionMetadata::new(pool));
         let key = "telegram:bot-main:-100123";
         metadata.upsert(key, None).await.unwrap();
         metadata
@@ -1141,7 +1142,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
         let pool = sqlite_pool().await;
-        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        let metadata = Arc::new(DbSessionMetadata::new(pool));
 
         let mock = Arc::new(MockBrowserService::new());
         let svc = LiveSessionService::new(store, metadata)
@@ -1155,7 +1156,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
         let pool = sqlite_pool().await;
-        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        let metadata = Arc::new(DbSessionMetadata::new(pool));
 
         let mock = Arc::new(MockBrowserService::new());
         let svc = LiveSessionService::new(store, metadata)
@@ -1171,7 +1172,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
         let pool = sqlite_pool().await;
-        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        let metadata = Arc::new(DbSessionMetadata::new(pool));
 
         // No browser_service wired.
         let svc = LiveSessionService::new(store, metadata);
@@ -1185,7 +1186,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
         let pool = sqlite_pool().await;
-        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        let metadata = Arc::new(DbSessionMetadata::new(pool));
         metadata
             .upsert("main", Some("Test".to_string()))
             .await
@@ -1227,7 +1228,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
         let pool = sqlite_pool().await;
-        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        let metadata = Arc::new(DbSessionMetadata::new(pool));
         metadata
             .upsert("main", Some("Test".to_string()))
             .await
@@ -1253,7 +1254,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
         let pool = sqlite_pool().await;
-        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        let metadata = Arc::new(DbSessionMetadata::new(pool));
         metadata
             .upsert("main", Some("Test".to_string()))
             .await
@@ -1284,7 +1285,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
         let pool = sqlite_pool().await;
-        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        let metadata = Arc::new(DbSessionMetadata::new(pool));
         metadata
             .upsert("session:archive-me", Some("Test".to_string()))
             .await
@@ -1305,7 +1306,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
         let pool = sqlite_pool().await;
-        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        let metadata = Arc::new(DbSessionMetadata::new(pool));
         metadata
             .upsert("main", Some("Main".to_string()))
             .await
@@ -1326,7 +1327,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
         let pool = sqlite_pool().await;
-        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        let metadata = Arc::new(DbSessionMetadata::new(pool));
         metadata
             .upsert("main", Some("Main".to_string()))
             .await
@@ -1344,7 +1345,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
         let pool = sqlite_pool().await;
-        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        let metadata = Arc::new(DbSessionMetadata::new(pool));
         let binding =
             r#"{"channel_type":"telegram","account_id":"bot1","chat_id":"123"}"#.to_string();
         metadata
@@ -1370,7 +1371,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
         let pool = sqlite_pool().await;
-        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        let metadata = Arc::new(DbSessionMetadata::new(pool));
         let binding =
             r#"{"channel_type":"telegram","account_id":"bot1","chat_id":"123"}"#.to_string();
         metadata
@@ -1408,7 +1409,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
         let pool = sqlite_pool().await;
-        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        let metadata = Arc::new(DbSessionMetadata::new(pool));
         metadata
             .upsert("cron:archive-me", Some("Cron archive".to_string()))
             .await
@@ -1438,7 +1439,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
         let pool = sqlite_pool().await;
-        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        let metadata = Arc::new(DbSessionMetadata::new(pool));
         metadata
             .upsert("side", Some("Test".to_string()))
             .await

@@ -12,7 +12,7 @@ use {
     moltis_common::hooks::HookRegistry,
     moltis_projects::ProjectStore,
     moltis_sessions::{
-        message::PersistedMessage, metadata::SqliteSessionMetadata, state_store::SessionStateStore,
+        message::PersistedMessage, metadata::DbSessionMetadata, state_store::SessionStateStore,
         store::SessionStore,
     },
     moltis_tools::sandbox::SandboxRouter,

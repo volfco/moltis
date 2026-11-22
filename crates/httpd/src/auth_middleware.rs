@@ -783,7 +783,7 @@ mod tests {
             disabled: true,
             ..Default::default()
         };
-        let store = CredentialStore::with_config(pool, &auth_config).await?;
+        let store = CredentialStore::with_config(moltis_db::Db::from(pool), &auth_config).await?;
         let headers = HeaderMap::new();
 
         assert!(matches!(

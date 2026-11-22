@@ -16,8 +16,8 @@ use {
     moltis_connector_himalaya::{HimalayaAccountConfig, HimalayaConnector, HimalayaDatasetConfig},
     moltis_connectors::{
         Account, AccountCreate, AccountUpdate, ConnectorError, ConnectorItem, ConnectorKind,
-        ConnectorReader, Dataset, DatasetCreate, DatasetUpdate, ItemQuery, MAX_QUERY_LIMIT,
-        ProjectionManifest, SqliteConnectorStore, SyncRun,
+        ConnectorReader, Dataset, DatasetCreate, DatasetUpdate, DbConnectorStore, ItemQuery,
+        MAX_QUERY_LIMIT, ProjectionManifest, SyncRun,
     },
     secrecy::ExposeSecret,
     serde_json::Value,
@@ -88,7 +88,7 @@ pub enum ConnectorManagerError {
 }
 
 pub struct ConnectorManager {
-    store: Arc<SqliteConnectorStore>,
+    store: Arc<DbConnectorStore>,
     caldav: CalDavConnector,
     himalaya: HimalayaConnector,
     google_token_path: PathBuf,
@@ -157,11 +157,12 @@ impl ConnectorManager {
             .await
             .map_err(|error| internal(error, "open connector database"))?;
         restrict_file_permissions(&db_path).await?;
-        moltis_connectors::run_migrations(&pool)
+        let db = moltis_db::Db::from(pool);
+        moltis_connectors::run_migrations(&db)
             .await
             .map_err(ConnectorManagerError::from)?;
 
-        let store = Arc::new(SqliteConnectorStore::new(pool));
+        let store = Arc::new(DbConnectorStore::new(db));
         store
             .fail_running_sync_runs("Connector process stopped before this sync completed")
             .await
@@ -1051,7 +1052,7 @@ impl ConnectorManager {
             )
             .await
             .map_err(|error| internal(error, "open connector database for vault disable"))?;
-        let store = SqliteConnectorStore::new(pool);
+        let store = DbConnectorStore::new(moltis_db::Db::from(pool));
         decrypt_credentials(&store, vault).await
     }
 
@@ -1363,7 +1364,7 @@ impl ConnectorManager {
 
 #[cfg(feature = "vault")]
 async fn decrypt_credentials(
-    store: &SqliteConnectorStore,
+    store: &DbConnectorStore,
     vault: &moltis_vault::Vault,
 ) -> Result<usize> {
     let mut changed = 0;

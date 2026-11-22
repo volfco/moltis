@@ -492,7 +492,7 @@ pub async fn resolve_persona(
     agent_persona_store: Option<&crate::agent_persona::AgentPersonaStore>,
     explicit_persona_id: Option<&str>,
     session_key: Option<&str>,
-    session_metadata: Option<&moltis_sessions::metadata::SqliteSessionMetadata>,
+    session_metadata: Option<&moltis_sessions::metadata::DbSessionMetadata>,
 ) -> Option<VoicePersona> {
     // 1. Explicit persona ID from request params.
     if let Some(id) = explicit_persona_id
@@ -523,7 +523,7 @@ pub async fn resolve_persona(
 
 /// Look up the session's agent and return its voice_persona_id (if set).
 async fn resolve_agent_voice_persona_id(
-    meta: &moltis_sessions::metadata::SqliteSessionMetadata,
+    meta: &moltis_sessions::metadata::DbSessionMetadata,
     agent_store: &crate::agent_persona::AgentPersonaStore,
     session_key: &str,
 ) -> Option<String> {

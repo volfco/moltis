@@ -8,7 +8,11 @@ use {
 #[tokio::test]
 async fn sync_runtime_webauthn_host_registers_new_origin() {
     let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-    let credential_store = Arc::new(CredentialStore::new(pool).await.unwrap());
+    let credential_store = Arc::new(
+        CredentialStore::new(moltis_db::Db::from(pool))
+            .await
+            .unwrap(),
+    );
     let gateway = crate::state::GatewayState::with_options(
         ResolvedAuth {
             mode: AuthMode::Token,

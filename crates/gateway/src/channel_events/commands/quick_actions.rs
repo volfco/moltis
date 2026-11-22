@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use {
     moltis_channels::{ChannelReplyTarget, Error as ChannelError, Result as ChannelResult},
-    moltis_sessions::metadata::SqliteSessionMetadata,
+    moltis_sessions::metadata::DbSessionMetadata,
 };
 
 use crate::{
@@ -90,7 +90,7 @@ pub(in crate::channel_events) async fn handle_btw(
 
 pub(in crate::channel_events) async fn handle_fast(
     state: &Arc<GatewayState>,
-    _session_metadata: &SqliteSessionMetadata,
+    _session_metadata: &DbSessionMetadata,
     session_key: &str,
     args: &str,
 ) -> ChannelResult<String> {

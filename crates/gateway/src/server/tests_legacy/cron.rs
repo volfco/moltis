@@ -5,14 +5,14 @@ use {
     async_trait::async_trait,
     moltis_channels::{ChannelReplyTarget, ChannelType},
     moltis_common::types::ReplyPayload,
-    moltis_sessions::{metadata::SqliteSessionMetadata, store::SessionStore},
+    moltis_sessions::{metadata::DbSessionMetadata, store::SessionStore},
     sqlx::sqlite::SqlitePoolOptions,
 };
 
 struct CronHistoryFixture {
     _directory: tempfile::TempDir,
     registry: Arc<moltis_channels::ChannelRegistry>,
-    metadata: Arc<SqliteSessionMetadata>,
+    metadata: Arc<DbSessionMetadata>,
     store: Arc<SessionStore>,
 }
 
@@ -23,13 +23,10 @@ impl CronHistoryFixture {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        moltis_db::execute!(
-            &moltis_db::Db::from(pool.clone()),
-            "CREATE TABLE projects (id TEXT PRIMARY KEY)"
-        )
-        .unwrap();
-        SqliteSessionMetadata::init(&pool).await.unwrap();
-        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        let db = moltis_db::Db::from(pool);
+        moltis_db::execute!(&db, "CREATE TABLE projects (id TEXT PRIMARY KEY)").unwrap();
+        DbSessionMetadata::init(&db).await.unwrap();
+        let metadata = Arc::new(DbSessionMetadata::new(db));
         let directory = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(directory.path().to_path_buf()));
         let registry = Arc::new(moltis_channels::ChannelRegistry::new());
@@ -117,7 +114,7 @@ impl moltis_channels::ChannelOutbound for FailingChannelOutbound {
 }
 
 struct RemappingChannelOutbound {
-    metadata: Arc<SqliteSessionMetadata>,
+    metadata: Arc<DbSessionMetadata>,
     target: ChannelReplyTarget,
     session_key: String,
 }

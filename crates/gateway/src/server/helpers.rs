@@ -583,7 +583,7 @@ pub(crate) fn log_startup_config_storage_diagnostics() {
 
 pub(crate) struct CronDeliveryHistory {
     pub(crate) registry: Arc<moltis_channels::ChannelRegistry>,
-    pub(crate) metadata: Arc<moltis_sessions::metadata::SqliteSessionMetadata>,
+    pub(crate) metadata: Arc<moltis_sessions::metadata::DbSessionMetadata>,
     pub(crate) store: Arc<moltis_sessions::store::SessionStore>,
     pub(crate) delivery_id: String,
 }

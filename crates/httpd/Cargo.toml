@@ -26,6 +26,7 @@ moltis-channels       = { workspace = true }
 moltis-common         = { workspace = true }
 moltis-config         = { workspace = true }
 moltis-cron           = { workspace = true }
+moltis-db             = { workspace = true }
 moltis-gateway        = { workspace = true }
 moltis-graphql        = { optional = true, workspace = true }
 moltis-matrix         = { optional = true, workspace = true }
