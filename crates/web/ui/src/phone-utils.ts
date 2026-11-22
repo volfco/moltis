@@ -1,6 +1,6 @@
 // ── Phone settings utility functions ─────────────────────────
 
-import { sendRpc } from "./helpers";
+import { sendRpc, sendRpcWhenReady } from "./helpers";
 
 export interface PhoneProviderData {
 	id: string;
@@ -27,7 +27,7 @@ export interface PhoneProviders {
 }
 
 export function fetchPhoneProviders(): Promise<unknown> {
-	return sendRpc("phone.providers.all", {});
+	return sendRpcWhenReady("phone.providers.all", {});
 }
 
 export function togglePhoneProvider(providerId: string, enabled: boolean): Promise<unknown> {
