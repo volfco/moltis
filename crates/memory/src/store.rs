@@ -156,6 +156,15 @@ pub trait MemoryStore: Send + Sync {
 
     // ---- embedding identity ----
 
+    /// Whether this backend persists the embedding identity in `memory_meta`.
+    ///
+    /// Backends that do not are skipped by the identity check: with nothing
+    /// recorded, every sync would look like a provider change and re-embed the
+    /// whole index each pass.
+    fn tracks_embedding_identity(&self) -> bool {
+        false
+    }
+
     /// The embedding identity recorded in `memory_meta`, if any.
     ///
     /// `None` means no embed has been recorded yet (fresh index) or the

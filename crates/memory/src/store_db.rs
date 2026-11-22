@@ -952,6 +952,10 @@ impl MemoryStore for DbMemoryStore {
         }
     }
 
+    fn tracks_embedding_identity(&self) -> bool {
+        true
+    }
+
     async fn read_embedding_meta(&self) -> crate::error::Result<Option<EmbeddingMeta>> {
         let rows: Vec<(String, String)> = fetch_all!(
             &self.db,

@@ -194,6 +194,12 @@ impl MemoryManager {
         let Some(embedder) = self.embedder.as_deref() else {
             return Ok(None);
         };
+        // Backends without `memory_meta` (e.g. the zvec index) cannot record
+        // the identity, so treat every pass as unchanged rather than
+        // re-embedding the whole index on each sync.
+        if !self.store.tracks_embedding_identity() {
+            return Ok(None);
+        }
         let configured = EmbeddingMeta::from_provider(embedder);
         let recorded = self.store.read_embedding_meta().await?;
         let reason = match &recorded {
