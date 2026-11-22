@@ -16,11 +16,19 @@ pub(crate) fn pg_lock() -> &'static tokio::sync::Mutex<()> {
 
 /// Open the test database with an empty sessions schema.
 ///
-/// Returns `None` when `TEST_POSTGRES_URL` is unset or setup fails. The caller
-/// must already hold [`pg_lock`].
+/// Returns `None` when `TEST_POSTGRES_URL` is unset (the caller's test skips).
+/// When it IS set, any setup failure panics: a green run must never mean "the
+/// database was unreachable and nothing was tested". The caller must already
+/// hold [`pg_lock`].
 pub(crate) async fn pg_test_db() -> Option<Db> {
-    let url = std::env::var("TEST_POSTGRES_URL").ok()?;
-    let db = Db::connect(&DbOptions::postgres(url, 2)).await.ok()?;
+    let Ok(url) = std::env::var("TEST_POSTGRES_URL") else {
+        return None;
+    };
+    let db = Db::connect(&DbOptions::postgres(url, 2))
+        .await
+        .unwrap_or_else(|error| {
+            panic!("TEST_POSTGRES_URL is set but connecting to it failed: {error}")
+        });
     // Dropping sqlx's history is required: with it in place the migrator
     // believes this version is already applied and creates nothing.
     let reset = execute!(
@@ -28,24 +36,17 @@ pub(crate) async fn pg_test_db() -> Option<Db> {
         "DROP TABLE IF EXISTS sessions, channel_sessions, session_state, projects, \
          _sqlx_migrations CASCADE"
     );
-    if let Err(error) = reset {
-        eprintln!("postgres test reset failed: {error}");
-        return None;
-    }
+    reset.unwrap_or_else(|error| panic!("postgres test schema reset failed: {error}"));
     // sessions.project_id references projects(id); PostgreSQL validates the
     // referenced table at DDL time, so the stub must exist before migrations.
     let stub = execute!(
         &db,
         "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY)"
     );
-    if let Err(error) = stub {
-        eprintln!("postgres test setup failed: {error}");
-        return None;
-    }
-    if let Err(error) = crate::run_migrations(&db).await {
-        eprintln!("postgres test migrations failed: {error}");
-        return None;
-    }
+    stub.unwrap_or_else(|error| panic!("postgres test projects stub failed: {error}"));
+    crate::run_migrations(&db)
+        .await
+        .unwrap_or_else(|error| panic!("postgres test migrations failed: {error}"));
     Some(db)
 }
 

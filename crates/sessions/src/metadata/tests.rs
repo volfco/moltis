@@ -133,6 +133,9 @@ async fn run_upsert_and_list(db: &Db) {
 
     let list = meta.list().await;
     assert_eq!(list.len(), 2);
+    let keys: Vec<&str> = list.iter().map(|e| e.key.as_str()).collect();
+    assert!(keys.contains(&"main"));
+    assert!(keys.contains(&"session:abc"));
     let abc = list.iter().find(|e| e.key == "session:abc").unwrap();
     assert_eq!(abc.label.as_deref(), Some("My Chat"));
 }
