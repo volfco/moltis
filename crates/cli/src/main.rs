@@ -43,6 +43,7 @@ mod hooks_commands;
 #[cfg(feature = "openclaw-import")]
 mod import_commands;
 mod memory_commands;
+mod memory_reindex;
 #[cfg(feature = "netbird")]
 mod netbird_commands;
 mod node_commands;
