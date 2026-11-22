@@ -3,6 +3,29 @@
 Short summaries only; details live in `continue.md`, `decisions.md`, and the
 tracker (`bd ready`).
 
+## Integration step (before this branch reaches main)
+
+Call sites still passing `sqlx::SqlitePool` where `moltis_db::Db` is now required
+(inventory from the ports-a-small review; workspace does not compile until done):
+
+- crates/gateway/src/server/prepare_core.rs:469,475,478 (production startup)
+- crates/gateway/src/session/title.rs:211
+- crates/gateway/src/session/tests.rs:944
+- crates/gateway/src/webhooks.rs:536
+- crates/cli/src/db_commands.rs:191,362,364,423-432
+- crates/swift-bridge/src/state.rs:79
+
+Accepted review fixes to apply consistently across all ported crates:
+
+- [ ] test_support `pg_test_db()` must not swallow connect errors: when
+      TEST_POSTGRES_URL is set but unreachable, tests currently pass vacuously
+      (`.ok()?` treats a typo'd URL as "skip"). Fail loudly instead.
+- [ ] Cross-crate Postgres test races: per-process mutexes cannot protect a
+      shared database from `cargo test --workspace`; keep suites per-crate and
+      document it, or give each crate's harness a database-level advisory lock.
+- [ ] webhooks `tests/ingress_integration.rs` stays SQLite-only (store layer is
+      mirrored; the ingress pipeline is engine-independent). Known gap.
+
 ## PostgreSQL backend rollout (in progress)
 
 - [ ] Port `crates/projects` (6 queries) to `moltis_db` macros + `migrations_pg/`.

@@ -12,6 +12,12 @@ Forward-looking state only. Remove entries as they are completed.
 
 ## Current state
 
+Lane `ports-a-small` (projects/cron/webhooks) is merged: reviewed (ready to
+merge) and test-verified on both engines. Lanes `ports-b-aux`,
+`ports-c-sessions`, `ports-d-gateway` are in flight; sessions is done and
+awaiting its review verdict. See `todo.md` for the integration call-site
+inventory that gates the branch.
+
 PostgreSQL is a supported backend for the **memory index only**:
 
 - `crates/db` — backend abstraction (`Db`, `DbTx`, `moltis_db::*` query macros).
