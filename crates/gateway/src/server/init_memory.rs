@@ -490,6 +490,11 @@ async fn build_memory_runtime_from_store(
     let sync_manager = Arc::clone(&manager);
     tokio::spawn(async move {
         match sync_manager.sync().await {
+            // A skipped pass did nothing, so the zero counters below would
+            // read as "nothing changed" instead of "another instance synced".
+            Ok(report) if report.skipped => {
+                info!("memory: initial sync skipped; another instance holds the memory sync lock")
+            },
             Ok(report) => {
                 info!(
                     updated = report.files_updated,
@@ -571,8 +576,12 @@ async fn build_memory_runtime_from_store(
         interval.tick().await; // skip first immediate tick
         loop {
             interval.tick().await;
-            if let Err(e) = sync_manager.sync().await {
-                tracing::warn!("memory: periodic sync failed: {e}");
+            match sync_manager.sync().await {
+                Ok(report) if report.skipped => info!(
+                    "memory: periodic sync skipped; another instance holds the memory sync lock"
+                ),
+                Ok(_) => {},
+                Err(e) => tracing::warn!("memory: periodic sync failed: {e}"),
             }
         }
     });

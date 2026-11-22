@@ -165,6 +165,12 @@ impl MemoryRuntime for QmdMemoryRuntime {
 
     async fn sync(&self) -> MemoryResult<SyncReport> {
         let report = self.fallback.sync().await?;
+        // A skipped pass (another instance holds the memory sync lock) did no
+        // work, so leave the shared qmd index alone instead of reindexing it
+        // concurrently with the instance that is actually syncing.
+        if report.skipped {
+            return Ok(report);
+        }
         self.refresh_qmd_index()
             .await
             .map_err(|e| moltis_memory::Error::Validation(e.to_string()))?;
