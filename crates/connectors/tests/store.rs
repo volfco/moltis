@@ -242,7 +242,7 @@ fn observation(
 async fn account_config_change_bumps_every_owned_dataset_plan_case(
     store: &DbConnectorStore,
 ) -> TestResult {
-    let first = create_dataset(&store).await?;
+    let first = create_dataset(store).await?;
     let second = store
         .create_dataset(DatasetCreate {
             account_id: first.account_id.clone(),
@@ -255,7 +255,7 @@ async fn account_config_change_bumps_every_owned_dataset_plan_case(
             next_sync_at: None,
         })
         .await?;
-    let unrelated = create_dataset(&store).await?;
+    let unrelated = create_dataset(store).await?;
     for dataset in [&first, &second] {
         let run = store.start_sync_run(&dataset.id).await?;
         store
@@ -298,7 +298,7 @@ async fn account_config_change_bumps_every_owned_dataset_plan_case(
 async fn account_name_and_enabled_changes_do_not_bump_dataset_plan_case(
     store: &DbConnectorStore,
 ) -> TestResult {
-    let dataset = create_dataset(&store).await?;
+    let dataset = create_dataset(store).await?;
     let account = store
         .get_account(&dataset.account_id)
         .await?
@@ -481,7 +481,7 @@ async fn account_source_keys_are_validated_case(store: &DbConnectorStore) -> Tes
 async fn account_update_rolls_back_when_dataset_plan_bump_fails_case(
     store: &DbConnectorStore,
 ) -> TestResult {
-    let dataset = create_dataset(&store).await?;
+    let dataset = create_dataset(store).await?;
     let account = store
         .get_account(&dataset.account_id)
         .await?
@@ -632,7 +632,7 @@ async fn account_and_dataset_crud_and_cascade_case(store: &DbConnectorStore) -> 
 async fn incomplete_snapshot_does_not_delete_and_complete_snapshot_does_case(
     store: &DbConnectorStore,
 ) -> TestResult {
-    let dataset = create_dataset(&store).await?;
+    let dataset = create_dataset(store).await?;
     let first = vec![item("a", "1", "A"), item("b", "1", "B")];
     let observed = vec!["a".to_owned(), "b".to_owned()];
     assert_eq!(
@@ -677,7 +677,7 @@ async fn incomplete_snapshot_does_not_delete_and_complete_snapshot_does_case(
 async fn source_states_track_included_and_filtered_transitions_case(
     store: &DbConnectorStore,
 ) -> TestResult {
-    let dataset = create_dataset(&store).await?;
+    let dataset = create_dataset(store).await?;
     let run = store.start_sync_run(&dataset.id).await?;
     store
         .commit_sync_snapshot(
@@ -738,7 +738,7 @@ async fn source_states_track_included_and_filtered_transitions_case(
 }
 
 async fn snapshot_failure_rolls_back_prior_upserts_case(store: &DbConnectorStore) -> TestResult {
-    let dataset = create_dataset(&store).await?;
+    let dataset = create_dataset(store).await?;
     create_reject_trigger(
         store,
         "reject_bad_item",
@@ -768,7 +768,7 @@ async fn snapshot_failure_rolls_back_prior_upserts_case(store: &DbConnectorStore
 }
 
 async fn sync_run_history_tracks_success_and_failure_case(store: &DbConnectorStore) -> TestResult {
-    let dataset = create_dataset(&store).await?;
+    let dataset = create_dataset(store).await?;
     let successful = store.start_sync_run(&dataset.id).await?;
     let successful = store
         .finish_sync_run(&successful.id, SnapshotResult {
@@ -814,7 +814,7 @@ async fn sync_run_history_tracks_success_and_failure_case(store: &DbConnectorSto
 async fn interrupted_sync_runs_are_failed_and_exposed_on_the_dataset_case(
     store: &DbConnectorStore,
 ) -> TestResult {
-    let dataset = create_dataset(&store).await?;
+    let dataset = create_dataset(store).await?;
     let running = store.start_sync_run(&dataset.id).await?;
     assert!(matches!(
         store.start_sync_run(&dataset.id).await,
@@ -847,7 +847,7 @@ async fn interrupted_sync_runs_are_failed_and_exposed_on_the_dataset_case(
 async fn sync_snapshot_and_run_completion_commit_atomically_case(
     store: &DbConnectorStore,
 ) -> TestResult {
-    let dataset = create_dataset(&store).await?;
+    let dataset = create_dataset(store).await?;
     let run = store.start_sync_run(&dataset.id).await?;
     create_reject_trigger(
         store,
@@ -920,7 +920,7 @@ async fn sync_snapshot_and_run_completion_commit_atomically_case(
 }
 
 async fn failed_run_and_reschedule_commit_atomically_case(store: &DbConnectorStore) -> TestResult {
-    let dataset = create_dataset(&store).await?;
+    let dataset = create_dataset(store).await?;
     let run = store.start_sync_run(&dataset.id).await?;
     create_reject_trigger(
         store,
@@ -964,7 +964,7 @@ async fn failed_run_and_reschedule_commit_atomically_case(store: &DbConnectorSto
 }
 
 async fn item_queries_are_bounded_and_paginated_case(store: &DbConnectorStore) -> TestResult {
-    let dataset = create_dataset(&store).await?;
+    let dataset = create_dataset(store).await?;
     let items = vec![item("a", "1", "A"), item("b", "1", "B")];
     store
         .apply_snapshot(&dataset.id, &items, &["a".to_owned(), "b".to_owned()], true)
@@ -1007,8 +1007,8 @@ async fn item_queries_are_bounded_and_paginated_case(store: &DbConnectorStore) -
 async fn search_is_safe_dataset_scoped_and_tracks_updates_case(
     store: &DbConnectorStore,
 ) -> TestResult {
-    let dataset = create_dataset(&store).await?;
-    let other = create_dataset(&store).await?;
+    let dataset = create_dataset(store).await?;
+    let other = create_dataset(store).await?;
     let mut searchable = item("shared", "1", "Alice's (Q3) planning + roadmap");
     searchable.search_text = "Alice's (Q3) planning + roadmap".to_owned();
     store
@@ -1082,8 +1082,8 @@ async fn search_is_safe_dataset_scoped_and_tracks_updates_case(
 async fn get_item_is_dataset_scoped_and_honors_deleted_visibility_case(
     store: &DbConnectorStore,
 ) -> TestResult {
-    let dataset = create_dataset(&store).await?;
-    let other = create_dataset(&store).await?;
+    let dataset = create_dataset(store).await?;
+    let other = create_dataset(store).await?;
     store
         .apply_snapshot(&dataset.id, &[item("a", "1", "A")], &["a".to_owned()], true)
         .await?;
