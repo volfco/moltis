@@ -2,7 +2,7 @@
 
 use {
     base64::Engine,
-    sqlx::{Sqlite, SqlitePool, Transaction},
+    moltis_db::{Db, DbTx},
     tokio::sync::RwLock,
     zeroize::Zeroizing,
 };
@@ -44,23 +44,23 @@ struct VaultRow {
 /// Generic over [`Cipher`] but defaults to [`XChaCha20Poly1305Cipher`].
 /// The DEK is held in memory behind a `RwLock` — `None` means sealed.
 pub struct Vault<C: Cipher = XChaCha20Poly1305Cipher> {
-    pool: SqlitePool,
+    db: Db,
     cipher: C,
     dek: RwLock<Option<Zeroizing<[u8; 32]>>>,
 }
 
 impl Vault<XChaCha20Poly1305Cipher> {
     /// Create a vault with the default XChaCha20-Poly1305 cipher.
-    pub async fn new(pool: SqlitePool) -> Result<Self, VaultError> {
-        Self::with_cipher(pool, XChaCha20Poly1305Cipher).await
+    pub async fn new(db: Db) -> Result<Self, VaultError> {
+        Self::with_cipher(db, XChaCha20Poly1305Cipher).await
     }
 }
 
 impl<C: Cipher> Vault<C> {
     /// Create a vault with a custom cipher.
-    pub async fn with_cipher(pool: SqlitePool, cipher: C) -> Result<Self, VaultError> {
+    pub async fn with_cipher(db: Db, cipher: C) -> Result<Self, VaultError> {
         Ok(Self {
-            pool,
+            db,
             cipher,
             dek: RwLock::new(None),
         })
@@ -88,7 +88,7 @@ impl<C: Cipher> Vault<C> {
     /// generates a recovery key, and stores everything in the database.
     /// Returns the recovery key (shown to the user exactly once).
     pub async fn initialize(&self, password: &str) -> Result<RecoveryKey, VaultError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.db.begin().await?;
         let recovery_key = self.initialize_in_transaction(password, &mut tx).await?;
         tx.commit().await?;
         self.unseal(password).await?;
@@ -99,14 +99,14 @@ impl<C: Cipher> Vault<C> {
         Ok(recovery_key)
     }
 
-    /// Initialize the vault as part of a caller-owned SQLite transaction.
+    /// Initialize the vault as part of a caller-owned database transaction.
     ///
     /// The vault remains sealed until the caller commits and explicitly unseals
     /// it, so rolled-back transactions cannot leave an in-memory DEK live.
     pub async fn initialize_in_transaction(
         &self,
         password: &str,
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut DbTx,
     ) -> Result<RecoveryKey, VaultError> {
         // Ensure vault doesn't already exist.
         if self.load_metadata_in_transaction(tx).await?.is_some() {
@@ -133,17 +133,16 @@ impl<C: Cipher> Vault<C> {
 
         // Store in database.
         let params_json = serde_json::to_string(&params)?;
-        sqlx::query(
+        moltis_db::tx_execute!(
+            tx,
             "INSERT INTO vault_metadata (id, kdf_salt, kdf_params, wrapped_dek, recovery_wrapped_dek, recovery_key_hash)
              VALUES (1, ?, ?, ?, ?, ?)",
-        )
-        .bind(&salt_b64)
-        .bind(&params_json)
-        .bind(&wrapped_dek)
-        .bind(&recovery_wrapped)
-        .bind(&recovery_hash)
-        .execute(&mut **tx)
-        .await?;
+            &salt_b64,
+            &params_json,
+            &wrapped_dek,
+            &recovery_wrapped,
+            &recovery_hash,
+        )?;
 
         Ok(recovery_key)
     }
@@ -204,7 +203,7 @@ impl<C: Cipher> Vault<C> {
     ///
     /// The vault must already be unsealed (DEK in memory).
     pub async fn change_password(&self, old: &str, new: &str) -> Result<(), VaultError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.db.begin().await?;
         self.change_password_in_transaction(old, new, &mut tx)
             .await?;
         tx.commit().await?;
@@ -215,12 +214,12 @@ impl<C: Cipher> Vault<C> {
         Ok(())
     }
 
-    /// Change the password as part of a caller-owned SQLite transaction.
+    /// Change the password as part of a caller-owned database transaction.
     pub async fn change_password_in_transaction(
         &self,
         old: &str,
         new: &str,
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut DbTx,
     ) -> Result<(), VaultError> {
         let row = self
             .load_metadata_in_transaction(tx)
@@ -249,16 +248,8 @@ impl<C: Cipher> Vault<C> {
 
         drop(guard);
 
-        sqlx::query(
-            "UPDATE vault_metadata SET kdf_salt = ?, kdf_params = ?, wrapped_dek = ?, updated_at = datetime('now') WHERE id = 1",
-        )
-        .bind(&new_salt_b64)
-        .bind(&params_json)
-        .bind(&new_wrapped)
-        .execute(&mut **tx)
-        .await?;
-
-        Ok(())
+        self.update_wrapped_dek(tx, &new_salt_b64, &params_json, &new_wrapped)
+            .await
     }
 
     /// Re-wrap the DEK with a new password without requiring the old password.
@@ -267,7 +258,7 @@ impl<C: Cipher> Vault<C> {
     /// recovery-key unlock, where possession of the in-memory DEK is the proof
     /// needed to rotate the password wrapper.
     pub async fn rewrap_unsealed(&self, new: &str) -> Result<(), VaultError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.db.begin().await?;
         self.rewrap_unsealed_in_transaction(new, &mut tx).await?;
         tx.commit().await?;
 
@@ -277,11 +268,11 @@ impl<C: Cipher> Vault<C> {
         Ok(())
     }
 
-    /// Re-wrap the DEK with a new password as part of a caller-owned SQLite transaction.
+    /// Re-wrap the DEK with a new password as part of a caller-owned database transaction.
     pub async fn rewrap_unsealed_in_transaction(
         &self,
         new: &str,
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut DbTx,
     ) -> Result<(), VaultError> {
         let row = self
             .load_metadata_in_transaction(tx)
@@ -300,15 +291,29 @@ impl<C: Cipher> Vault<C> {
 
         drop(guard);
 
-        sqlx::query(
-            "UPDATE vault_metadata SET kdf_salt = ?, kdf_params = ?, wrapped_dek = ?, updated_at = datetime('now') WHERE id = 1",
-        )
-        .bind(&new_salt_b64)
-        .bind(&params_json)
-        .bind(&new_wrapped)
-        .execute(&mut **tx)
-        .await?;
+        self.update_wrapped_dek(tx, &new_salt_b64, &params_json, &new_wrapped)
+            .await
+    }
 
+    /// Replace the password-wrapped DEK and KDF material inside `tx`.
+    async fn update_wrapped_dek(
+        &self,
+        tx: &mut DbTx,
+        salt_b64: &str,
+        params_json: &str,
+        wrapped_dek: &str,
+    ) -> Result<(), VaultError> {
+        let now = self.db.dialect().now_expr();
+        moltis_db::tx_execute!(
+            tx,
+            &format!(
+                "UPDATE vault_metadata SET kdf_salt = ?, kdf_params = ?, wrapped_dek = ?, \
+                 updated_at = {now} WHERE id = 1"
+            ),
+            salt_b64,
+            params_json,
+            wrapped_dek,
+        )?;
         Ok(())
     }
 
@@ -360,12 +365,12 @@ impl<C: Cipher> Vault<C> {
 
     /// Load vault metadata from the database.
     async fn load_metadata(&self) -> Result<Option<VaultRow>, VaultError> {
-        let row: Option<(String, String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        let row: Option<(String, String, String, Option<String>, Option<String>)> = moltis_db::fetch_optional!(
+            &self.db,
+            (String, String, String, Option<String>, Option<String>),
             "SELECT kdf_salt, kdf_params, wrapped_dek, recovery_wrapped_dek, recovery_key_hash
                  FROM vault_metadata WHERE id = 1",
-        )
-        .fetch_optional(&self.pool)
-        .await?;
+        )?;
 
         Ok(row.map(
             |(kdf_salt, kdf_params, wrapped_dek, recovery_wrapped_dek, recovery_key_hash)| {
@@ -382,14 +387,14 @@ impl<C: Cipher> Vault<C> {
 
     async fn load_metadata_in_transaction(
         &self,
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut DbTx,
     ) -> Result<Option<VaultRow>, VaultError> {
-        let row: Option<(String, String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        let row: Option<(String, String, String, Option<String>, Option<String>)> = moltis_db::tx_fetch_optional!(
+            tx,
+            (String, String, String, Option<String>, Option<String>),
             "SELECT kdf_salt, kdf_params, wrapped_dek, recovery_wrapped_dek, recovery_key_hash
                  FROM vault_metadata WHERE id = 1",
-        )
-        .fetch_optional(&mut **tx)
-        .await?;
+        )?;
 
         Ok(row.map(
             |(kdf_salt, kdf_params, wrapped_dek, recovery_wrapped_dek, recovery_key_hash)| {
@@ -408,47 +413,28 @@ impl<C: Cipher> Vault<C> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
-    use {super::*, crate::xchacha20::XChaCha20Poly1305Cipher};
-
-    async fn test_pool() -> SqlitePool {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS vault_metadata (
-                id                   INTEGER PRIMARY KEY CHECK (id = 1),
-                version              INTEGER NOT NULL DEFAULT 1,
-                kdf_salt             TEXT NOT NULL,
-                kdf_params           TEXT NOT NULL,
-                wrapped_dek          TEXT NOT NULL,
-                recovery_wrapped_dek TEXT,
-                recovery_key_hash    TEXT,
-                created_at           TEXT NOT NULL DEFAULT (datetime('now')),
-                updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
-            )",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        pool
-    }
+    use {
+        super::*,
+        crate::{
+            test_support::{Backend, test_db},
+            xchacha20::XChaCha20Poly1305Cipher,
+        },
+    };
 
     fn test_password() -> String {
         let token = rand::random::<u64>();
         format!("vault-test-{token}")
     }
 
-    #[tokio::test]
-    async fn status_uninitialized() {
-        let pool = test_pool().await;
-        let vault = Vault::with_cipher(pool, XChaCha20Poly1305Cipher)
+    async fn status_uninitialized_case(db: &Db) {
+        let vault = Vault::with_cipher(db.clone(), XChaCha20Poly1305Cipher)
             .await
             .unwrap();
         assert_eq!(vault.status().await.unwrap(), VaultStatus::Uninitialized);
     }
 
-    #[tokio::test]
-    async fn initialize_and_unseal() {
-        let pool = test_pool().await;
-        let vault = Vault::with_cipher(pool, XChaCha20Poly1305Cipher)
+    async fn initialize_and_unseal_case(db: &Db) {
+        let vault = Vault::with_cipher(db.clone(), XChaCha20Poly1305Cipher)
             .await
             .unwrap();
         let password = test_password();
@@ -466,10 +452,8 @@ mod tests {
         assert_eq!(vault.status().await.unwrap(), VaultStatus::Unsealed);
     }
 
-    #[tokio::test]
-    async fn wrong_password_fails() {
-        let pool = test_pool().await;
-        let vault = Vault::with_cipher(pool, XChaCha20Poly1305Cipher)
+    async fn wrong_password_fails_case(db: &Db) {
+        let vault = Vault::with_cipher(db.clone(), XChaCha20Poly1305Cipher)
             .await
             .unwrap();
         let correct_password = test_password();
@@ -482,10 +466,8 @@ mod tests {
         assert!(matches!(result, Err(VaultError::BadCredential)));
     }
 
-    #[tokio::test]
-    async fn recovery_key_unseal() {
-        let pool = test_pool().await;
-        let vault = Vault::with_cipher(pool, XChaCha20Poly1305Cipher)
+    async fn recovery_key_unseal_case(db: &Db) {
+        let vault = Vault::with_cipher(db.clone(), XChaCha20Poly1305Cipher)
             .await
             .unwrap();
         let password = test_password();
@@ -498,10 +480,8 @@ mod tests {
         assert_eq!(vault.status().await.unwrap(), VaultStatus::Unsealed);
     }
 
-    #[tokio::test]
-    async fn encrypt_decrypt_string() {
-        let pool = test_pool().await;
-        let vault = Vault::with_cipher(pool, XChaCha20Poly1305Cipher)
+    async fn encrypt_decrypt_string_case(db: &Db) {
+        let vault = Vault::with_cipher(db.clone(), XChaCha20Poly1305Cipher)
             .await
             .unwrap();
         let password = test_password();
@@ -519,10 +499,8 @@ mod tests {
         assert_eq!(decrypted, "my secret api key");
     }
 
-    #[tokio::test]
-    async fn encrypt_sealed_fails() {
-        let pool = test_pool().await;
-        let vault = Vault::with_cipher(pool, XChaCha20Poly1305Cipher)
+    async fn encrypt_sealed_fails_case(db: &Db) {
+        let vault = Vault::with_cipher(db.clone(), XChaCha20Poly1305Cipher)
             .await
             .unwrap();
         let password = test_password();
@@ -534,10 +512,8 @@ mod tests {
         assert!(matches!(result, Err(VaultError::Sealed)));
     }
 
-    #[tokio::test]
-    async fn wrong_aad_decrypt_fails() {
-        let pool = test_pool().await;
-        let vault = Vault::with_cipher(pool, XChaCha20Poly1305Cipher)
+    async fn wrong_aad_decrypt_fails_case(db: &Db) {
+        let vault = Vault::with_cipher(db.clone(), XChaCha20Poly1305Cipher)
             .await
             .unwrap();
         let password = test_password();
@@ -549,10 +525,8 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[tokio::test]
-    async fn change_password() {
-        let pool = test_pool().await;
-        let vault = Vault::with_cipher(pool, XChaCha20Poly1305Cipher)
+    async fn change_password_case(db: &Db) {
+        let vault = Vault::with_cipher(db.clone(), XChaCha20Poly1305Cipher)
             .await
             .unwrap();
         let old_password = test_password();
@@ -583,10 +557,8 @@ mod tests {
         assert!(matches!(result, Err(VaultError::BadCredential)));
     }
 
-    #[tokio::test]
-    async fn rewrap_unsealed_changes_password_without_old_password() {
-        let pool = test_pool().await;
-        let vault = Vault::with_cipher(pool, XChaCha20Poly1305Cipher)
+    async fn rewrap_unsealed_changes_password_without_old_password_case(db: &Db) {
+        let vault = Vault::with_cipher(db.clone(), XChaCha20Poly1305Cipher)
             .await
             .unwrap();
         let old_password = test_password();
@@ -611,10 +583,8 @@ mod tests {
         assert!(matches!(result, Err(VaultError::BadCredential)));
     }
 
-    #[tokio::test]
-    async fn rewrap_unsealed_fails_when_sealed() {
-        let pool = test_pool().await;
-        let vault = Vault::with_cipher(pool, XChaCha20Poly1305Cipher)
+    async fn rewrap_unsealed_fails_when_sealed_case(db: &Db) {
+        let vault = Vault::with_cipher(db.clone(), XChaCha20Poly1305Cipher)
             .await
             .unwrap();
         let old_password = test_password();
@@ -627,10 +597,8 @@ mod tests {
         assert!(matches!(result, Err(VaultError::Sealed)));
     }
 
-    #[tokio::test]
-    async fn double_initialize_fails() {
-        let pool = test_pool().await;
-        let vault = Vault::with_cipher(pool, XChaCha20Poly1305Cipher)
+    async fn double_initialize_fails_case(db: &Db) {
+        let vault = Vault::with_cipher(db.clone(), XChaCha20Poly1305Cipher)
             .await
             .unwrap();
         let first_password = test_password();
@@ -641,15 +609,101 @@ mod tests {
         assert!(matches!(result, Err(VaultError::AlreadyInitialized)));
     }
 
-    #[tokio::test]
-    async fn unseal_not_initialized_fails() {
-        let pool = test_pool().await;
-        let vault = Vault::with_cipher(pool, XChaCha20Poly1305Cipher)
+    async fn unseal_not_initialized_fails_case(db: &Db) {
+        let vault = Vault::with_cipher(db.clone(), XChaCha20Poly1305Cipher)
             .await
             .unwrap();
         let password = test_password();
 
         let result = vault.unseal(&password).await;
         assert!(matches!(result, Err(VaultError::NotInitialized)));
+    }
+
+    #[tokio::test]
+    async fn status_uninitialized() {
+        status_uninitialized_case(&test_db(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn initialize_and_unseal() {
+        initialize_and_unseal_case(&test_db(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn wrong_password_fails() {
+        wrong_password_fails_case(&test_db(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn recovery_key_unseal() {
+        recovery_key_unseal_case(&test_db(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn encrypt_decrypt_string() {
+        encrypt_decrypt_string_case(&test_db(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn encrypt_sealed_fails() {
+        encrypt_sealed_fails_case(&test_db(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn wrong_aad_decrypt_fails() {
+        wrong_aad_decrypt_fails_case(&test_db(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn change_password() {
+        change_password_case(&test_db(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn rewrap_unsealed_changes_password_without_old_password() {
+        rewrap_unsealed_changes_password_without_old_password_case(
+            &test_db(Backend::Sqlite).await.unwrap(),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn rewrap_unsealed_fails_when_sealed() {
+        rewrap_unsealed_fails_when_sealed_case(&test_db(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn double_initialize_fails() {
+        double_initialize_fails_case(&test_db(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn unseal_not_initialized_fails() {
+        unseal_not_initialized_fails_case(&test_db(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    /// Every vault case against PostgreSQL, one fresh schema per case.
+    #[tokio::test]
+    async fn postgres_suite() {
+        if std::env::var("TEST_POSTGRES_URL").is_err() {
+            eprintln!("skipping: TEST_POSTGRES_URL is not set");
+            return;
+        }
+        let _guard = crate::test_support::pg_lock().lock().await;
+        status_uninitialized_case(&test_db(Backend::Postgres).await.unwrap()).await;
+        initialize_and_unseal_case(&test_db(Backend::Postgres).await.unwrap()).await;
+        wrong_password_fails_case(&test_db(Backend::Postgres).await.unwrap()).await;
+        recovery_key_unseal_case(&test_db(Backend::Postgres).await.unwrap()).await;
+        encrypt_decrypt_string_case(&test_db(Backend::Postgres).await.unwrap()).await;
+        encrypt_sealed_fails_case(&test_db(Backend::Postgres).await.unwrap()).await;
+        wrong_aad_decrypt_fails_case(&test_db(Backend::Postgres).await.unwrap()).await;
+        change_password_case(&test_db(Backend::Postgres).await.unwrap()).await;
+        rewrap_unsealed_changes_password_without_old_password_case(
+            &test_db(Backend::Postgres).await.unwrap(),
+        )
+        .await;
+        rewrap_unsealed_fails_when_sealed_case(&test_db(Backend::Postgres).await.unwrap()).await;
+        double_initialize_fails_case(&test_db(Backend::Postgres).await.unwrap()).await;
+        unseal_not_initialized_fails_case(&test_db(Backend::Postgres).await.unwrap()).await;
     }
 }

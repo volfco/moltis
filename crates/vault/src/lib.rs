@@ -9,6 +9,8 @@ pub mod kdf;
 pub mod key_wrap;
 pub mod migration;
 pub mod recovery;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod traits;
 pub mod vault;
 pub mod xchacha20;
