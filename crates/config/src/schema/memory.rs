@@ -61,14 +61,6 @@ pub struct MemoryEmbeddingConfig {
     /// Zvec collection directory path (only used when backend = "zvec").
     #[serde(default)]
     pub db_path: Option<String>,
-    /// PostgreSQL connection URL (only used when backend = "postgres").
-    /// Requires a server with the `vector` extension (pgvector) available.
-    #[serde(
-        default,
-        serialize_with = "crate::schema::serialize_option_secret",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub database_url: Option<Secret<String>>,
     /// Weight for vector similarity in hybrid search (0.0–1.0, default 0.7).
     #[serde(default = "default_vector_weight")]
     pub vector_weight: f32,
@@ -111,7 +103,6 @@ impl Default for MemoryEmbeddingConfig {
             session_export: default_session_export_mode(),
             qmd: QmdConfig::default(),
             db_path: None,
-            database_url: None,
             vector_weight: default_vector_weight(),
             keyword_weight: default_keyword_weight(),
             enable_prefetch: true,
@@ -240,7 +231,7 @@ pub enum MemorySearchMergeStrategy {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum MemoryBackend {
-    /// Built-in SQLite-backed indexer and retriever.
+    /// Built-in indexer and retriever over the `[database]` engine.
     #[default]
     Builtin,
     /// External QMD CLI-backed index and search runtime.
@@ -248,8 +239,6 @@ pub enum MemoryBackend {
     /// Zvec native vector database backend.
     #[serde(rename = "zvec")]
     Zvec,
-    /// PostgreSQL + pgvector backend (`memory.database_url` is required).
-    Postgres,
 }
 
 /// How chat sessions are exported into searchable memory.

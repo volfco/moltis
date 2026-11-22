@@ -150,19 +150,19 @@ pub(super) fn check_semantic_warnings(config: &MoltisConfig, diagnostics: &mut V
         });
     }
 
-    // memory backend = postgres requires a connection URL
-    if config.memory.backend == crate::schema::MemoryBackend::Postgres
+    // [database] backend = postgres requires a connection URL
+    if config.database.backend == crate::schema::DatabaseBackend::Postgres
         && config
-            .memory
-            .database_url
+            .database
+            .url
             .as_ref()
             .is_none_or(|url| url.expose_secret().trim().is_empty())
     {
         diagnostics.push(Diagnostic {
             severity: Severity::Error,
             category: "config",
-            path: "memory.database_url".into(),
-            message: "memory.backend = \"postgres\" requires memory.database_url, \
+            path: "database.url".into(),
+            message: "[database] backend = \"postgres\" requires database.url, \
                       e.g. \"postgres://user:pass@localhost/moltis\""
                 .into(),
         });

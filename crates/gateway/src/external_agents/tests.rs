@@ -12,7 +12,7 @@ use {
         types::{AcpPermissionOption, ExternalAgentStatus},
     },
     moltis_service_traits::{ExternalAgentService, NoopChatService},
-    moltis_sessions::{metadata::SqliteSessionMetadata, store::SessionStore},
+    moltis_sessions::{metadata::DbSessionMetadata, store::SessionStore},
 };
 
 #[derive(Default)]
@@ -147,15 +147,16 @@ fn context_from_history_includes_project_context() {
     assert_eq!(context.recent_turns.len(), 1);
 }
 
-async fn sqlite_pool() -> sqlx::SqlitePool {
+async fn sqlite_pool() -> moltis_db::Db {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
-    moltis_projects::run_migrations(&pool).await.unwrap();
-    SqliteSessionMetadata::init(&pool).await.unwrap();
-    pool
+    let db = moltis_db::Db::from(pool);
+    moltis_projects::run_migrations(&db).await.unwrap();
+    DbSessionMetadata::init(&db).await.unwrap();
+    db
 }
 
 fn fake_external_agents(
-    metadata: Arc<SqliteSessionMetadata>,
+    metadata: Arc<DbSessionMetadata>,
     state: Arc<FakeAgentState>,
 ) -> Arc<GatewayExternalAgentService> {
     fake_external_agents_with_config(
@@ -170,7 +171,7 @@ fn fake_external_agents(
 
 fn fake_external_agents_with_config(
     config: ExternalAgentsConfig,
-    metadata: Arc<SqliteSessionMetadata>,
+    metadata: Arc<DbSessionMetadata>,
     state: Arc<FakeAgentState>,
 ) -> Arc<GatewayExternalAgentService> {
     let mut registry = ExternalAgentRegistry::new();
@@ -197,7 +198,7 @@ fn test_gateway_state_with_services(services: GatewayServices) -> Arc<GatewaySta
 
 async fn test_chat_service(
     external_agents: Arc<GatewayExternalAgentService>,
-    metadata: Arc<SqliteSessionMetadata>,
+    metadata: Arc<DbSessionMetadata>,
     session_store: Arc<SessionStore>,
 ) -> ExternalAgentChatService {
     ExternalAgentChatService::new(
@@ -245,7 +246,7 @@ impl moltis_channels::ChannelOutbound for RecordingOutbound {
 
 async fn test_chat_service_with_state(
     external_agents: Arc<GatewayExternalAgentService>,
-    metadata: Arc<SqliteSessionMetadata>,
+    metadata: Arc<DbSessionMetadata>,
     session_store: Arc<SessionStore>,
     state: Arc<GatewayState>,
 ) -> ExternalAgentChatService {
@@ -260,7 +261,7 @@ async fn test_chat_service_with_state(
 
 #[tokio::test]
 async fn bind_unbind_and_status_update_metadata() {
-    let metadata = Arc::new(SqliteSessionMetadata::new(sqlite_pool().await));
+    let metadata = Arc::new(DbSessionMetadata::new(sqlite_pool().await));
     let agent_state = Arc::new(FakeAgentState::default());
     let service = fake_external_agents(Arc::clone(&metadata), agent_state);
 
@@ -311,7 +312,7 @@ async fn bind_unbind_and_status_update_metadata() {
 async fn selected_external_agent_model_is_passed_to_runtime() {
     let dir = tempfile::tempdir().unwrap();
     let session_store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
-    let metadata = Arc::new(SqliteSessionMetadata::new(sqlite_pool().await));
+    let metadata = Arc::new(DbSessionMetadata::new(sqlite_pool().await));
     let agent_state = Arc::new(FakeAgentState::default());
     let external_agents = fake_external_agents(Arc::clone(&metadata), Arc::clone(&agent_state));
     external_agents
@@ -350,7 +351,7 @@ async fn selected_external_agent_model_is_passed_to_runtime() {
 
 #[tokio::test]
 async fn list_returns_empty_when_external_agents_disabled() {
-    let metadata = Arc::new(SqliteSessionMetadata::new(sqlite_pool().await));
+    let metadata = Arc::new(DbSessionMetadata::new(sqlite_pool().await));
     let agent_state = Arc::new(FakeAgentState::default());
     let service = fake_external_agents_with_config(
         ExternalAgentsConfig {
@@ -369,7 +370,7 @@ async fn list_returns_empty_when_external_agents_disabled() {
 
 #[tokio::test]
 async fn list_uses_default_enabled_external_agent_detection() {
-    let metadata = Arc::new(SqliteSessionMetadata::new(sqlite_pool().await));
+    let metadata = Arc::new(DbSessionMetadata::new(sqlite_pool().await));
     let agent_state = Arc::new(FakeAgentState::default());
     let service = fake_external_agents_with_config(
         ExternalAgentsConfig::default(),
@@ -393,7 +394,7 @@ async fn list_uses_default_enabled_external_agent_detection() {
 async fn disabled_external_agents_do_not_route_stale_bindings() {
     let dir = tempfile::tempdir().unwrap();
     let session_store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
-    let metadata = Arc::new(SqliteSessionMetadata::new(sqlite_pool().await));
+    let metadata = Arc::new(DbSessionMetadata::new(sqlite_pool().await));
     metadata.upsert("main", None).await.unwrap();
     metadata
         .set_external_agent("main", Some(AgentTransportKind::Codex), None)
@@ -464,7 +465,7 @@ fn acp_permission_selection_prefers_matching_decision_kind() {
 async fn bound_chat_send_reuses_live_external_session() {
     let dir = tempfile::tempdir().unwrap();
     let session_store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
-    let metadata = Arc::new(SqliteSessionMetadata::new(sqlite_pool().await));
+    let metadata = Arc::new(DbSessionMetadata::new(sqlite_pool().await));
     let agent_state = Arc::new(FakeAgentState::default());
     let external_agents = fake_external_agents(Arc::clone(&metadata), Arc::clone(&agent_state));
     external_agents
@@ -510,7 +511,7 @@ async fn bound_chat_send_reuses_live_external_session() {
 async fn bound_chat_send_delivers_external_reply_to_channel_target() {
     let dir = tempfile::tempdir().unwrap();
     let session_store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
-    let metadata = Arc::new(SqliteSessionMetadata::new(sqlite_pool().await));
+    let metadata = Arc::new(DbSessionMetadata::new(sqlite_pool().await));
     let agent_state = Arc::new(FakeAgentState::default());
     let external_agents = fake_external_agents(Arc::clone(&metadata), Arc::clone(&agent_state));
     external_agents
@@ -555,7 +556,7 @@ async fn bound_chat_send_delivers_external_reply_to_channel_target() {
 async fn full_context_for_bound_external_agent_uses_persisted_history() {
     let dir = tempfile::tempdir().unwrap();
     let session_store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
-    let metadata = Arc::new(SqliteSessionMetadata::new(sqlite_pool().await));
+    let metadata = Arc::new(DbSessionMetadata::new(sqlite_pool().await));
     let agent_state = Arc::new(FakeAgentState::default());
     let external_agents = fake_external_agents(Arc::clone(&metadata), Arc::clone(&agent_state));
     external_agents
@@ -588,7 +589,7 @@ async fn full_context_for_bound_external_agent_uses_persisted_history() {
 
 #[tokio::test]
 async fn idle_live_external_sessions_are_evicted_before_reuse() {
-    let metadata = Arc::new(SqliteSessionMetadata::new(sqlite_pool().await));
+    let metadata = Arc::new(DbSessionMetadata::new(sqlite_pool().await));
     let agent_state = Arc::new(FakeAgentState::default());
     let external_agents = fake_external_agents(Arc::clone(&metadata), Arc::clone(&agent_state));
     external_agents
@@ -622,7 +623,7 @@ async fn idle_live_external_sessions_are_evicted_before_reuse() {
 async fn send_failure_evicts_live_external_session() {
     let dir = tempfile::tempdir().unwrap();
     let session_store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
-    let metadata = Arc::new(SqliteSessionMetadata::new(sqlite_pool().await));
+    let metadata = Arc::new(DbSessionMetadata::new(sqlite_pool().await));
     let agent_state = Arc::new(FakeAgentState::default());
     let external_agents = fake_external_agents(Arc::clone(&metadata), Arc::clone(&agent_state));
     external_agents
@@ -656,7 +657,7 @@ async fn send_failure_evicts_live_external_session() {
 async fn error_event_evicts_live_external_session() {
     let dir = tempfile::tempdir().unwrap();
     let session_store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
-    let metadata = Arc::new(SqliteSessionMetadata::new(sqlite_pool().await));
+    let metadata = Arc::new(DbSessionMetadata::new(sqlite_pool().await));
     let agent_state = Arc::new(FakeAgentState::default());
     let external_agents = fake_external_agents(Arc::clone(&metadata), Arc::clone(&agent_state));
     external_agents
@@ -687,7 +688,7 @@ async fn error_event_evicts_live_external_session() {
 async fn bound_chat_send_persists_external_token_usage() {
     let dir = tempfile::tempdir().unwrap();
     let session_store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
-    let metadata = Arc::new(SqliteSessionMetadata::new(sqlite_pool().await));
+    let metadata = Arc::new(DbSessionMetadata::new(sqlite_pool().await));
     let agent_state = Arc::new(FakeAgentState::default());
     let external_agents = fake_external_agents(Arc::clone(&metadata), agent_state);
     external_agents
@@ -714,7 +715,7 @@ async fn bound_chat_send_persists_external_token_usage() {
 async fn unbind_shuts_down_live_external_session() {
     let dir = tempfile::tempdir().unwrap();
     let session_store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
-    let metadata = Arc::new(SqliteSessionMetadata::new(sqlite_pool().await));
+    let metadata = Arc::new(DbSessionMetadata::new(sqlite_pool().await));
     let agent_state = Arc::new(FakeAgentState::default());
     let external_agents = fake_external_agents(Arc::clone(&metadata), Arc::clone(&agent_state));
     external_agents

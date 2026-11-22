@@ -14,7 +14,7 @@ use {
         registry::ChannelRegistry,
         store::{ChannelStore, StoredChannel},
     },
-    moltis_sessions::metadata::SqliteSessionMetadata,
+    moltis_sessions::metadata::DbSessionMetadata,
 };
 
 use crate::services::{ChannelService, ServiceError, ServiceResult};
@@ -125,7 +125,7 @@ pub struct LiveChannelService {
     outbound: Arc<dyn ChannelOutbound>,
     store: Arc<dyn ChannelStore>,
     message_log: Arc<dyn MessageLog>,
-    session_metadata: Arc<SqliteSessionMetadata>,
+    session_metadata: Arc<DbSessionMetadata>,
 }
 
 impl LiveChannelService {
@@ -134,7 +134,7 @@ impl LiveChannelService {
         outbound: Arc<dyn ChannelOutbound>,
         store: Arc<dyn ChannelStore>,
         message_log: Arc<dyn MessageLog>,
-        session_metadata: Arc<SqliteSessionMetadata>,
+        session_metadata: Arc<DbSessionMetadata>,
     ) -> Self {
         Self {
             registry,

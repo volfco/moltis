@@ -5,7 +5,7 @@ fn default_channel_session_key(target: &moltis_channels::ChannelReplyTarget) -> 
 }
 
 async fn is_current_channel_session(
-    metadata: &SqliteSessionMetadata,
+    metadata: &DbSessionMetadata,
     entry: &moltis_sessions::metadata::SessionEntry,
 ) -> bool {
     let Some(binding_json) = entry.channel_binding.as_deref() else {
@@ -29,7 +29,7 @@ async fn is_current_channel_session(
 }
 
 async fn is_archivable_entry(
-    metadata: &SqliteSessionMetadata,
+    metadata: &DbSessionMetadata,
     entry: &moltis_sessions::metadata::SessionEntry,
 ) -> bool {
     !is_current_channel_session(metadata, entry).await
@@ -63,7 +63,7 @@ fn channel_binding_clear_refusal(
 /// Live session service backed by JSONL store + SQLite metadata.
 pub struct LiveSessionService {
     pub(super) store: Arc<SessionStore>,
-    pub(super) metadata: Arc<SqliteSessionMetadata>,
+    pub(super) metadata: Arc<DbSessionMetadata>,
     pub(super) agent_persona_store: Option<Arc<AgentPersonaStore>>,
     #[cfg(feature = "voice")]
     pub(super) voice_persona_store: Option<Arc<crate::voice_persona::VoicePersonaStore>>,
@@ -80,7 +80,7 @@ pub struct LiveSessionService {
 }
 
 impl LiveSessionService {
-    pub fn new(store: Arc<SessionStore>, metadata: Arc<SqliteSessionMetadata>) -> Self {
+    pub fn new(store: Arc<SessionStore>, metadata: Arc<DbSessionMetadata>) -> Self {
         Self {
             store,
             metadata,
@@ -114,7 +114,7 @@ impl LiveSessionService {
     }
 
     pub async fn restore_sandbox_router_overrides_from_metadata(
-        metadata: &SqliteSessionMetadata,
+        metadata: &DbSessionMetadata,
         router: &SandboxRouter,
     ) {
         for entry in metadata.list().await {

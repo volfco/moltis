@@ -8,6 +8,8 @@
 //! [`test_support::pg_lock`] and resets the schema first, so the tests may
 //! share one database.
 
+#![allow(clippy::expect_used)]
+
 use moltis_channels::{
     message_log::{MessageLog, MessageLogEntry},
     store::{ChannelStore, StoredChannel},

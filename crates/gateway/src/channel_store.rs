@@ -321,7 +321,7 @@ mod tests {
         )
         .unwrap();
 
-        let vault = Arc::new(moltis_vault::Vault::new(pool).await.unwrap());
+        let vault = Arc::new(moltis_vault::Vault::new(Db::from(pool)).await.unwrap());
         vault.initialize("test-password").await.unwrap();
         vault
     }
@@ -501,7 +501,11 @@ mod tests {
             )",
         )
         .unwrap();
-        let vault = Arc::new(moltis_vault::Vault::new(pool.clone()).await.unwrap());
+        let vault = Arc::new(
+            moltis_vault::Vault::new(Db::from(pool.clone()))
+                .await
+                .unwrap(),
+        );
         let inner: Arc<dyn ChannelStore> = Arc::new(DbChannelStore::new(Db::from(pool.clone())));
         let store = VaultChannelStore::new(inner, Some(vault));
         let timestamp = now();

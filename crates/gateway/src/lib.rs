@@ -32,6 +32,7 @@ pub mod connectors;
 #[cfg(feature = "connectors")]
 mod connectors_planner;
 pub mod cron;
+pub mod database;
 pub mod external_agents;
 pub mod files;
 #[cfg(feature = "local-llm")]

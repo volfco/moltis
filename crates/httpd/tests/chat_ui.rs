@@ -263,11 +263,11 @@ async fn gateway_startup_with_llm_wiring_does_not_block() {
         .execute(&db_pool1)
         .await
         .unwrap();
-    moltis_sessions::metadata::SqliteSessionMetadata::init(&db_pool1)
+    moltis_sessions::metadata::DbSessionMetadata::init(&moltis_db::Db::from(db_pool1.clone()))
         .await
         .unwrap();
-    let session_metadata1 = Arc::new(moltis_sessions::metadata::SqliteSessionMetadata::new(
-        db_pool1,
+    let session_metadata1 = Arc::new(moltis_sessions::metadata::DbSessionMetadata::new(
+        moltis_db::Db::from(db_pool1),
     ));
     if !registry.read().await.is_empty() {
         state.set_chat(Arc::new(LiveChatService::new(
@@ -293,11 +293,11 @@ async fn gateway_startup_with_llm_wiring_does_not_block() {
         .execute(&db_pool2)
         .await
         .unwrap();
-    moltis_sessions::metadata::SqliteSessionMetadata::init(&db_pool2)
+    moltis_sessions::metadata::DbSessionMetadata::init(&moltis_db::Db::from(db_pool2.clone()))
         .await
         .unwrap();
-    let session_metadata2 = Arc::new(moltis_sessions::metadata::SqliteSessionMetadata::new(
-        db_pool2,
+    let session_metadata2 = Arc::new(moltis_sessions::metadata::DbSessionMetadata::new(
+        moltis_db::Db::from(db_pool2),
     ));
     state2.set_chat(Arc::new(LiveChatService::new(
         Arc::clone(&registry2),

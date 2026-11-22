@@ -11,12 +11,14 @@
 // - workspace:      workspace file seeding, persona sync
 // - init_channels:    channel store/registry/plugin setup
 // - init_code_index:  code index config-only initialization
+// - init_cron:        cron store over the deployment database (+ legacy import)
 // - init_memory:      memory system / embedding provider setup
 
 mod helpers;
 mod hooks;
 mod init_channels;
 mod init_code_index;
+mod init_cron;
 mod init_memory;
 mod location;
 mod prepare_core;

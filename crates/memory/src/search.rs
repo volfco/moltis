@@ -314,7 +314,7 @@ mod tests {
     // ── merge_weighted / merge_rrf ──
     //
     // Canonical coverage for the shared merge functions used by every store
-    // backend. Previously these were duplicated in `store_sqlite::tests` and
+    // backend. Previously these were duplicated in `store_db::tests` and
     // `moltis_memory_zvec::store::tests`; both copies now defer to this
     // module so the critical path is exercised by plain `cargo test
     // -p moltis-memory` regardless of backend feature flags.

@@ -36,6 +36,15 @@ fn test_password() -> String {
     Uuid::new_v4().to_string()
 }
 
+/// Stand-in deployment database: the sqlite store path keeps its own
+/// connectors.db, so this pool is never opened — only `is_postgres()` is
+/// consulted.
+fn sqlite_deployment_db() -> moltis_db::Db {
+    moltis_db::Db::from(
+        sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("lazy in-memory SQLite pool"),
+    )
+}
+
 async fn manager() -> (tempfile::TempDir, ConnectorManager) {
     #[cfg(feature = "vault")]
     crate::vault_lifecycle::set_vault_encryption_runtime_enabled(false);
@@ -43,6 +52,7 @@ async fn manager() -> (tempfile::TempDir, ConnectorManager) {
     let manager = ConnectorManager::open(
         temp.path(),
         1,
+        &sqlite_deployment_db(),
         #[cfg(feature = "vault")]
         None,
     )
@@ -434,7 +444,9 @@ async fn invalid_configured_caldav_account_does_not_block_valid_imports() {
 async fn configured_caldav_never_falls_back_to_plaintext_without_vault() {
     crate::vault_lifecycle::set_vault_encryption_runtime_enabled(true);
     let temp = tempfile::tempdir().unwrap();
-    let manager = ConnectorManager::open(temp.path(), 1, None).await.unwrap();
+    let manager = ConnectorManager::open(temp.path(), 1, &sqlite_deployment_db(), None)
+        .await
+        .unwrap();
     let password = test_password();
     let config = configured_caldav(
         "work",
@@ -459,7 +471,9 @@ async fn configured_caldav_never_falls_back_to_plaintext_without_vault() {
 async fn vault_runtime_blocks_plaintext_connector_credentials_without_a_vault() {
     crate::vault_lifecycle::set_vault_encryption_runtime_enabled(false);
     let temp = tempfile::tempdir().unwrap();
-    let manager = ConnectorManager::open(temp.path(), 1, None).await.unwrap();
+    let manager = ConnectorManager::open(temp.path(), 1, &sqlite_deployment_db(), None)
+        .await
+        .unwrap();
     let account = manager.add_account(create_request()).await.unwrap();
     crate::vault_lifecycle::set_vault_encryption_runtime_enabled(true);
 
@@ -1284,7 +1298,9 @@ async fn search_get_and_sync_revisions_remain_dataset_scoped() {
 async fn enabled_vault_without_an_instance_never_stores_plaintext_passwords() {
     crate::vault_lifecycle::set_vault_encryption_runtime_enabled(true);
     let temp = tempfile::tempdir().unwrap();
-    let manager = ConnectorManager::open(temp.path(), 1, None).await.unwrap();
+    let manager = ConnectorManager::open(temp.path(), 1, &sqlite_deployment_db(), None)
+        .await
+        .unwrap();
 
     let error = manager.add_account(create_request()).await.unwrap_err();
     assert!(matches!(error, ConnectorManagerError::Unavailable(_)));
@@ -1298,15 +1314,21 @@ async fn enabled_vault_without_an_instance_never_stores_plaintext_passwords() {
 async fn sealed_vault_preserves_encrypted_password_on_redacted_update() {
     crate::vault_lifecycle::set_vault_encryption_runtime_enabled(true);
     let vault_pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
-    moltis_vault::run_migrations(&vault_pool).await.unwrap();
-    let vault = Arc::new(moltis_vault::Vault::new(vault_pool).await.unwrap());
+    let vault_db = moltis_db::Db::from(vault_pool);
+    moltis_vault::run_migrations(&vault_db).await.unwrap();
+    let vault = Arc::new(moltis_vault::Vault::new(vault_db).await.unwrap());
     let vault_password = test_password();
     vault.initialize(&vault_password).await.unwrap();
 
     let temp = tempfile::tempdir().unwrap();
-    let manager = ConnectorManager::open(temp.path(), 1, Some(Arc::clone(&vault)))
-        .await
-        .unwrap();
+    let manager = ConnectorManager::open(
+        temp.path(),
+        1,
+        &sqlite_deployment_db(),
+        Some(Arc::clone(&vault)),
+    )
+    .await
+    .unwrap();
     let created = manager.add_account(create_request()).await.unwrap();
     let before = manager
         .store

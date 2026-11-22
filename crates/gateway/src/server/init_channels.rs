@@ -26,10 +26,10 @@ pub(crate) struct ChannelInitResult {
 pub(crate) async fn init_channels(
     mut services: GatewayServices,
     config: &moltis_config::MoltisConfig,
-    db_pool: sqlx::SqlitePool,
+    db: moltis_db::Db,
     #[cfg(feature = "vault")] vault: Option<Arc<moltis_vault::Vault>>,
     message_log: Arc<dyn moltis_channels::message_log::MessageLog>,
-    session_metadata: Arc<moltis_sessions::metadata::SqliteSessionMetadata>,
+    session_metadata: Arc<moltis_sessions::metadata::DbSessionMetadata>,
     deferred_state: Arc<tokio::sync::OnceCell<Arc<crate::state::GatewayState>>>,
     data_dir: &std::path::Path,
     start_accounts: bool,
@@ -44,18 +44,16 @@ pub(crate) async fn init_channels(
 
     #[cfg(feature = "vault")]
     let channel_store: Arc<dyn ChannelStore> = {
-        let inner: Arc<dyn ChannelStore> = Arc::new(crate::channel_store::DbChannelStore::new(
-            moltis_db::Db::from(db_pool.clone()),
-        ));
+        let inner: Arc<dyn ChannelStore> =
+            Arc::new(crate::channel_store::DbChannelStore::new(db.clone()));
         Arc::new(crate::channel_store::VaultChannelStore::new(
             inner,
             vault.clone(),
         ))
     };
     #[cfg(not(feature = "vault"))]
-    let channel_store: Arc<dyn ChannelStore> = Arc::new(crate::channel_store::DbChannelStore::new(
-        moltis_db::Db::from(db_pool.clone()),
-    ));
+    let channel_store: Arc<dyn ChannelStore> =
+        Arc::new(crate::channel_store::DbChannelStore::new(db.clone()));
 
     let channel_sink: Arc<dyn moltis_channels::ChannelEventSink> = Arc::new(
         crate::channel_events::GatewayChannelEventSink::new(Arc::clone(&deferred_state)),

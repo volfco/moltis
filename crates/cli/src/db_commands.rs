@@ -2,7 +2,7 @@ use {clap::Subcommand, std::path::PathBuf};
 
 #[derive(Subcommand)]
 pub enum DbAction {
-    /// Delete all database files completely.
+    /// Delete all database files completely (SQLite only).
     Reset,
     /// Clear all data from tables but keep the schema intact.
     Clear,
@@ -28,7 +28,23 @@ pub async fn handle_db(action: DbAction) -> anyhow::Result<()> {
 }
 
 /// Delete all database files completely.
+///
+/// Refuses on PostgreSQL: deleting local files has no analogue on a shared
+/// server database, and dropping schema objects could destroy non-moltis data
+/// in a database that is not exclusively ours.
 async fn reset_databases() -> anyhow::Result<()> {
+    reset_databases_for(&moltis_config::discover_and_load()).await
+}
+
+async fn reset_databases_for(config: &moltis_config::MoltisConfig) -> anyhow::Result<()> {
+    if config.database.backend == moltis_config::DatabaseBackend::Postgres {
+        anyhow::bail!(
+            "`moltis db reset` deletes the local SQLite database files and is not supported \
+             for backend = \"postgres\". Drop and recreate the PostgreSQL database yourself \
+             (e.g. `DROP DATABASE moltis; CREATE DATABASE moltis;`) or drop only the moltis \
+             tables, then run `moltis db migrate`."
+        );
+    }
     let (main_db, memory_db, connectors_db) = db_paths();
 
     let mut deleted = false;
@@ -68,6 +84,10 @@ async fn reset_databases() -> anyhow::Result<()> {
 
 /// Clear all data from tables but keep the schema intact.
 async fn clear_databases() -> anyhow::Result<()> {
+    let config = moltis_config::discover_and_load();
+    if config.database.backend == moltis_config::DatabaseBackend::Postgres {
+        return clear_postgres_database(&config).await;
+    }
     let (main_db, memory_db, connectors_db) = db_paths();
     #[cfg(not(feature = "connectors"))]
     let _ = &connectors_db;
@@ -173,6 +193,10 @@ async fn clear_databases() -> anyhow::Result<()> {
 
 /// Run all pending database migrations.
 async fn run_migrations() -> anyhow::Result<()> {
+    let config = moltis_config::discover_and_load();
+    if config.database.backend == moltis_config::DatabaseBackend::Postgres {
+        return run_postgres_migrations(&config).await;
+    }
     let (main_db, memory_db, connectors_db) = db_paths();
     #[cfg(not(feature = "connectors"))]
     let _ = &connectors_db;
@@ -186,24 +210,25 @@ async fn run_migrations() -> anyhow::Result<()> {
     println!("Running migrations for main database...");
     let db_url = format!("sqlite:{}?mode=rwc", main_db.display());
     let pool = sqlx::SqlitePool::connect(&db_url).await?;
+    let db = moltis_db::Db::from(pool.clone());
 
     // Run migrations in dependency order (same as server.rs)
-    moltis_projects::run_migrations(&pool)
+    moltis_projects::run_migrations(&db)
         .await
         .map_err(|e| anyhow::anyhow!("projects migrations failed: {e}"))?;
     println!("  - projects migrations complete");
 
-    moltis_sessions::run_migrations(&pool)
+    moltis_sessions::run_migrations(&db)
         .await
         .map_err(|e| anyhow::anyhow!("sessions migrations failed: {e}"))?;
     println!("  - sessions migrations complete");
 
-    moltis_cron::run_migrations(&pool)
+    moltis_cron::run_migrations(&db)
         .await
         .map_err(|e| anyhow::anyhow!("cron migrations failed: {e}"))?;
     println!("  - cron migrations complete");
 
-    moltis_gateway::run_migrations(&pool)
+    moltis_gateway::run_migrations(&db)
         .await
         .map_err(|e| anyhow::anyhow!("gateway migrations failed: {e}"))?;
     println!("  - gateway migrations complete");
@@ -228,7 +253,7 @@ async fn run_migrations() -> anyhow::Result<()> {
         let connectors_url = format!("sqlite:{}?mode=rwc", connectors_db.display());
         let connectors_pool = sqlx::SqlitePool::connect(&connectors_url).await?;
         restrict_database_permissions(&connectors_db)?;
-        moltis_connectors::run_migrations(&connectors_pool)
+        moltis_connectors::run_migrations(&moltis_db::Db::from(connectors_pool.clone()))
             .await
             .map_err(|error| anyhow::anyhow!("connector migrations failed: {error}"))?;
         println!("  - connector migrations complete");
@@ -236,6 +261,96 @@ async fn run_migrations() -> anyhow::Result<()> {
     }
 
     println!("All migrations complete.");
+    Ok(())
+}
+
+/// Run every moltis migration on the shared PostgreSQL deployment database
+/// (table names do not collide across stores).
+async fn run_postgres_migrations(config: &moltis_config::MoltisConfig) -> anyhow::Result<()> {
+    println!("Running migrations for the PostgreSQL deployment database...");
+    let db = moltis_gateway::database::open_database(config, &moltis_config::data_dir()).await?;
+
+    moltis_projects::run_migrations(&db)
+        .await
+        .map_err(|e| anyhow::anyhow!("projects migrations failed: {e}"))?;
+    println!("  - projects migrations complete");
+
+    moltis_sessions::run_migrations(&db)
+        .await
+        .map_err(|e| anyhow::anyhow!("sessions migrations failed: {e}"))?;
+    println!("  - sessions migrations complete");
+
+    moltis_cron::run_migrations(&db)
+        .await
+        .map_err(|e| anyhow::anyhow!("cron migrations failed: {e}"))?;
+    println!("  - cron migrations complete");
+
+    moltis_gateway::run_migrations(&db)
+        .await
+        .map_err(|e| anyhow::anyhow!("gateway migrations failed: {e}"))?;
+    println!("  - gateway migrations complete");
+
+    moltis_memory::schema::run_migrations(&db)
+        .await
+        .map_err(|e| anyhow::anyhow!("memory migrations failed: {e}"))?;
+    println!("  - memory migrations complete");
+
+    #[cfg(feature = "connectors")]
+    {
+        moltis_connectors::run_migrations(&db)
+            .await
+            .map_err(|error| anyhow::anyhow!("connector migrations failed: {error}"))?;
+        println!("  - connector migrations complete");
+    }
+
+    db.close().await;
+    println!("All migrations complete.");
+    Ok(())
+}
+
+/// Clear every moltis table in the shared PostgreSQL deployment database.
+async fn clear_postgres_database(config: &moltis_config::MoltisConfig) -> anyhow::Result<()> {
+    let db = moltis_gateway::database::open_database(config, &moltis_config::data_dir()).await?;
+
+    // Order matters due to foreign key constraints: children first.
+    let tables = [
+        // Sessions/channels (depends on projects)
+        "channel_sessions",
+        "sessions",
+        // Cron (cron_runs depends on cron_jobs)
+        "cron_runs",
+        "cron_jobs",
+        // Memory (chunks depends on files)
+        "embedding_cache",
+        "chunks",
+        "files",
+        // Connectors
+        "connector_sync_runs",
+        "connector_items",
+        "connector_datasets",
+        "connector_accounts",
+        // Gateway tables (no dependencies between them)
+        "auth_sessions",
+        "api_keys",
+        "passkeys",
+        "auth_password",
+        "env_variables",
+        "message_log",
+        "channels",
+        // Projects (other tables depend on this)
+        "projects",
+    ];
+
+    for table in tables {
+        let query = format!("DELETE FROM {table}");
+        match moltis_db::execute!(&db, &query) {
+            Ok(_) => println!("Cleared table: {table}"),
+            // Table might not exist if migrations haven't run
+            Err(e) => eprintln!("Warning: could not clear {table}: {e}"),
+        }
+    }
+    db.close().await;
+    println!("PostgreSQL deployment database cleared.");
     Ok(())
 }
 
@@ -331,6 +446,22 @@ mod tests {
         let _ = DbAction::Migrate;
     }
 
+    #[tokio::test]
+    async fn reset_refuses_on_postgres() {
+        let mut config = moltis_config::MoltisConfig::default();
+        config.database.backend = moltis_config::DatabaseBackend::Postgres;
+        config.database.url = Some(secrecy::Secret::new(
+            "postgres://postgres:test@127.0.0.1:55433/moltis".into(),
+        ));
+        let error = reset_databases_for(&config)
+            .await
+            .expect_err("reset must refuse on postgres");
+        assert!(
+            error.to_string().contains("not supported"),
+            "error must explain the refusal: {error}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn connector_database_permissions_are_owner_only() {
@@ -359,10 +490,11 @@ mod tests {
         let pool = sqlx::SqlitePool::connect(&db_url).await.unwrap();
 
         // Run migrations in dependency order
-        moltis_projects::run_migrations(&pool).await.unwrap();
-        moltis_sessions::run_migrations(&pool).await.unwrap();
-        moltis_cron::run_migrations(&pool).await.unwrap();
-        moltis_gateway::run_migrations(&pool).await.unwrap();
+        let db = moltis_db::Db::from(pool.clone());
+        moltis_projects::run_migrations(&db).await.unwrap();
+        moltis_sessions::run_migrations(&db).await.unwrap();
+        moltis_cron::run_migrations(&db).await.unwrap();
+        moltis_gateway::run_migrations(&db).await.unwrap();
 
         // Verify tables were created by querying them
         let _: (i64,) = sqlx::query_as("SELECT count(*) FROM projects")
@@ -418,18 +550,19 @@ mod tests {
 
         let db_url = format!("sqlite:{}?mode=rwc", main_db.display());
         let pool = sqlx::SqlitePool::connect(&db_url).await.unwrap();
+        let db = moltis_db::Db::from(pool.clone());
 
         // Run all migrations
-        moltis_projects::run_migrations(&pool).await.unwrap();
-        moltis_sessions::run_migrations(&pool).await.unwrap();
-        moltis_cron::run_migrations(&pool).await.unwrap();
-        moltis_gateway::run_migrations(&pool).await.unwrap();
+        moltis_projects::run_migrations(&db).await.unwrap();
+        moltis_sessions::run_migrations(&db).await.unwrap();
+        moltis_cron::run_migrations(&db).await.unwrap();
+        moltis_gateway::run_migrations(&db).await.unwrap();
 
         // Run again - should still work due to set_ignore_missing
-        moltis_projects::run_migrations(&pool).await.unwrap();
-        moltis_sessions::run_migrations(&pool).await.unwrap();
-        moltis_cron::run_migrations(&pool).await.unwrap();
-        moltis_gateway::run_migrations(&pool).await.unwrap();
+        moltis_projects::run_migrations(&db).await.unwrap();
+        moltis_sessions::run_migrations(&db).await.unwrap();
+        moltis_cron::run_migrations(&db).await.unwrap();
+        moltis_gateway::run_migrations(&db).await.unwrap();
 
         pool.close().await;
     }

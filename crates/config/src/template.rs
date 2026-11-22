@@ -54,6 +54,19 @@ port = {port}                           # Port number (auto-generated for this i
                                          # Interactive desktop sessions only (never over SSH/containers/CI).
 
 # ══════════════════════════════════════════════════════════════════════════════
+# DATABASE
+# ══════════════════════════════════════════════════════════════════════════════
+# One deployment-wide database engine for every SQL store: a deployment runs
+# on PostgreSQL or SQLite, never both (no fallback). Pool size comes from
+# server.db_pool_max_connections.
+
+# [database]
+# backend = "sqlite"                # "sqlite" | "postgres"
+# url = "postgres://user:pass@localhost/moltis"  # Required for "postgres"; ignored for "sqlite".
+                                         # The PostgreSQL server needs the pgvector
+                                         # extension for the builtin memory store.
+
+# ══════════════════════════════════════════════════════════════════════════════
 # UPSTREAM PROXY
 # ══════════════════════════════════════════════════════════════════════════════
 # Route all outbound traffic (providers, channels, tools, OAuth) through a
@@ -754,10 +767,9 @@ loopback_http = true                # Plain HTTP on loopback binds: http://local
 # [memory]
 # style = "hybrid"                  # "hybrid" | "prompt-only" | "search-only" | "off"
 # agent_write_mode = "hybrid"       # "hybrid" | "prompt-only" | "search-only" | "off"
-# backend = "builtin"               # "builtin" | "qmd" | "zvec" | "postgres"
+# backend = "builtin"               # "builtin" | "qmd" | "zvec"
 # provider = "auto"                 # "local" | "ollama" | "openai" | "custom"
 # db_path = "memory.zvec"           # Zvec collection directory (only when backend = "zvec")
-# database_url = "postgres://user:pass@localhost/moltis"  # (only when backend = "postgres")
 # vector_weight = 0.7               # Weight for vector similarity in hybrid search
 # keyword_weight = 0.3              # Weight for keyword/FTS similarity in hybrid search
 

@@ -740,7 +740,7 @@ pub(super) async fn start_server_with_onboarding(
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
     let auth_config = moltis_config::AuthConfig::default();
     let cred_store = Arc::new(
-        CredentialStore::with_config(pool, &auth_config)
+        CredentialStore::with_config(moltis_db::Db::from(pool), &auth_config)
             .await
             .unwrap(),
     );

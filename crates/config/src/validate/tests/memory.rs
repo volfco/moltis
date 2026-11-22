@@ -14,38 +14,63 @@ backend = "mysql"
 }
 
 #[test]
-fn postgres_memory_backend_is_valid_with_url() {
+fn database_postgres_backend_requires_url() {
     let toml = r#"
-[memory]
-backend = "postgres"
-database_url = "postgres://user:pass@localhost/moltis"
-"#;
-    let result = validate_toml_str(toml);
-    assert!(
-        !result.has_errors(),
-        "postgres backend with a database_url should be valid: {:?}",
-        result.diagnostics
-    );
-}
-
-#[test]
-fn postgres_memory_backend_requires_database_url() {
-    let toml = r#"
-[memory]
+[database]
 backend = "postgres"
 "#;
     let result = validate_toml_str(toml);
     assert!(
         result.has_errors(),
-        "postgres backend without database_url must be rejected"
+        "postgres backend without database.url must be rejected"
     );
     assert!(
-        result
-            .diagnostics
-            .iter()
-            .any(|d| d.path == "memory.database_url"),
-        "diagnostic must point at memory.database_url: {:?}",
+        result.diagnostics.iter().any(|d| d.path == "database.url"),
+        "diagnostic must point at database.url: {:?}",
         result.diagnostics
+    );
+}
+
+#[test]
+fn database_postgres_backend_is_valid_with_url() {
+    let toml = r#"
+[database]
+backend = "postgres"
+url = "postgres://user:pass@localhost/moltis"
+"#;
+    let result = validate_toml_str(toml);
+    assert!(
+        !result.has_errors(),
+        "postgres backend with a database.url should be valid: {:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn database_sqlite_backend_ignores_url() {
+    let toml = r#"
+[database]
+backend = "sqlite"
+url = "postgres://user:pass@localhost/moltis"
+"#;
+    let result = validate_toml_str(toml);
+    assert!(
+        !result.has_errors(),
+        "sqlite backend must ignore database.url: {:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn unknown_database_backend_is_parse_error() {
+    let toml = r#"
+[database]
+backend = "mysql"
+"#;
+    let result = validate_toml_str(toml);
+    assert!(
+        result.has_errors(),
+        "expected parse error for unknown database backend"
     );
 }
 

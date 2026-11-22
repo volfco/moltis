@@ -5,18 +5,15 @@
 
 use std::sync::Arc;
 
-use sqlx::SqlitePool;
-
 use crate::state::GatewayState;
 
 /// Install reply/trace correlation and start the retention prune.
 ///
-/// Needs the database pool, which does not exist at state construction, so it
+/// Needs the database, which does not exist at state construction, so it
 /// runs here rather than in `GatewayState::new`.
-pub(super) fn install_feedback(state: &Arc<GatewayState>, db_pool: &SqlitePool) {
-    let links: Arc<dyn moltis_channels::trace_link::TraceLinkStore> = Arc::new(
-        crate::trace_link_store::DbTraceLinkStore::new(moltis_db::Db::from(db_pool.clone())),
-    );
+pub(super) fn install_feedback(state: &Arc<GatewayState>, db: &moltis_db::Db) {
+    let links: Arc<dyn moltis_channels::trace_link::TraceLinkStore> =
+        Arc::new(crate::trace_link_store::DbTraceLinkStore::new(db.clone()));
     state.feedback.apply(
         links,
         &state.config.instrumentation.feedback,

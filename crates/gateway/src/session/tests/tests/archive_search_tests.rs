@@ -5,7 +5,7 @@ async fn patch_archived_allows_unarchive_for_current_channel_session() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
     let pool = sqlite_pool().await;
-    let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+    let metadata = Arc::new(DbSessionMetadata::new(pool));
     let binding = r#"{"channel_type":"telegram","account_id":"bot1","chat_id":"123"}"#.to_string();
     metadata
         .upsert("telegram:bot1:123", Some("Telegram current".to_string()))
@@ -34,7 +34,7 @@ async fn patch_archived_rejection_does_not_partially_mutate_session() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
     let pool = sqlite_pool().await;
-    let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+    let metadata = Arc::new(DbSessionMetadata::new(pool));
     let binding = r#"{"channel_type":"telegram","account_id":"bot1","chat_id":"123"}"#.to_string();
     metadata
         .upsert("telegram:bot1:123", Some("Telegram current".to_string()))
@@ -72,7 +72,7 @@ async fn search_excludes_archived_sessions_unless_requested() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
     let pool = sqlite_pool().await;
-    let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+    let metadata = Arc::new(DbSessionMetadata::new(pool));
     metadata
         .upsert("session:visible", Some("Visible".to_string()))
         .await
@@ -134,7 +134,7 @@ async fn search_includes_results_without_metadata_rows() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
     let pool = sqlite_pool().await;
-    let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+    let metadata = Arc::new(DbSessionMetadata::new(pool));
     store
         .append(
             "session:orphaned",

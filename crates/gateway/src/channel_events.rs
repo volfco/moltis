@@ -12,7 +12,7 @@ use {
         ChannelReplyTarget, Error as ChannelError, Result as ChannelResult, SavedChannelFile,
         config_view::{UntrustedAudience, UntrustedTools},
     },
-    moltis_sessions::metadata::{SessionEntry, SqliteSessionMetadata},
+    moltis_sessions::metadata::{DbSessionMetadata, SessionEntry},
     moltis_tools::approval::PendingApprovalView,
 };
 
@@ -37,7 +37,7 @@ fn default_channel_session_key(target: &ChannelReplyTarget) -> String {
 /// to the deterministic key.
 async fn resolve_channel_session(
     target: &ChannelReplyTarget,
-    metadata: &SqliteSessionMetadata,
+    metadata: &DbSessionMetadata,
 ) -> String {
     if let Some(key) = metadata
         .get_active_session(

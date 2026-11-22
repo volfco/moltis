@@ -6,7 +6,7 @@ use {
             maybe_deliver_cron_output, restore_saved_local_llm_models,
             validate_proxy_tls_configuration,
         },
-        init_channels, init_code_index, init_memory,
+        init_channels, init_code_index, init_cron, init_memory,
         prepared::{CoreStartupProfile, PreparedGatewayCore},
         workspace::{
             seed_default_workspace_markdown_files, sync_persona_into_preset,
@@ -26,7 +26,7 @@ use {
     moltis_projects::ProjectStore,
     moltis_providers::ProviderRegistry,
     moltis_sessions::{
-        metadata::{SessionMetadata, SqliteSessionMetadata},
+        metadata::{DbSessionMetadata, SessionMetadata},
         session_events::SessionEventBus,
         store::SessionStore,
     },
@@ -433,59 +433,55 @@ pub async fn prepare_gateway_core_with_profile(
     log_startup_config_storage_diagnostics();
 
     log_persistence::spawn_startup_log_persistence(log_buffer.as_ref(), &data_dir);
-    let db_path = data_dir.join("moltis.db");
-    let db_pool = {
-        use {
-            sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous},
-            std::str::FromStr,
-        };
-        let db_exists = db_path.exists();
-        let mut options = SqliteConnectOptions::from_str(&format!("sqlite:{}", db_path.display()))
-            .expect("invalid database path")
-            .create_if_missing(true)
-            .foreign_keys(true)
-            .synchronous(SqliteSynchronous::Normal)
-            .busy_timeout(std::time::Duration::from_secs(5));
-        if !db_exists {
-            options = options.journal_mode(SqliteJournalMode::Wal);
-        }
-
-        let started = std::time::Instant::now();
-        let pool = sqlx::pool::PoolOptions::new()
-            .max_connections(config.server.db_pool_max_connections)
-            .connect_with(options)
-            .await
-            .expect("failed to open moltis.db");
-        debug!(
-            path = %db_path.display(),
-            db_exists,
-            elapsed_ms = started.elapsed().as_millis(),
-            "startup sqlite pool connected"
-        );
-        pool
-    };
+    // One deployment-wide database engine ([database]); a PostgreSQL failure
+    // exits here — a deployment never falls back to another engine.
+    let db_started = std::time::Instant::now();
+    let db = crate::database::open_database(&config, &data_dir)
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to open the deployment database: {error}"))?;
+    debug!(
+        elapsed_ms = db_started.elapsed().as_millis(),
+        "startup database connected"
+    );
 
     // Run database migrations from each crate in dependency order.
-    moltis_projects::run_migrations(&db_pool)
+    moltis_projects::run_migrations(&db)
         .await
         .expect("failed to run projects migrations");
-    moltis_sessions::run_migrations(&db_pool)
+    moltis_sessions::run_migrations(&db)
         .await
         .expect("failed to run sessions migrations");
-    moltis_cron::run_migrations(&db_pool)
+    moltis_cron::run_migrations(&db)
         .await
         .expect("failed to run cron migrations");
-    moltis_webhooks::run_migrations(&db_pool)
+    moltis_webhooks::run_migrations(&db)
         .await
         .expect("failed to run webhooks migrations");
-    crate::run_migrations(&moltis_db::Db::from(db_pool.clone()))
+    crate::run_migrations(&db)
         .await
         .expect("failed to run gateway migrations");
 
     #[cfg(feature = "vault")]
-    moltis_vault::run_migrations(&db_pool)
+    moltis_vault::run_migrations(&db)
         .await
         .expect("failed to run vault migrations");
+
+    // In PostgreSQL mode every store shares the one database, so every
+    // remaining schema (memory, code-index, connectors) must migrate here:
+    // a failed migration is a startup error, not a degraded feature. On
+    // SQLite those stores keep their own files and migrate on open.
+    if db.is_postgres() {
+        moltis_memory::schema::run_migrations(&db)
+            .await
+            .expect("failed to run memory migrations");
+        moltis_code_index::store_db::run_migrations(&db)
+            .await
+            .expect("failed to run code-index migrations");
+        #[cfg(feature = "connectors")]
+        moltis_connectors::run_migrations(&db)
+            .await
+            .expect("failed to run connectors migrations");
+    }
 
     moltis_skills::migration::migrate_plugins_to_skills(&data_dir).await;
     startup_mem_probe.checkpoint("sqlite.migrations.complete");
@@ -498,7 +494,7 @@ pub async fn prepare_gateway_core_with_profile(
             (None, false)
         } else {
             crate::vault_lifecycle::set_vault_encryption_runtime_enabled(true);
-            match moltis_vault::Vault::new(db_pool.clone()).await {
+            match moltis_vault::Vault::new(db.clone()).await {
                 Ok(v) => {
                     info!(status = ?v.status().await, "vault ready");
                     let vault = Arc::new(v);
@@ -521,7 +517,7 @@ pub async fn prepare_gateway_core_with_profile(
 
     #[cfg(feature = "vault")]
     let credential_store = Arc::new(
-        auth::CredentialStore::with_vault(db_pool.clone(), &config.auth, vault.clone())
+        auth::CredentialStore::with_vault(db.clone(), &config.auth, vault.clone())
             .await
             .expect("failed to init credential store"),
     );
@@ -531,7 +527,7 @@ pub async fn prepare_gateway_core_with_profile(
     }
     #[cfg(not(feature = "vault"))]
     let credential_store = Arc::new(
-        auth::CredentialStore::new(db_pool.clone())
+        auth::CredentialStore::new(db.clone())
             .await
             .expect("failed to init credential store"),
     );
@@ -588,9 +584,8 @@ pub async fn prepare_gateway_core_with_profile(
         }
     }
 
-    let message_log: Arc<dyn moltis_channels::message_log::MessageLog> = Arc::new(
-        crate::message_log_store::DbMessageLog::new(moltis_db::Db::from(db_pool.clone())),
-    );
+    let message_log: Arc<dyn moltis_channels::message_log::MessageLog> =
+        Arc::new(crate::message_log_store::DbMessageLog::new(db.clone()));
 
     // Migrate from projects.toml if it exists.
     let config_dir_for_migration =
@@ -599,7 +594,7 @@ pub async fn prepare_gateway_core_with_profile(
     if projects_toml_path.exists() {
         info!("migrating projects.toml to SQLite");
         let old_store = moltis_projects::TomlProjectStore::new(projects_toml_path.clone());
-        let sqlite_store = moltis_projects::SqliteProjectStore::new(db_pool.clone());
+        let sqlite_store = moltis_projects::DbProjectStore::new(db.clone());
         if let Ok(projects) =
             <moltis_projects::TomlProjectStore as ProjectStore>::list(&old_store).await
         {
@@ -619,7 +614,7 @@ pub async fn prepare_gateway_core_with_profile(
     if metadata_json_path.exists() {
         info!("migrating metadata.json to SQLite");
         if let Ok(old_meta) = SessionMetadata::load(metadata_json_path.clone()) {
-            let sqlite_meta = SqliteSessionMetadata::new(db_pool.clone());
+            let sqlite_meta = DbSessionMetadata::new(db.clone());
             for entry in old_meta.list() {
                 if let Err(e) = sqlite_meta.upsert(&entry.key, entry.label.clone()).await {
                     tracing::warn!("failed to migrate session {}: {e}", entry.key);
@@ -648,23 +643,19 @@ pub async fn prepare_gateway_core_with_profile(
 
     // Wire stores.
     let project_store: Arc<dyn ProjectStore> =
-        Arc::new(moltis_projects::SqliteProjectStore::new(db_pool.clone()));
+        Arc::new(moltis_projects::DbProjectStore::new(db.clone()));
     let session_store = Arc::new(SessionStore::new(sessions_dir));
     let event_bus_for_metadata = session_event_bus.clone();
-    let session_metadata = Arc::new(SqliteSessionMetadata::with_event_bus(
-        db_pool.clone(),
+    let session_metadata = Arc::new(DbSessionMetadata::with_event_bus(
+        db.clone(),
         event_bus_for_metadata,
     ));
-    let session_share_store = Arc::new(crate::share_store::ShareStore::new(moltis_db::Db::from(
-        db_pool.clone(),
-    )));
+    let session_share_store = Arc::new(crate::share_store::ShareStore::new(db.clone()));
     let session_state_store = Arc::new(moltis_sessions::state_store::SessionStateStore::new(
-        db_pool.clone(),
+        db.clone(),
     ));
 
-    let agent_persona_store = Arc::new(crate::agent_persona::AgentPersonaStore::new(
-        moltis_db::Db::from(db_pool.clone()),
-    ));
+    let agent_persona_store = Arc::new(crate::agent_persona::AgentPersonaStore::new(db.clone()));
     if let Err(e) = agent_persona_store.ensure_main_workspace_seeded() {
         tracing::warn!(error = %e, "failed to seed main agent workspace");
     }
@@ -673,9 +664,7 @@ pub async fn prepare_gateway_core_with_profile(
     }
 
     #[cfg(feature = "voice")]
-    let voice_persona_store = Arc::new(crate::voice_persona::VoicePersonaStore::new(
-        moltis_db::Db::from(db_pool.clone()),
-    ));
+    let voice_persona_store = Arc::new(crate::voice_persona::VoicePersonaStore::new(db.clone()));
     #[cfg(feature = "voice")]
     match voice_persona_store.seed_defaults().await {
         Ok(0) => {},
@@ -698,15 +687,10 @@ pub async fn prepare_gateway_core_with_profile(
         &project_store,
     )));
 
-    // Initialize cron service.
+    // Initialize cron service on the deployment database (with a one-time
+    // import of legacy JSON-file jobs).
     let cron_store: Arc<dyn moltis_cron::store::CronStore> =
-        match moltis_cron::store_file::FileStore::default_path() {
-            Ok(fs) => Arc::new(fs),
-            Err(e) => {
-                tracing::warn!("cron file store unavailable ({e}), using in-memory");
-                Arc::new(moltis_cron::store_memory::InMemoryStore::new())
-            },
-        };
+        init_cron::init_cron_store(db.clone(), &data_dir).await;
 
     let sys_state = Arc::clone(&deferred_state);
     let on_system_event: moltis_cron::service::SystemEventFn = Arc::new(move |text| {
@@ -978,7 +962,7 @@ pub async fn prepare_gateway_core_with_profile(
 
     // Webhooks
     let webhook_store_inner: Arc<dyn moltis_webhooks::store::WebhookStore> = Arc::new(
-        moltis_webhooks::store::SqliteWebhookStore::with_pool(db_pool.clone()),
+        moltis_webhooks::store::DbWebhookStore::with_pool(db.clone()),
     );
     #[cfg(feature = "vault")]
     let webhook_store: Arc<dyn moltis_webhooks::store::WebhookStore> = Arc::new(
@@ -1238,7 +1222,7 @@ pub async fn prepare_gateway_core_with_profile(
     let channel_result = init_channels::init_channels(
         services,
         &config,
-        db_pool.clone(),
+        db.clone(),
         #[cfg(feature = "vault")]
         vault.clone(),
         Arc::clone(&message_log),
@@ -1332,14 +1316,14 @@ pub async fn prepare_gateway_core_with_profile(
         &data_dir,
         &effective_providers,
         &runtime_env_overrides,
-        config.server.db_pool_max_connections,
+        &db,
         !profile.is_headless(),
     )
     .await;
     startup_mem_probe.checkpoint("memory_manager.initialized");
 
     // ── Code index initialization ──────────────────────────────────────
-    let code_index = init_code_index::init_code_index(&data_dir, &config).await;
+    let code_index = init_code_index::init_code_index(&data_dir, &config, &db).await;
     startup_mem_probe.checkpoint("code_index.initialized");
 
     post_state::complete_startup(post_state::PostStateInputs {
@@ -1366,7 +1350,7 @@ pub async fn prepare_gateway_core_with_profile(
         live_mcp,
         memory_manager,
         credential_store,
-        db_pool,
+        db,
         session_store,
         session_metadata,
         session_share_store,

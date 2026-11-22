@@ -16,8 +16,8 @@ use {
     moltis_connector_himalaya::{HimalayaAccountConfig, HimalayaConnector, HimalayaDatasetConfig},
     moltis_connectors::{
         Account, AccountCreate, AccountUpdate, ConnectorError, ConnectorItem, ConnectorKind,
-        ConnectorReader, Dataset, DatasetCreate, DatasetUpdate, ItemQuery, MAX_QUERY_LIMIT,
-        ProjectionManifest, SqliteConnectorStore, SyncRun,
+        ConnectorReader, Dataset, DatasetCreate, DatasetUpdate, DbConnectorStore, ItemQuery,
+        MAX_QUERY_LIMIT, ProjectionManifest, SyncRun,
     },
     secrecy::ExposeSecret,
     serde_json::Value,
@@ -88,7 +88,7 @@ pub enum ConnectorManagerError {
 }
 
 pub struct ConnectorManager {
-    store: Arc<SqliteConnectorStore>,
+    store: Arc<DbConnectorStore>,
     caldav: CalDavConnector,
     himalaya: HimalayaConnector,
     google_token_path: PathBuf,
@@ -124,9 +124,13 @@ struct TaskAdmissionState {
 }
 
 impl ConnectorManager {
+    /// Open the connector store on the engine chosen by `[database]`:
+    /// PostgreSQL shares `deployment_db` (the one deployment database),
+    /// SQLite keeps its own `connectors.db` file and ignores `deployment_db`.
     pub async fn open(
         data_dir: &Path,
         max_connections: u32,
+        deployment_db: &moltis_db::Db,
         #[cfg(feature = "vault")] vault: Option<Arc<moltis_vault::Vault>>,
     ) -> Result<Self> {
         if max_connections == 0 {
@@ -140,28 +144,33 @@ impl ConnectorManager {
             .await
             .map_err(|error| internal(error, "create connector export directory"))?;
         restrict_directory_permissions(&export_root).await?;
-        let db_path = data_dir.join("connectors.db");
-        let is_new = !db_path.exists();
-        let mut options = SqliteConnectOptions::new()
-            .filename(&db_path)
-            .create_if_missing(true)
-            .foreign_keys(true)
-            .synchronous(SqliteSynchronous::Normal)
-            .busy_timeout(StdDuration::from_secs(5));
-        if is_new {
-            options = options.journal_mode(SqliteJournalMode::Wal);
-        }
-        let pool = SqlitePoolOptions::new()
-            .max_connections(max_connections)
-            .connect_with(options)
-            .await
-            .map_err(|error| internal(error, "open connector database"))?;
-        restrict_file_permissions(&db_path).await?;
-        moltis_connectors::run_migrations(&pool)
+        let db = if deployment_db.is_postgres() {
+            deployment_db.clone()
+        } else {
+            let db_path = data_dir.join("connectors.db");
+            let is_new = !db_path.exists();
+            let mut options = SqliteConnectOptions::new()
+                .filename(&db_path)
+                .create_if_missing(true)
+                .foreign_keys(true)
+                .synchronous(SqliteSynchronous::Normal)
+                .busy_timeout(StdDuration::from_secs(5));
+            if is_new {
+                options = options.journal_mode(SqliteJournalMode::Wal);
+            }
+            let pool = SqlitePoolOptions::new()
+                .max_connections(max_connections)
+                .connect_with(options)
+                .await
+                .map_err(|error| internal(error, "open connector database"))?;
+            restrict_file_permissions(&db_path).await?;
+            moltis_db::Db::from(pool)
+        };
+        moltis_connectors::run_migrations(&db)
             .await
             .map_err(ConnectorManagerError::from)?;
 
-        let store = Arc::new(SqliteConnectorStore::new(pool));
+        let store = Arc::new(DbConnectorStore::new(db));
         store
             .fail_running_sync_runs("Connector process stopped before this sync completed")
             .await
@@ -1035,23 +1044,29 @@ impl ConnectorManager {
     #[cfg(feature = "vault")]
     pub async fn decrypt_all_credentials_at(
         data_dir: &Path,
+        deployment_db: &moltis_db::Db,
         vault: &moltis_vault::Vault,
     ) -> Result<usize> {
-        let db_path = data_dir.join("connectors.db");
-        if !db_path.exists() {
-            return Ok(0);
-        }
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(
-                SqliteConnectOptions::new()
-                    .filename(&db_path)
-                    .foreign_keys(true)
-                    .busy_timeout(StdDuration::from_secs(5)),
-            )
-            .await
-            .map_err(|error| internal(error, "open connector database for vault disable"))?;
-        let store = SqliteConnectorStore::new(pool);
+        let db = if deployment_db.is_postgres() {
+            deployment_db.clone()
+        } else {
+            let db_path = data_dir.join("connectors.db");
+            if !db_path.exists() {
+                return Ok(0);
+            }
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(
+                    SqliteConnectOptions::new()
+                        .filename(&db_path)
+                        .foreign_keys(true)
+                        .busy_timeout(StdDuration::from_secs(5)),
+                )
+                .await
+                .map_err(|error| internal(error, "open connector database for vault disable"))?;
+            moltis_db::Db::from(pool)
+        };
+        let store = DbConnectorStore::new(db);
         decrypt_credentials(&store, vault).await
     }
 
@@ -1363,7 +1378,7 @@ impl ConnectorManager {
 
 #[cfg(feature = "vault")]
 async fn decrypt_credentials(
-    store: &SqliteConnectorStore,
+    store: &DbConnectorStore,
     vault: &moltis_vault::Vault,
 ) -> Result<usize> {
     let mut changed = 0;

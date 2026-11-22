@@ -13,6 +13,8 @@ mod agents;
 mod chat;
 #[path = "schema/code_index.rs"]
 mod code_index;
+#[path = "schema/database.rs"]
+mod database;
 #[path = "schema/hooks.rs"]
 mod hooks;
 
@@ -35,8 +37,8 @@ mod tools;
 mod voice;
 
 pub use {
-    agents::*, chat::*, code_index::*, hooks::*, instrumentation::*, memory::*, modes::*, phone::*,
-    providers::*, runtime::*, system::*, tools::*, voice::*,
+    agents::*, chat::*, code_index::*, database::*, hooks::*, instrumentation::*, memory::*,
+    modes::*, phone::*, providers::*, runtime::*, system::*, tools::*, voice::*,
 };
 
 // ── Reasoning effort ──────────────────────────────────────────────────────
@@ -299,6 +301,8 @@ impl Default for ResolvedIdentity {
 #[serde(default)]
 pub struct MoltisConfig {
     pub server: ServerConfig,
+    /// Deployment-wide database engine for every SQL store.
+    pub database: DatabaseConfig,
     pub ngrok: NgrokConfig,
     pub cloudflare_tunnel: CloudflareTunnelConfig,
     pub providers: ProvidersConfig,

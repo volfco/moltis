@@ -8,7 +8,7 @@ use std::{
 use {
     moltis_providers::ProviderRegistry,
     moltis_sessions::{
-        metadata::SqliteSessionMetadata, session_events::SessionEventBus, store::SessionStore,
+        metadata::DbSessionMetadata, session_events::SessionEventBus, store::SessionStore,
     },
 };
 
@@ -20,7 +20,7 @@ pub(crate) struct BridgeState {
     pub runtime: tokio::runtime::Runtime,
     pub registry: RwLock<ProviderRegistry>,
     pub session_store: SessionStore,
-    pub session_metadata: SqliteSessionMetadata,
+    pub session_metadata: DbSessionMetadata,
     pub credential_store: Arc<moltis_gateway::auth::CredentialStore>,
     pub sandbox_default_image_override: RwLock<Option<String>>,
 }
@@ -58,46 +58,36 @@ impl BridgeState {
         }
         let session_store = SessionStore::new(sessions_dir);
 
-        // Open the shared SQLite database (same moltis.db used by the gateway).
-        // WAL mode + synchronous=NORMAL avoids multi-second write contention.
-        let db_path = data_dir.join("moltis.db");
-        let db_pool = runtime.block_on(async {
-            use {
-                sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous},
-                std::str::FromStr,
-            };
-            let opts = SqliteConnectOptions::from_str(&format!("sqlite:{}", db_path.display()))
-                .expect("invalid moltis.db path")
-                .create_if_missing(true)
-                .journal_mode(SqliteJournalMode::Wal)
-                .synchronous(SqliteSynchronous::Normal);
-            let pool = sqlx::SqlitePool::connect_with(opts)
+        // Open the shared deployment database (the same one the gateway uses:
+        // data_dir/moltis.db or the [database] PostgreSQL URL).
+        let db = runtime.block_on(async {
+            let config = moltis_config::discover_and_load();
+            let db = moltis_gateway::database::open_database(&config, &data_dir)
                 .await
-                .unwrap_or_else(|e| panic!("failed to open moltis.db: {e}"));
+                .unwrap_or_else(|e| panic!("failed to open the deployment database: {e}"));
             // Run migrations so the sessions table exists even if the gateway
             // hasn't been started yet. Order: projects first (FK dependency).
-            if let Err(e) = moltis_projects::run_migrations(&pool).await {
+            if let Err(e) = moltis_projects::run_migrations(&db).await {
                 emit_log("WARN", "bridge", &format!("projects migration: {e}"));
             }
-            if let Err(e) = moltis_sessions::run_migrations(&pool).await {
+            if let Err(e) = moltis_sessions::run_migrations(&db).await {
                 emit_log("WARN", "bridge", &format!("sessions migration: {e}"));
             }
-            if let Err(e) = moltis_gateway::run_migrations(&pool).await {
+            if let Err(e) = moltis_gateway::run_migrations(&db).await {
                 emit_log("WARN", "bridge", &format!("gateway migration: {e}"));
             }
-            pool
+            db
         });
         let event_bus = SessionEventBus::new();
-        let session_metadata = SqliteSessionMetadata::with_event_bus(db_pool.clone(), event_bus);
+        let session_metadata = DbSessionMetadata::with_event_bus(db.clone(), event_bus);
         let credential_store = runtime.block_on(async {
             // Keep vault metadata up to date so env var encryption status works
             // even when the full gateway server is not running.
-            if let Err(e) = moltis_gateway::auth::moltis_vault::run_migrations(&db_pool).await {
+            if let Err(e) = moltis_gateway::auth::moltis_vault::run_migrations(&db).await {
                 emit_log("WARN", "bridge", &format!("vault migration: {e}"));
             }
 
-            let vault = match moltis_gateway::auth::moltis_vault::Vault::new(db_pool.clone()).await
-            {
+            let vault = match moltis_gateway::auth::moltis_vault::Vault::new(db.clone()).await {
                 Ok(vault) => Some(Arc::new(vault)),
                 Err(e) => {
                     emit_log("WARN", "bridge", &format!("vault init failed: {e}"));
@@ -106,7 +96,7 @@ impl BridgeState {
             };
 
             match moltis_gateway::auth::CredentialStore::with_vault(
-                db_pool.clone(),
+                db.clone(),
                 &moltis_config::discover_and_load().auth,
                 vault,
             )

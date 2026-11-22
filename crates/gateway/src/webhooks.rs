@@ -503,9 +503,9 @@ mod tests {
 
     use super::*;
 
-    async fn test_vault(pool: SqlitePool) -> Arc<moltis_vault::Vault> {
+    async fn test_vault(db: moltis_db::Db) -> Arc<moltis_vault::Vault> {
         moltis_db::execute!(
-            &moltis_db::Db::from(pool.clone()),
+            &db,
             "CREATE TABLE IF NOT EXISTS vault_metadata (
                 id                   INTEGER PRIMARY KEY CHECK (id = 1),
                 version              INTEGER NOT NULL DEFAULT 1,
@@ -520,23 +520,24 @@ mod tests {
         )
         .unwrap();
 
-        let vault = Arc::new(moltis_vault::Vault::new(pool).await.unwrap());
+        let vault = Arc::new(moltis_vault::Vault::new(db).await.unwrap());
         vault.initialize("test-password").await.unwrap();
         vault
     }
 
     async fn make_store() -> (
         Arc<dyn WebhookStore>,
-        Arc<moltis_webhooks::store::SqliteWebhookStore>,
+        Arc<moltis_webhooks::store::DbWebhookStore>,
         Arc<moltis_vault::Vault>,
     ) {
         crate::vault_lifecycle::set_vault_encryption_runtime_enabled(true);
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        moltis_webhooks::run_migrations(&pool).await.unwrap();
-        let raw = Arc::new(moltis_webhooks::store::SqliteWebhookStore::with_pool(
-            pool.clone(),
+        let db = moltis_db::Db::from(pool);
+        moltis_webhooks::run_migrations(&db).await.unwrap();
+        let raw = Arc::new(moltis_webhooks::store::DbWebhookStore::with_pool(
+            db.clone(),
         ));
-        let vault = test_vault(pool).await;
+        let vault = test_vault(db).await;
         let wrapped: Arc<dyn WebhookStore> =
             Arc::new(VaultWebhookStore::new(raw.clone(), Some(vault.clone())));
         (wrapped, raw, vault)

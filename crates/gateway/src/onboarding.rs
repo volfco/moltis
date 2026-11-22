@@ -10,7 +10,7 @@ use crate::services::{OnboardingService, ServiceError, ServiceResult};
 pub struct GatewayOnboardingService {
     inner: moltis_onboarding::service::LiveOnboardingService,
     #[cfg_attr(not(feature = "openclaw-import"), allow(dead_code))]
-    session_metadata: Arc<moltis_sessions::metadata::SqliteSessionMetadata>,
+    session_metadata: Arc<moltis_sessions::metadata::DbSessionMetadata>,
     #[cfg_attr(not(feature = "openclaw-import"), allow(dead_code))]
     agent_persona_store: Arc<crate::agent_persona::AgentPersonaStore>,
     gateway_state: Arc<tokio::sync::OnceCell<Arc<crate::state::GatewayState>>>,
@@ -19,7 +19,7 @@ pub struct GatewayOnboardingService {
 impl GatewayOnboardingService {
     pub fn new(
         inner: moltis_onboarding::service::LiveOnboardingService,
-        session_metadata: Arc<moltis_sessions::metadata::SqliteSessionMetadata>,
+        session_metadata: Arc<moltis_sessions::metadata::DbSessionMetadata>,
         agent_persona_store: Arc<crate::agent_persona::AgentPersonaStore>,
         gateway_state: Arc<tokio::sync::OnceCell<Arc<crate::state::GatewayState>>>,
     ) -> Self {
@@ -741,16 +741,17 @@ mod tests {
         .unwrap();
 
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let db = moltis_db::Db::from(pool);
         moltis_db::execute!(
-            &moltis_db::Db::from(pool.clone()),
+            &db,
             "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY)"
         )
         .unwrap();
-        moltis_sessions::metadata::SqliteSessionMetadata::init(&pool)
+        moltis_sessions::metadata::DbSessionMetadata::init(&db)
             .await
             .unwrap();
         moltis_db::execute!(
-            &moltis_db::Db::from(pool.clone()),
+            &db,
             r#"CREATE TABLE IF NOT EXISTS agents (
                 id          TEXT PRIMARY KEY,
                 name        TEXT NOT NULL,
@@ -766,12 +767,10 @@ mod tests {
 
         let service = GatewayOnboardingService::new(
             moltis_onboarding::service::LiveOnboardingService::new(dir.path().join("moltis.toml")),
-            Arc::new(moltis_sessions::metadata::SqliteSessionMetadata::new(
-                pool.clone(),
+            Arc::new(moltis_sessions::metadata::DbSessionMetadata::new(
+                db.clone(),
             )),
-            Arc::new(crate::agent_persona::AgentPersonaStore::new(
-                moltis_db::Db::from(pool),
-            )),
+            Arc::new(crate::agent_persona::AgentPersonaStore::new(db)),
             Arc::new(tokio::sync::OnceCell::new()),
         );
 
