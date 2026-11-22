@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use {
     secrecy::ExposeSecret,
-    tracing::{info, warn},
+    tracing::{error, info, warn},
 };
 
 use super::helpers::{ensure_ollama_model, env_value_with_overrides};
@@ -242,10 +242,14 @@ pub(crate) async fn init_memory_system(
                 .await;
             },
             Err(e) => {
-                warn!(
-                    "memory: postgres backend unavailable ({e:#}), falling back to built-in \
-                     SQLite backend (memory will be stored in memory.db, not PostgreSQL)"
+                // Never fall back to SQLite here: a deployment runs on one
+                // database engine. Falling back would silently write memory to
+                // a database the operator did not choose.
+                error!(
+                    "memory: postgres backend unavailable ({e:#}); memory is disabled. \
+                     Fix the connection or switch memory.backend back to \"builtin\"."
                 );
+                return None;
             },
         }
     }
