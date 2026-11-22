@@ -435,3 +435,148 @@ fn public_key_fingerprint_rejects_malformed_keys() {
     let too_short = base64::engine::general_purpose::STANDARD.encode([1u8; 31]);
     assert!(public_key_fingerprint(&too_short).is_err());
 }
+
+// ── Expiry boundary regression tests ────────────────────────────────────────
+
+#[test]
+fn expiry_boundary_counts_as_expired() {
+    use super::expiry::is_expired_at;
+
+    let boundary = "2030-01-01T00:00:00Z";
+    let at = |s: &str| {
+        time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).unwrap()
+    };
+    let boundary_at = at(boundary);
+
+    // The exact expiry instant is expired; one nanosecond earlier is not.
+    assert!(!is_expired_at(
+        boundary,
+        boundary_at - time::Duration::NANOSECOND
+    ));
+    assert!(is_expired_at(boundary, boundary_at));
+    assert!(is_expired_at(
+        boundary,
+        boundary_at + time::Duration::NANOSECOND
+    ));
+
+    // Legacy DB timestamps share the same boundary at second granularity.
+    assert!(!is_expired_at(
+        "2030-01-01 00:00:00",
+        boundary_at - time::Duration::SECOND
+    ));
+    assert!(is_expired_at("2030-01-01 00:00:00", boundary_at));
+}
+
+#[test]
+fn expiry_boundary_handles_fractional_rfc3339() {
+    use super::expiry::is_expired_at;
+
+    // Lexicographic string comparison wrongly treats "…00Z" as later than
+    // "…00.1Z"; instant comparison must not.
+    let expires = "2030-01-01T00:05:00Z";
+    let now = time::OffsetDateTime::parse(
+        "2030-01-01T00:05:00.1Z",
+        &time::format_description::well_known::Rfc3339,
+    )
+    .unwrap();
+    assert!(is_expired_at(expires, now));
+}
+
+#[tokio::test]
+async fn expired_request_cannot_be_approved() {
+    let db = test_db().await;
+    let store = PairingStore::new(db.clone());
+
+    let req = store
+        .request_pair("dev-expired-approve", None, "linux", None)
+        .await
+        .unwrap();
+    moltis_db::execute!(
+        &db,
+        "UPDATE pair_requests SET expires_at = ? WHERE id = ?",
+        "2000-01-01T00:00:00Z",
+        &req.id,
+    )
+    .unwrap();
+
+    let result = store.approve(&req.id).await;
+    assert!(matches!(result, Err(Error::PairRequestExpired)));
+    assert_eq!(
+        store.get_pair_status(&req.id).await.unwrap(),
+        Some(PairStatus::Expired)
+    );
+    assert!(store.list_devices().await.unwrap().is_empty());
+    assert!(
+        store
+            .list_device_tokens("dev-expired-approve")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn pending_and_evict_agree_on_expiry_boundary() {
+    let db = test_db().await;
+    let store = PairingStore::new(db.clone());
+
+    let req = store
+        .request_pair("dev-boundary", None, "test", None)
+        .await
+        .unwrap();
+    let boundary = "2030-01-01T00:00:00Z";
+    moltis_db::execute!(
+        &db,
+        "UPDATE pair_requests SET expires_at = ? WHERE id = ?",
+        boundary,
+        &req.id,
+    )
+    .unwrap();
+
+    // One second before expiry the request is still pending.
+    assert_eq!(
+        store
+            .list_pending_at("2029-12-31T23:59:59Z")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // At the exact expiry instant it is already expired everywhere.
+    assert!(store.list_pending_at(boundary).await.unwrap().is_empty());
+    assert_eq!(store.evict_expired_at(boundary).await.unwrap(), 1);
+    assert_eq!(
+        store.get_pair_status(&req.id).await.unwrap(),
+        Some(PairStatus::Expired)
+    );
+}
+
+#[tokio::test]
+async fn pairing_state_approve_enforces_expiry_boundary() {
+    let mut state = PairingState::new();
+    let at = |s: &str| {
+        time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).unwrap()
+    };
+
+    // Exactly at expiry the request is rejected and consumed as expired.
+    let req = state.request_pair("dev-state", None, "linux", None);
+    let expires = at(&req.expires_at);
+    assert!(matches!(
+        state.approve_at(&req.id, expires),
+        Err(Error::PairRequestExpired)
+    ));
+    assert!(matches!(
+        state.approve_at(&req.id, expires),
+        Err(Error::PairRequestNotPending(PairStatus::Expired))
+    ));
+
+    // One nanosecond before expiry it is still approvable.
+    let req2 = state.request_pair("dev-state-2", None, "linux", None);
+    let expires2 = at(&req2.expires_at);
+    assert!(
+        state
+            .approve_at(&req2.id, expires2 - time::Duration::NANOSECOND)
+            .is_ok()
+    );
+}

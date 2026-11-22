@@ -5,7 +5,7 @@ use std::time::Duration;
 use time::OffsetDateTime;
 
 use super::{
-    expiry::{current_epoch_ms, format_datetime},
+    expiry::{current_epoch_ms, format_datetime, is_expired_at},
     types::{DeviceToken, Error, PairRequest, PairStatus, Result},
 };
 
@@ -60,14 +60,20 @@ impl PairingState {
     }
 
     pub fn list_pending(&self) -> Vec<&PairRequest> {
-        let now = format_datetime(OffsetDateTime::now_utc());
+        let now = OffsetDateTime::now_utc();
         self.pending
             .values()
-            .filter(|r| r.status == PairStatus::Pending && r.expires_at > now)
+            .filter(|r| r.status == PairStatus::Pending && !is_expired_at(&r.expires_at, now))
             .collect()
     }
 
     pub fn approve(&mut self, pair_id: &str) -> Result<DeviceToken> {
+        self.approve_at(pair_id, OffsetDateTime::now_utc())
+    }
+
+    /// pub(crate) so tests can pin the expiry-boundary semantics with a fixed
+    /// `now` (mirrors [`super::PairingStore::list_pending_at`]).
+    pub(crate) fn approve_at(&mut self, pair_id: &str, now: OffsetDateTime) -> Result<DeviceToken> {
         let req = self
             .pending
             .get_mut(pair_id)
@@ -75,8 +81,7 @@ impl PairingState {
         if req.status != PairStatus::Pending {
             return Err(Error::PairRequestNotPending(req.status));
         }
-        let now = format_datetime(OffsetDateTime::now_utc());
-        if req.expires_at <= now {
+        if is_expired_at(&req.expires_at, now) {
             req.status = PairStatus::Expired;
             return Err(Error::PairRequestExpired);
         }
@@ -166,8 +171,8 @@ impl PairingState {
     }
 
     pub fn evict_expired(&mut self) {
-        let now = format_datetime(OffsetDateTime::now_utc());
+        let now = OffsetDateTime::now_utc();
         self.pending
-            .retain(|_, r| !(r.status == PairStatus::Pending && r.expires_at <= now));
+            .retain(|_, r| !(r.status == PairStatus::Pending && is_expired_at(&r.expires_at, now)));
     }
 }
