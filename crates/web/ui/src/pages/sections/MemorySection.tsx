@@ -211,7 +211,7 @@ export function MemorySection(): VNode {
 									memStatus.backend_type === "zvec"
 										? "var(--accent)"
 										: memStatus.backend_type === "qmd"
-											? "var(--warning)"
+											? "var(--warn)"
 											: "var(--surface)",
 								color:
 									memStatus.backend_type === "zvec" || memStatus.backend_type === "qmd" ? "var(--bg)" : "var(--text)",
@@ -259,15 +259,15 @@ export function MemorySection(): VNode {
 			{memStatus?.pgvector ? (
 				<div
 					className={`max-w-[600px] rounded-md border px-4 py-3 text-xs ${
-						memStatus.pgvector.available ? "border-[var(--border)]" : "border-[var(--warning)]"
+						memStatus.pgvector.available ? "border-[var(--border)]" : "border-[var(--warn)]"
 					}`}
 				>
 					<span className="text-[var(--muted)]">pgvector:</span>{" "}
 					{memStatus.pgvector.available ? (
 						<span className="font-semibold text-[var(--text)]">available</span>
 					) : (
-						<span className="font-semibold text-[var(--warning)]">
-							missing — run CREATE EXTENSION vector as superuser
+						<span className="font-semibold text-[var(--warn)]">
+							missing — run as superuser: {memStatus.pgvector.action}
 						</span>
 					)}
 				</div>
