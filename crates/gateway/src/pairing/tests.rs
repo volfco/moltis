@@ -794,3 +794,121 @@ async fn tampered_or_truncated_token_is_rejected() {
             .is_none()
     );
 }
+
+// ── Expiry-guarded consume regression tests ─────────────────────────────────
+
+/// Push a pair request's expiry into the past via SQL (test setup).
+async fn expire_request(db: &Db, pair_id: &str) {
+    moltis_db::execute!(
+        db,
+        "UPDATE pair_requests SET expires_at = ? WHERE id = ?",
+        "2000-01-01T00:00:00Z",
+        pair_id,
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn expired_approve_races_match_sequential_errors() {
+    let db = test_db().await;
+    let store = PairingStore::new(db.clone());
+
+    // Sequential error pair: first approve marks the request expired, the
+    // second observes it.
+    let req = store
+        .request_pair("dev-exp-seq", None, "linux", None)
+        .await
+        .unwrap();
+    expire_request(&db, &req.id).await;
+    assert!(matches!(
+        store.approve(&req.id).await,
+        Err(Error::PairRequestExpired)
+    ));
+    assert!(matches!(
+        store.approve(&req.id).await,
+        Err(Error::PairRequestNotPending(PairStatus::Expired))
+    ));
+
+    // Racing approves on an expired request must produce exactly the same
+    // errors, and never a token.
+    let req2 = store
+        .request_pair("dev-exp-race", None, "linux", None)
+        .await
+        .unwrap();
+    expire_request(&db, &req2.id).await;
+    let (a, b) = tokio::join!(store.approve(&req2.id), store.approve(&req2.id));
+    let errs = [a.unwrap_err(), b.unwrap_err()];
+    let expired = errs
+        .iter()
+        .filter(|e| matches!(e, Error::PairRequestExpired))
+        .count();
+    let not_pending = errs
+        .iter()
+        .filter(|e| matches!(e, Error::PairRequestNotPending(PairStatus::Expired)))
+        .count();
+    assert_eq!((expired, not_pending), (1, 1));
+    assert!(store.list_devices().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn concurrent_approve_reject_on_expired_request_matches_sequential() {
+    let db = test_db().await;
+    let store = PairingStore::new(db.clone());
+
+    let req = store
+        .request_pair("dev-exp-ar", None, "linux", None)
+        .await
+        .unwrap();
+    expire_request(&db, &req.id).await;
+
+    let (approved, rejected) = tokio::join!(store.approve(&req.id), store.reject(&req.id));
+
+    // Whichever transition lands first, the outcome pair equals one of the two
+    // sequential orders (approve-then-reject or reject-then-approve).
+    match (approved, rejected) {
+        (Err(Error::PairRequestExpired), Err(e)) => {
+            assert!(matches!(
+                e,
+                Error::PairRequestNotPending(PairStatus::Expired)
+            ));
+        },
+        (Err(e), Ok(())) => {
+            assert!(matches!(
+                e,
+                Error::PairRequestNotPending(PairStatus::Rejected)
+            ));
+        },
+        other => panic!("unexpected outcome: {other:?}"),
+    }
+    assert!(store.list_devices().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn approve_fails_closed_on_malformed_expiry() {
+    let db = test_db().await;
+    let store = PairingStore::new(db.clone());
+
+    let req = store
+        .request_pair("dev-exp-malformed", None, "linux", None)
+        .await
+        .unwrap();
+    moltis_db::execute!(
+        &db,
+        "UPDATE pair_requests SET expires_at = ? WHERE id = ?",
+        "not-a-datetime",
+        &req.id,
+    )
+    .unwrap();
+
+    // The SQL expiry predicate treats unparsable timestamps as NULL, so the
+    // consume refuses the row: garbage expiry must never mint a token.
+    assert!(store.approve(&req.id).await.is_err());
+    assert!(store.list_devices().await.unwrap().is_empty());
+    assert!(
+        store
+            .list_device_tokens("dev-exp-malformed")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

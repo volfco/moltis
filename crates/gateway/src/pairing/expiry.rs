@@ -41,10 +41,6 @@ pub(super) fn expired_expiry_sql(dialect: Dialect) -> &'static str {
     }
 }
 
-pub(super) fn is_expired(expires_at: &str) -> bool {
-    is_expired_at(expires_at, OffsetDateTime::now_utc())
-}
-
 /// Whether `expires_at` lies at or before `now`. The exact expiry instant
 /// counts as expired, matching [`expired_expiry_sql`] (`<=`) and the in-memory
 /// `PairingState` semantics.

@@ -10,7 +10,7 @@ use {
 use super::{
     crypto::{generate_token, sha256_hex},
     expiry::{
-        current_epoch_ms, expired_expiry_sql, format_datetime, is_expired, pending_expiry_sql,
+        current_epoch_ms, expired_expiry_sql, format_datetime, is_expired_at, pending_expiry_sql,
     },
     types::{
         DeviceToken, DeviceTokenEntry, DeviceTokenVerification, Error, KeyPinningResult,
@@ -153,22 +153,43 @@ impl PairingStore {
             return Err(Error::PairRequestNotPending(current_status));
         }
 
-        // Check expiry.
-        if is_expired(&expires_at) {
-            execute!(
+        // Sample `now` once: the Rust check and the SQL transitions below share
+        // one expiry view.
+        let now = OffsetDateTime::now_utc();
+        let now_str = format_datetime(now);
+
+        // Check expiry, then mark the request expired. Both this write and the
+        // consume below carry the expiry predicate in SQL so a request crossing
+        // the boundary mid-flight cannot slip through.
+        if is_expired_at(&expires_at, now) {
+            let marked = execute!(
                 &self.db,
-                "UPDATE pair_requests SET status = 'expired' WHERE id = ? AND status = 'pending'",
+                format!(
+                    "UPDATE pair_requests SET status = 'expired'
+                     WHERE id = ? AND status = 'pending' AND {}",
+                    expired_expiry_sql(self.db.dialect()),
+                ),
                 pair_id,
+                &now_str,
             )?;
-            return Err(Error::PairRequestExpired);
+            return if marked > 0 {
+                Err(Error::PairRequestExpired)
+            } else {
+                Err(self.consume_error(pair_id).await)
+            };
         }
 
         // Atomically consume the pending request so concurrent approve/reject
         // calls cannot both succeed and issue duplicate tokens.
         let consumed = execute!(
             &self.db,
-            "UPDATE pair_requests SET status = 'approved' WHERE id = ? AND status = 'pending'",
+            format!(
+                "UPDATE pair_requests SET status = 'approved'
+                 WHERE id = ? AND status = 'pending' AND {}",
+                pending_expiry_sql(self.db.dialect()),
+            ),
             pair_id,
+            &now_str,
         )?;
         if consumed == 0 {
             return Err(self.consume_error(pair_id).await);
