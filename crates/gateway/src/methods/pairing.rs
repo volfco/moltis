@@ -91,6 +91,29 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                     .unwrap_or("unknown");
                 let public_key = ctx.params.get("publicKey").and_then(|v| v.as_str());
 
+                // Identity hygiene: reject empty identities and malformed keys
+                // at request time (the untrusted WS path already refuses them).
+                if device_id.trim().is_empty() {
+                    return Err(ErrorShape::new(
+                        error_codes::INVALID_REQUEST,
+                        "deviceId must not be empty",
+                    ));
+                }
+                if platform.trim().is_empty() {
+                    return Err(ErrorShape::new(
+                        error_codes::INVALID_REQUEST,
+                        "platform must not be empty",
+                    ));
+                }
+                if let Some(pk) = public_key
+                    && crate::pairing::public_key_fingerprint(pk).is_err()
+                {
+                    return Err(ErrorShape::new(
+                        error_codes::INVALID_REQUEST,
+                        "publicKey is not a valid Ed25519 public key",
+                    ));
+                }
+
                 let (id, nonce, device_id_out, display_name_out, platform_out) =
                     if let Some(store) = get_pairing_store(&ctx.state) {
                         let req = store
@@ -665,6 +688,24 @@ mod tests {
             .await
     }
 
+    async fn dispatch_pair_request(
+        state: std::sync::Arc<GatewayState>,
+        params: serde_json::Value,
+    ) -> ResponseFrame {
+        MethodRegistry::new()
+            .dispatch(MethodContext {
+                request_id: String::from("test"),
+                method: String::from("node.pair.request"),
+                params,
+                client_conn_id: String::from("conn-1"),
+                client_role: String::from("operator"),
+                client_scopes: vec![String::from("operator.pairing")],
+                state,
+                channel: None,
+            })
+            .await
+    }
+
     fn assert_invalid_request(response: &ResponseFrame) {
         assert!(!response.ok);
         assert_eq!(
@@ -865,5 +906,60 @@ mod tests {
         let response = dispatch_pair_verify(state, signed_params(&request, &signing_key)).await;
 
         assert_invalid_request(&response);
+    }
+
+    // ── Request-time input validation ─────────────────────────────
+
+    #[tokio::test]
+    async fn pair_request_rejects_empty_device_id() {
+        let state = test_state();
+        let response = dispatch_pair_request(
+            state,
+            serde_json::json!({ "deviceId": "  ", "platform": "linux" }),
+        )
+        .await;
+        assert_invalid_request(&response);
+    }
+
+    #[tokio::test]
+    async fn pair_request_rejects_blank_platform() {
+        let state = test_state();
+        let response = dispatch_pair_request(
+            state,
+            serde_json::json!({ "deviceId": "n1", "platform": "" }),
+        )
+        .await;
+        assert_invalid_request(&response);
+    }
+
+    #[tokio::test]
+    async fn pair_request_rejects_malformed_public_key() {
+        let state = test_state();
+        let response = dispatch_pair_request(
+            state,
+            serde_json::json!({
+                "deviceId": "n2",
+                "platform": "linux",
+                "publicKey": "not base64",
+            }),
+        )
+        .await;
+        assert_invalid_request(&response);
+    }
+
+    #[tokio::test]
+    async fn pair_request_accepts_valid_input() {
+        let state = test_state();
+        let signing_key = SigningKey::from_bytes(&[7; 32]);
+        let response = dispatch_pair_request(
+            state,
+            serde_json::json!({
+                "deviceId": "n3",
+                "platform": "linux",
+                "publicKey": public_key(&signing_key),
+            }),
+        )
+        .await;
+        assert!(response.ok, "unexpected error: {:?}", response.error);
     }
 }
