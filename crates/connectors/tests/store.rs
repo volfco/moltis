@@ -1,28 +1,117 @@
 use {
     moltis_connectors::{
         AccountCreate, AccountUpdate, ConnectorError, ConnectorItemInput, ConnectorKind,
-        ConnectorReader, Dataset, DatasetCreate, DatasetUpdate, ItemQuery, MAX_QUERY_LIMIT,
-        ProjectionConfig, SnapshotResult, SourceDisposition, SourceObservation,
-        SqliteConnectorStore, SyncRunStatus, run_migrations,
+        ConnectorReader, Dataset, DatasetCreate, DatasetUpdate, DbConnectorStore, ItemQuery,
+        MAX_QUERY_LIMIT, ProjectionConfig, SnapshotResult, SourceDisposition, SourceObservation,
+        SyncRunStatus, run_migrations,
     },
+    moltis_db::{Db, DbOptions},
     serde_json::json,
-    sqlx::sqlite::SqlitePoolOptions,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-async fn store() -> TestResult<SqliteConnectorStore> {
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await?;
-    run_migrations(&pool).await?;
-    Ok(SqliteConnectorStore::new(pool))
+/// Engine a test case runs against.
+enum Backend {
+    Sqlite,
+    Postgres,
 }
 
-#[tokio::test]
-async fn provider_reader_never_crosses_connector_kinds() -> TestResult {
-    let store = store().await?;
+/// Serializes PostgreSQL tests: they share one database, so they must not
+/// reset the schema while another test is mid-flight. Postgres suites must
+/// run one crate per process: this lock is per-process and the suites share
+/// `_sqlx_migrations`.
+fn pg_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    &LOCK
+}
+
+/// Fresh store with a migrated schema. Skips (returns `None`) only when
+/// `TEST_POSTGRES_URL` is unset for [`Backend::Postgres`]; when it is set,
+/// connect/reset/migration failures panic so a broken harness cannot pass
+/// green. The caller must hold [`pg_lock`] for [`Backend::Postgres`].
+async fn store(backend: Backend) -> Option<DbConnectorStore> {
+    let db = match backend {
+        Backend::Sqlite => Db::connect(&DbOptions::sqlite(":memory:", 1))
+            .await
+            .unwrap_or_else(|error| panic!("sqlite test db connect failed: {error}")),
+        Backend::Postgres => {
+            let Ok(url) = std::env::var("TEST_POSTGRES_URL") else {
+                return None;
+            };
+            let db = Db::connect(&DbOptions::postgres(url, 2))
+                .await
+                .unwrap_or_else(|error| panic!("postgres test db connect failed: {error}"));
+            // Dropping sqlx's history is required: with it in place the
+            // migrator believes this version is already applied and creates
+            // nothing.
+            moltis_db::execute!(
+                &db,
+                "DROP TABLE IF EXISTS connector_source_states, connector_items_fts, \
+                 connector_items, connector_sync_runs, connector_datasets, \
+                 connector_accounts, _sqlx_migrations CASCADE"
+            )
+            .unwrap_or_else(|error| panic!("postgres test reset failed: {error}"));
+            db
+        },
+    };
+    run_migrations(&db)
+        .await
+        .unwrap_or_else(|error| panic!("connector test migrations failed: {error}"));
+    Some(DbConnectorStore::new(db))
+}
+
+/// RAISE-based failure-injection trigger; DDL is dialect-shaped.
+async fn create_reject_trigger(
+    store: &DbConnectorStore,
+    name: &str,
+    table: &str,
+    event: &str,
+    when: Option<&str>,
+) -> TestResult {
+    let db = store.pool();
+    if db.is_postgres() {
+        moltis_db::execute!(
+            db,
+            "CREATE OR REPLACE FUNCTION moltis_test_reject() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'rejected'; END; $$",
+        )?;
+        let when = when
+            .map(|clause| format!(" WHEN ({clause})"))
+            .unwrap_or_default();
+        moltis_db::execute!(
+            db,
+            &format!(
+                "CREATE TRIGGER {name} BEFORE {event} ON {table} FOR EACH ROW{when} EXECUTE FUNCTION moltis_test_reject()"
+            ),
+        )?;
+    } else {
+        let when = when
+            .map(|clause| format!(" WHEN {clause}"))
+            .unwrap_or_default();
+        moltis_db::execute!(
+            db,
+            &format!(
+                "CREATE TRIGGER {name} BEFORE {event} ON {table}{when} BEGIN SELECT RAISE(ABORT, 'rejected'); END"
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+async fn drop_reject_trigger(store: &DbConnectorStore, name: &str, table: &str) -> TestResult {
+    let db = store.pool();
+    if db.is_postgres() {
+        moltis_db::execute!(db, &format!("DROP TRIGGER IF EXISTS {name} ON {table}"))?;
+    } else {
+        moltis_db::execute!(db, &format!("DROP TRIGGER {name}"))?;
+    }
+    Ok(())
+}
+
+async fn provider_reader_never_crosses_connector_kinds_case(
+    store: &DbConnectorStore,
+) -> TestResult {
     let gmail_account = store
         .create_account(AccountCreate {
             kind: ConnectorKind::Gmail,
@@ -95,7 +184,7 @@ async fn provider_reader_never_crosses_connector_kinds() -> TestResult {
     Ok(())
 }
 
-async fn create_dataset(store: &SqliteConnectorStore) -> TestResult<Dataset> {
+async fn create_dataset(store: &DbConnectorStore) -> TestResult<Dataset> {
     let account = store
         .create_account(AccountCreate {
             kind: ConnectorKind::Caldav,
@@ -150,9 +239,9 @@ fn observation(
     }
 }
 
-#[tokio::test]
-async fn account_config_change_bumps_every_owned_dataset_plan() -> TestResult {
-    let store = store().await?;
+async fn account_config_change_bumps_every_owned_dataset_plan_case(
+    store: &DbConnectorStore,
+) -> TestResult {
     let first = create_dataset(&store).await?;
     let second = store
         .create_dataset(DatasetCreate {
@@ -206,9 +295,9 @@ async fn account_config_change_bumps_every_owned_dataset_plan() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn account_name_and_enabled_changes_do_not_bump_dataset_plan() -> TestResult {
-    let store = store().await?;
+async fn account_name_and_enabled_changes_do_not_bump_dataset_plan_case(
+    store: &DbConnectorStore,
+) -> TestResult {
     let dataset = create_dataset(&store).await?;
     let account = store
         .get_account(&dataset.account_id)
@@ -235,9 +324,9 @@ async fn account_name_and_enabled_changes_do_not_bump_dataset_plan() -> TestResu
     Ok(())
 }
 
-#[tokio::test]
-async fn account_source_key_round_trips_and_is_looked_up_by_kind() -> TestResult {
-    let store = store().await?;
+async fn account_source_key_round_trips_and_is_looked_up_by_kind_case(
+    store: &DbConnectorStore,
+) -> TestResult {
     let account = store
         .create_account(AccountCreate {
             kind: ConnectorKind::Caldav,
@@ -267,9 +356,7 @@ async fn account_source_key_round_trips_and_is_looked_up_by_kind() -> TestResult
     Ok(())
 }
 
-#[tokio::test]
-async fn account_source_key_is_unique_within_kind() -> TestResult {
-    let store = store().await?;
+async fn account_source_key_is_unique_within_kind_case(store: &DbConnectorStore) -> TestResult {
     let source_key = "vault:calendar:shared";
     store
         .create_account(AccountCreate {
@@ -296,20 +383,19 @@ async fn account_source_key_is_unique_within_kind() -> TestResult {
             if error.is_unique_violation()
     ));
 
-    sqlx::query(
+    moltis_db::execute!(
+        store.pool(),
         "INSERT INTO connector_accounts \
          (id, kind, source_key, name, config, enabled, created_at, updated_at) \
-         VALUES ('other-kind', 'other', ?, 'Other', '{}', 1, 0, 0)",
-    )
-    .bind(source_key)
-    .execute(store.pool())
-    .await?;
+         VALUES ('other-kind', 'other', ?, 'Other', '{}', TRUE, 0, 0)",
+        source_key,
+    )?;
     Ok(())
 }
 
-#[tokio::test]
-async fn account_source_key_can_be_adopted_and_survives_account_update() -> TestResult {
-    let store = store().await?;
+async fn account_source_key_can_be_adopted_and_survives_account_update_case(
+    store: &DbConnectorStore,
+) -> TestResult {
     let account = store
         .create_account(AccountCreate {
             kind: ConnectorKind::Caldav,
@@ -360,9 +446,7 @@ async fn account_source_key_can_be_adopted_and_survives_account_update() -> Test
     Ok(())
 }
 
-#[tokio::test]
-async fn account_source_keys_are_validated() -> TestResult {
-    let store = store().await?;
+async fn account_source_keys_are_validated_case(store: &DbConnectorStore) -> TestResult {
     for source_key in ["", "   ", &"x".repeat(1025)] {
         let result = store
             .create_account(AccountCreate {
@@ -394,19 +478,21 @@ async fn account_source_keys_are_validated() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn account_update_rolls_back_when_dataset_plan_bump_fails() -> TestResult {
-    let store = store().await?;
+async fn account_update_rolls_back_when_dataset_plan_bump_fails_case(
+    store: &DbConnectorStore,
+) -> TestResult {
     let dataset = create_dataset(&store).await?;
     let account = store
         .get_account(&dataset.account_id)
         .await?
         .ok_or("account missing")?;
-    sqlx::query(
-        "CREATE TRIGGER reject_account_plan_bump BEFORE UPDATE OF plan_revision \
-         ON connector_datasets BEGIN SELECT RAISE(ABORT, 'rejected'); END",
+    create_reject_trigger(
+        store,
+        "reject_account_plan_bump",
+        "connector_datasets",
+        "UPDATE OF plan_revision",
+        None,
     )
-    .execute(store.pool())
     .await?;
 
     let result = store
@@ -452,9 +538,7 @@ fn connector_kind_conversions_and_serde() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn account_and_dataset_crud_and_cascade() -> TestResult {
-    let store = store().await?;
+async fn account_and_dataset_crud_and_cascade_case(store: &DbConnectorStore) -> TestResult {
     let account = store
         .create_account(AccountCreate {
             kind: ConnectorKind::Caldav,
@@ -545,9 +629,9 @@ async fn account_and_dataset_crud_and_cascade() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn incomplete_snapshot_does_not_delete_and_complete_snapshot_does() -> TestResult {
-    let store = store().await?;
+async fn incomplete_snapshot_does_not_delete_and_complete_snapshot_does_case(
+    store: &DbConnectorStore,
+) -> TestResult {
     let dataset = create_dataset(&store).await?;
     let first = vec![item("a", "1", "A"), item("b", "1", "B")];
     let observed = vec!["a".to_owned(), "b".to_owned()];
@@ -590,9 +674,9 @@ async fn incomplete_snapshot_does_not_delete_and_complete_snapshot_does() -> Tes
     Ok(())
 }
 
-#[tokio::test]
-async fn source_states_track_included_and_filtered_transitions() -> TestResult {
-    let store = store().await?;
+async fn source_states_track_included_and_filtered_transitions_case(
+    store: &DbConnectorStore,
+) -> TestResult {
     let dataset = create_dataset(&store).await?;
     let run = store.start_sync_run(&dataset.id).await?;
     store
@@ -653,15 +737,15 @@ async fn source_states_track_included_and_filtered_transitions() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn snapshot_failure_rolls_back_prior_upserts() -> TestResult {
-    let store = store().await?;
+async fn snapshot_failure_rolls_back_prior_upserts_case(store: &DbConnectorStore) -> TestResult {
     let dataset = create_dataset(&store).await?;
-    sqlx::query(
-        "CREATE TRIGGER reject_bad_item BEFORE INSERT ON connector_items \
-         WHEN NEW.remote_id = 'bad' BEGIN SELECT RAISE(ABORT, 'rejected'); END",
+    create_reject_trigger(
+        store,
+        "reject_bad_item",
+        "connector_items",
+        "INSERT",
+        Some("NEW.remote_id = 'bad'"),
     )
-    .execute(store.pool())
     .await?;
 
     let result = store
@@ -683,9 +767,7 @@ async fn snapshot_failure_rolls_back_prior_upserts() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn sync_run_history_tracks_success_and_failure() -> TestResult {
-    let store = store().await?;
+async fn sync_run_history_tracks_success_and_failure_case(store: &DbConnectorStore) -> TestResult {
     let dataset = create_dataset(&store).await?;
     let successful = store.start_sync_run(&dataset.id).await?;
     let successful = store
@@ -729,9 +811,9 @@ async fn sync_run_history_tracks_success_and_failure() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn interrupted_sync_runs_are_failed_and_exposed_on_the_dataset() -> TestResult {
-    let store = store().await?;
+async fn interrupted_sync_runs_are_failed_and_exposed_on_the_dataset_case(
+    store: &DbConnectorStore,
+) -> TestResult {
     let dataset = create_dataset(&store).await?;
     let running = store.start_sync_run(&dataset.id).await?;
     assert!(matches!(
@@ -762,16 +844,18 @@ async fn interrupted_sync_runs_are_failed_and_exposed_on_the_dataset() -> TestRe
     Ok(())
 }
 
-#[tokio::test]
-async fn sync_snapshot_and_run_completion_commit_atomically() -> TestResult {
-    let store = store().await?;
+async fn sync_snapshot_and_run_completion_commit_atomically_case(
+    store: &DbConnectorStore,
+) -> TestResult {
     let dataset = create_dataset(&store).await?;
     let run = store.start_sync_run(&dataset.id).await?;
-    sqlx::query(
-        "CREATE TRIGGER reject_sync_finish BEFORE UPDATE ON connector_sync_runs \
-         WHEN NEW.status = 'succeeded' BEGIN SELECT RAISE(ABORT, 'rejected'); END",
+    create_reject_trigger(
+        store,
+        "reject_sync_finish",
+        "connector_sync_runs",
+        "UPDATE",
+        Some("NEW.status = 'succeeded'"),
     )
-    .execute(store.pool())
     .await?;
 
     let result = store
@@ -804,9 +888,7 @@ async fn sync_snapshot_and_run_completion_commit_atomically() -> TestResult {
             .is_none()
     );
 
-    sqlx::query("DROP TRIGGER reject_sync_finish")
-        .execute(store.pool())
-        .await?;
+    drop_reject_trigger(store, "reject_sync_finish", "connector_sync_runs").await?;
     let (stats, completed) = store
         .commit_sync_snapshot(
             &run.id,
@@ -837,16 +919,16 @@ async fn sync_snapshot_and_run_completion_commit_atomically() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn failed_run_and_reschedule_commit_atomically() -> TestResult {
-    let store = store().await?;
+async fn failed_run_and_reschedule_commit_atomically_case(store: &DbConnectorStore) -> TestResult {
     let dataset = create_dataset(&store).await?;
     let run = store.start_sync_run(&dataset.id).await?;
-    sqlx::query(
-        "CREATE TRIGGER reject_sync_error BEFORE UPDATE ON connector_datasets \
-         WHEN NEW.last_error = 'network error' BEGIN SELECT RAISE(ABORT, 'rejected'); END",
+    create_reject_trigger(
+        store,
+        "reject_sync_error",
+        "connector_datasets",
+        "UPDATE",
+        Some("NEW.last_error = 'network error'"),
     )
-    .execute(store.pool())
     .await?;
 
     let next_sync_at = time::OffsetDateTime::now_utc() + time::Duration::minutes(5);
@@ -864,9 +946,7 @@ async fn failed_run_and_reschedule_commit_atomically() -> TestResult {
         .ok_or("dataset missing")?;
     assert!(unchanged.last_error.is_none());
 
-    sqlx::query("DROP TRIGGER reject_sync_error")
-        .execute(store.pool())
-        .await?;
+    drop_reject_trigger(store, "reject_sync_error", "connector_datasets").await?;
     let failed = store
         .fail_sync_run_and_reschedule(&run.id, "network error", Some(next_sync_at))
         .await?;
@@ -883,9 +963,7 @@ async fn failed_run_and_reschedule_commit_atomically() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn item_queries_are_bounded_and_paginated() -> TestResult {
-    let store = store().await?;
+async fn item_queries_are_bounded_and_paginated_case(store: &DbConnectorStore) -> TestResult {
     let dataset = create_dataset(&store).await?;
     let items = vec![item("a", "1", "A"), item("b", "1", "B")];
     store
@@ -926,9 +1004,9 @@ async fn item_queries_are_bounded_and_paginated() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn search_is_safe_dataset_scoped_and_tracks_updates() -> TestResult {
-    let store = store().await?;
+async fn search_is_safe_dataset_scoped_and_tracks_updates_case(
+    store: &DbConnectorStore,
+) -> TestResult {
     let dataset = create_dataset(&store).await?;
     let other = create_dataset(&store).await?;
     let mut searchable = item("shared", "1", "Alice's (Q3) planning + roadmap");
@@ -1001,9 +1079,9 @@ async fn search_is_safe_dataset_scoped_and_tracks_updates() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn get_item_is_dataset_scoped_and_honors_deleted_visibility() -> TestResult {
-    let store = store().await?;
+async fn get_item_is_dataset_scoped_and_honors_deleted_visibility_case(
+    store: &DbConnectorStore,
+) -> TestResult {
     let dataset = create_dataset(&store).await?;
     let other = create_dataset(&store).await?;
     store
@@ -1029,5 +1107,195 @@ async fn get_item_is_dataset_scoped_and_honors_deleted_visibility() -> TestResul
             .await?
             .is_some_and(|item| item.deleted_at.is_some())
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_reader_never_crosses_connector_kinds() -> TestResult {
+    let Some(store) = store(Backend::Sqlite).await else {
+        panic!("sqlite store missing");
+    };
+    provider_reader_never_crosses_connector_kinds_case(&store).await
+}
+
+#[tokio::test]
+async fn account_config_change_bumps_every_owned_dataset_plan() -> TestResult {
+    let Some(store) = store(Backend::Sqlite).await else {
+        panic!("sqlite store missing");
+    };
+    account_config_change_bumps_every_owned_dataset_plan_case(&store).await
+}
+
+#[tokio::test]
+async fn account_name_and_enabled_changes_do_not_bump_dataset_plan() -> TestResult {
+    let Some(store) = store(Backend::Sqlite).await else {
+        panic!("sqlite store missing");
+    };
+    account_name_and_enabled_changes_do_not_bump_dataset_plan_case(&store).await
+}
+
+#[tokio::test]
+async fn account_source_key_round_trips_and_is_looked_up_by_kind() -> TestResult {
+    let Some(store) = store(Backend::Sqlite).await else {
+        panic!("sqlite store missing");
+    };
+    account_source_key_round_trips_and_is_looked_up_by_kind_case(&store).await
+}
+
+#[tokio::test]
+async fn account_source_key_is_unique_within_kind() -> TestResult {
+    let Some(store) = store(Backend::Sqlite).await else {
+        panic!("sqlite store missing");
+    };
+    account_source_key_is_unique_within_kind_case(&store).await
+}
+
+#[tokio::test]
+async fn account_source_key_can_be_adopted_and_survives_account_update() -> TestResult {
+    let Some(store) = store(Backend::Sqlite).await else {
+        panic!("sqlite store missing");
+    };
+    account_source_key_can_be_adopted_and_survives_account_update_case(&store).await
+}
+
+#[tokio::test]
+async fn account_source_keys_are_validated() -> TestResult {
+    let Some(store) = store(Backend::Sqlite).await else {
+        panic!("sqlite store missing");
+    };
+    account_source_keys_are_validated_case(&store).await
+}
+
+#[tokio::test]
+async fn account_update_rolls_back_when_dataset_plan_bump_fails() -> TestResult {
+    let Some(store) = store(Backend::Sqlite).await else {
+        panic!("sqlite store missing");
+    };
+    account_update_rolls_back_when_dataset_plan_bump_fails_case(&store).await
+}
+
+#[tokio::test]
+async fn account_and_dataset_crud_and_cascade() -> TestResult {
+    let Some(store) = store(Backend::Sqlite).await else {
+        panic!("sqlite store missing");
+    };
+    account_and_dataset_crud_and_cascade_case(&store).await
+}
+
+#[tokio::test]
+async fn incomplete_snapshot_does_not_delete_and_complete_snapshot_does() -> TestResult {
+    let Some(store) = store(Backend::Sqlite).await else {
+        panic!("sqlite store missing");
+    };
+    incomplete_snapshot_does_not_delete_and_complete_snapshot_does_case(&store).await
+}
+
+#[tokio::test]
+async fn source_states_track_included_and_filtered_transitions() -> TestResult {
+    let Some(store) = store(Backend::Sqlite).await else {
+        panic!("sqlite store missing");
+    };
+    source_states_track_included_and_filtered_transitions_case(&store).await
+}
+
+#[tokio::test]
+async fn snapshot_failure_rolls_back_prior_upserts() -> TestResult {
+    let Some(store) = store(Backend::Sqlite).await else {
+        panic!("sqlite store missing");
+    };
+    snapshot_failure_rolls_back_prior_upserts_case(&store).await
+}
+
+#[tokio::test]
+async fn sync_run_history_tracks_success_and_failure() -> TestResult {
+    let Some(store) = store(Backend::Sqlite).await else {
+        panic!("sqlite store missing");
+    };
+    sync_run_history_tracks_success_and_failure_case(&store).await
+}
+
+#[tokio::test]
+async fn interrupted_sync_runs_are_failed_and_exposed_on_the_dataset() -> TestResult {
+    let Some(store) = store(Backend::Sqlite).await else {
+        panic!("sqlite store missing");
+    };
+    interrupted_sync_runs_are_failed_and_exposed_on_the_dataset_case(&store).await
+}
+
+#[tokio::test]
+async fn sync_snapshot_and_run_completion_commit_atomically() -> TestResult {
+    let Some(store) = store(Backend::Sqlite).await else {
+        panic!("sqlite store missing");
+    };
+    sync_snapshot_and_run_completion_commit_atomically_case(&store).await
+}
+
+#[tokio::test]
+async fn failed_run_and_reschedule_commit_atomically() -> TestResult {
+    let Some(store) = store(Backend::Sqlite).await else {
+        panic!("sqlite store missing");
+    };
+    failed_run_and_reschedule_commit_atomically_case(&store).await
+}
+
+#[tokio::test]
+async fn item_queries_are_bounded_and_paginated() -> TestResult {
+    let Some(store) = store(Backend::Sqlite).await else {
+        panic!("sqlite store missing");
+    };
+    item_queries_are_bounded_and_paginated_case(&store).await
+}
+
+#[tokio::test]
+async fn search_is_safe_dataset_scoped_and_tracks_updates() -> TestResult {
+    let Some(store) = store(Backend::Sqlite).await else {
+        panic!("sqlite store missing");
+    };
+    search_is_safe_dataset_scoped_and_tracks_updates_case(&store).await
+}
+
+#[tokio::test]
+async fn get_item_is_dataset_scoped_and_honors_deleted_visibility() -> TestResult {
+    let Some(store) = store(Backend::Sqlite).await else {
+        panic!("sqlite store missing");
+    };
+    get_item_is_dataset_scoped_and_honors_deleted_visibility_case(&store).await
+}
+
+/// Every store case against PostgreSQL, one fresh schema per case.
+#[tokio::test]
+async fn postgres_store_suite() -> TestResult {
+    if std::env::var("TEST_POSTGRES_URL").is_err() {
+        eprintln!("skipping: TEST_POSTGRES_URL is not set");
+        return Ok(());
+    }
+    let _guard = pg_lock().lock().await;
+    macro_rules! run_pg {
+        ($case:ident) => {{
+            let Some(store) = store(Backend::Postgres).await else {
+                panic!("postgres store missing");
+            };
+            $case(&store).await?;
+        }};
+    }
+    run_pg!(provider_reader_never_crosses_connector_kinds_case);
+    run_pg!(account_config_change_bumps_every_owned_dataset_plan_case);
+    run_pg!(account_name_and_enabled_changes_do_not_bump_dataset_plan_case);
+    run_pg!(account_source_key_round_trips_and_is_looked_up_by_kind_case);
+    run_pg!(account_source_key_is_unique_within_kind_case);
+    run_pg!(account_source_key_can_be_adopted_and_survives_account_update_case);
+    run_pg!(account_source_keys_are_validated_case);
+    run_pg!(account_update_rolls_back_when_dataset_plan_bump_fails_case);
+    run_pg!(account_and_dataset_crud_and_cascade_case);
+    run_pg!(incomplete_snapshot_does_not_delete_and_complete_snapshot_does_case);
+    run_pg!(source_states_track_included_and_filtered_transitions_case);
+    run_pg!(snapshot_failure_rolls_back_prior_upserts_case);
+    run_pg!(sync_run_history_tracks_success_and_failure_case);
+    run_pg!(interrupted_sync_runs_are_failed_and_exposed_on_the_dataset_case);
+    run_pg!(sync_snapshot_and_run_completion_commit_atomically_case);
+    run_pg!(failed_run_and_reschedule_commit_atomically_case);
+    run_pg!(item_queries_are_bounded_and_paginated_case);
+    run_pg!(search_is_safe_dataset_scoped_and_tracks_updates_case);
+    run_pg!(get_item_is_dataset_scoped_and_honors_deleted_visibility_case);
     Ok(())
 }

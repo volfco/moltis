@@ -4,6 +4,8 @@ use std::path::PathBuf;
 pub enum ConnectorError {
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
+    #[error(transparent)]
+    Db(#[from] moltis_db::DbError),
     #[error("migration error: {0}")]
     Migration(#[from] sqlx::migrate::MigrateError),
     #[error("JSON error: {0}")]

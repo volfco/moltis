@@ -31,6 +31,10 @@ pub enum VaultError {
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 
+    /// Backend error from `moltis-db` (connections, migrations).
+    #[error("database error: {0}")]
+    Db(#[from] moltis_db::DbError),
+
     /// JSON serialization / deserialization error.
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),

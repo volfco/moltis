@@ -24,7 +24,7 @@ pub mod types;
 pub mod backend_qmd;
 
 #[cfg(feature = "builtin")]
-pub mod store_sqlite;
+pub mod store_db;
 
 #[cfg(feature = "file-watcher")]
 pub mod watcher;

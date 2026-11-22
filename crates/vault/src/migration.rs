@@ -15,23 +15,28 @@ use crate::{error::VaultError, traits::Cipher, vault::Vault};
 /// Each value is encrypted with AAD `"env:<key>"` for domain separation.
 pub async fn migrate_env_vars<C: Cipher>(
     vault: &Vault<C>,
-    pool: &sqlx::SqlitePool,
+    db: &moltis_db::Db,
 ) -> Result<usize, VaultError> {
-    let rows: Vec<(i64, String, String)> =
-        sqlx::query_as("SELECT id, key, value FROM env_variables WHERE encrypted = 0")
-            .fetch_all(pool)
-            .await?;
+    let rows: Vec<(i64, String, String)> = moltis_db::fetch_all!(
+        db,
+        (i64, String, String),
+        "SELECT id, key, value FROM env_variables WHERE encrypted = 0",
+    )?;
 
+    let now = db.dialect().now_expr();
     let count = rows.len();
     for (id, key, plaintext) in rows {
         let aad = format!("env:{key}");
         let encrypted = vault.encrypt_string(&plaintext, &aad).await?;
 
-        sqlx::query("UPDATE env_variables SET value = ?, encrypted = 1, updated_at = datetime('now') WHERE id = ?")
-            .bind(&encrypted)
-            .bind(id)
-            .execute(pool)
-            .await?;
+        moltis_db::execute!(
+            db,
+            &format!(
+                "UPDATE env_variables SET value = ?, encrypted = 1, updated_at = {now} WHERE id = ?"
+            ),
+            &encrypted,
+            id,
+        )?;
     }
 
     if count > 0 {
@@ -48,25 +53,28 @@ pub async fn migrate_env_vars<C: Cipher>(
 /// separation.
 pub async fn migrate_ssh_keys<C: Cipher>(
     vault: &Vault<C>,
-    pool: &sqlx::SqlitePool,
+    db: &moltis_db::Db,
 ) -> Result<usize, VaultError> {
-    let rows: Vec<(i64, String, String)> =
-        sqlx::query_as("SELECT id, name, private_key FROM ssh_keys WHERE encrypted = 0")
-            .fetch_all(pool)
-            .await?;
+    let rows: Vec<(i64, String, String)> = moltis_db::fetch_all!(
+        db,
+        (i64, String, String),
+        "SELECT id, name, private_key FROM ssh_keys WHERE encrypted = 0",
+    )?;
 
+    let now = db.dialect().now_expr();
     let count = rows.len();
     for (id, name, plaintext) in rows {
         let aad = format!("ssh-key:{name}");
         let encrypted = vault.encrypt_string(&plaintext, &aad).await?;
 
-        sqlx::query(
-            "UPDATE ssh_keys SET private_key = ?, encrypted = 1, updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(&encrypted)
-        .bind(id)
-        .execute(pool)
-        .await?;
+        moltis_db::execute!(
+            db,
+            &format!(
+                "UPDATE ssh_keys SET private_key = ?, encrypted = 1, updated_at = {now} WHERE id = ?"
+            ),
+            &encrypted,
+            id,
+        )?;
     }
 
     if count > 0 {
@@ -246,88 +254,48 @@ pub async fn save_encrypted_or_plaintext<C: Cipher>(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
-    use {super::*, crate::xchacha20::XChaCha20Poly1305Cipher};
+    use {
+        super::*,
+        crate::{
+            test_support::{Backend, test_db},
+            xchacha20::XChaCha20Poly1305Cipher,
+        },
+        moltis_db::Db,
+    };
 
-    async fn setup_vault() -> (sqlx::SqlitePool, Vault<XChaCha20Poly1305Cipher>) {
-        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS vault_metadata (
-                id                   INTEGER PRIMARY KEY CHECK (id = 1),
-                version              INTEGER NOT NULL DEFAULT 1,
-                kdf_salt             TEXT NOT NULL,
-                kdf_params           TEXT NOT NULL,
-                wrapped_dek          TEXT NOT NULL,
-                recovery_wrapped_dek TEXT,
-                recovery_key_hash    TEXT,
-                created_at           TEXT NOT NULL DEFAULT (datetime('now')),
-                updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
-            )",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS env_variables (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                key        TEXT    NOT NULL UNIQUE,
-                value      TEXT    NOT NULL,
-                encrypted  INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT    NOT NULL DEFAULT (datetime('now')),
-                updated_at TEXT    NOT NULL DEFAULT (datetime('now'))
-            )",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS ssh_keys (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                name        TEXT    NOT NULL UNIQUE,
-                private_key TEXT    NOT NULL,
-                public_key  TEXT    NOT NULL,
-                fingerprint TEXT    NOT NULL,
-                encrypted   INTEGER NOT NULL DEFAULT 0,
-                created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
-                updated_at  TEXT    NOT NULL DEFAULT (datetime('now'))
-            )",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        let vault = Vault::with_cipher(pool.clone(), XChaCha20Poly1305Cipher)
+    async fn setup_vault(db: &Db) -> Vault<XChaCha20Poly1305Cipher> {
+        let vault = Vault::with_cipher(db.clone(), XChaCha20Poly1305Cipher)
             .await
             .unwrap();
         vault.initialize("testpassword").await.unwrap();
-
-        (pool, vault)
+        vault
     }
 
-    #[tokio::test]
-    async fn migrate_env_vars_encrypts_plaintext() {
-        let (pool, vault) = setup_vault().await;
+    async fn migrate_env_vars_encrypts_plaintext_case(db: &Db) {
+        let vault = setup_vault(db).await;
 
         // Insert plaintext rows.
-        sqlx::query("INSERT INTO env_variables (key, value) VALUES ('KEY1', 'secret1')")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO env_variables (key, value) VALUES ('KEY2', 'secret2')")
-            .execute(&pool)
-            .await
-            .unwrap();
+        moltis_db::execute!(
+            db,
+            "INSERT INTO env_variables (key, value) VALUES ('KEY1', 'secret1')",
+        )
+        .unwrap();
+        moltis_db::execute!(
+            db,
+            "INSERT INTO env_variables (key, value) VALUES ('KEY2', 'secret2')",
+        )
+        .unwrap();
 
-        let count = migrate_env_vars(&vault, &pool).await.unwrap();
+        let count = migrate_env_vars(&vault, db).await.unwrap();
         assert_eq!(count, 2);
 
         // Verify encrypted flag.
-        let rows: Vec<(i64, String, i32)> =
-            sqlx::query_as("SELECT id, value, encrypted FROM env_variables ORDER BY key")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
+        let rows: Vec<(i64, String, i64)> = moltis_db::fetch_all!(
+            db,
+            (i64, String, i64),
+            "SELECT id, value, encrypted FROM env_variables ORDER BY key",
+        )
+        .unwrap();
         for (_, value, encrypted) in &rows {
             assert_eq!(*encrypted, 1);
             assert_ne!(value, "secret1");
@@ -339,30 +307,29 @@ mod tests {
         assert_eq!(decrypted, "secret1");
 
         // Running again is a no-op.
-        let count2 = migrate_env_vars(&vault, &pool).await.unwrap();
+        let count2 = migrate_env_vars(&vault, db).await.unwrap();
         assert_eq!(count2, 0);
     }
 
-    #[tokio::test]
-    async fn migrate_ssh_keys_encrypts_plaintext() {
-        let (pool, vault) = setup_vault().await;
+    async fn migrate_ssh_keys_encrypts_plaintext_case(db: &Db) {
+        let vault = setup_vault(db).await;
 
-        sqlx::query(
+        moltis_db::execute!(
+            db,
             "INSERT INTO ssh_keys (name, private_key, public_key, fingerprint)
              VALUES ('prod-box', 'PRIVATE KEY', 'ssh-ed25519 AAAA test', 'SHA256:test')",
         )
-        .execute(&pool)
-        .await
         .unwrap();
 
-        let count = migrate_ssh_keys(&vault, &pool).await.unwrap();
+        let count = migrate_ssh_keys(&vault, db).await.unwrap();
         assert_eq!(count, 1);
 
-        let row: (String, i32) =
-            sqlx::query_as("SELECT private_key, encrypted FROM ssh_keys WHERE name = 'prod-box'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let row: (String, i64) = moltis_db::fetch_one!(
+            db,
+            (String, i64),
+            "SELECT private_key, encrypted FROM ssh_keys WHERE name = 'prod-box'",
+        )
+        .unwrap();
         assert_eq!(row.1, 1);
         assert_ne!(row.0, "PRIVATE KEY");
 
@@ -372,13 +339,12 @@ mod tests {
             .unwrap();
         assert_eq!(decrypted, "PRIVATE KEY");
 
-        let count2 = migrate_ssh_keys(&vault, &pool).await.unwrap();
+        let count2 = migrate_ssh_keys(&vault, db).await.unwrap();
         assert_eq!(count2, 0);
     }
 
-    #[tokio::test]
-    async fn migrate_json_file_round_trip() {
-        let (_, vault) = setup_vault().await;
+    async fn migrate_json_file_round_trip_case(db: &Db) {
+        let vault = setup_vault(db).await;
         let tmp_dir = tempfile::tempdir().unwrap();
         let json_path = tmp_dir.path().join("provider_keys.json");
         let enc_path = tmp_dir.path().join("provider_keys.json.enc");
@@ -409,9 +375,8 @@ mod tests {
         assert!(!migrated2);
     }
 
-    #[tokio::test]
-    async fn encrypt_json_file_keeps_original() {
-        let (_, vault) = setup_vault().await;
+    async fn encrypt_json_file_keeps_original_case(db: &Db) {
+        let vault = setup_vault(db).await;
         let tmp_dir = tempfile::tempdir().unwrap();
         let json_path = tmp_dir.path().join("keys.json");
         let enc_path = tmp_dir.path().join("keys.json.enc");
@@ -443,9 +408,8 @@ mod tests {
         assert!(content2.contains("sk-groq-v2"));
     }
 
-    #[tokio::test]
-    async fn save_encrypted_or_plaintext_round_trip() {
-        let (_, vault) = setup_vault().await;
+    async fn save_encrypted_or_plaintext_round_trip_case(db: &Db) {
+        let vault = setup_vault(db).await;
         let tmp_dir = tempfile::tempdir().unwrap();
         let json_path = tmp_dir.path().join("data.json");
         let enc_path = tmp_dir.path().join("data.json.enc");
@@ -486,8 +450,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn load_plaintext_fallback() {
+    async fn load_plaintext_fallback_case(_db: &Db) {
         let tmp_dir = tempfile::tempdir().unwrap();
         let json_path = tmp_dir.path().join("tokens.json");
 
@@ -505,5 +468,48 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(result.unwrap(), r#"{"github":{}}"#);
+    }
+
+    #[tokio::test]
+    async fn migrate_env_vars_encrypts_plaintext() {
+        migrate_env_vars_encrypts_plaintext_case(&test_db(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn migrate_ssh_keys_encrypts_plaintext() {
+        migrate_ssh_keys_encrypts_plaintext_case(&test_db(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn migrate_json_file_round_trip() {
+        migrate_json_file_round_trip_case(&test_db(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn encrypt_json_file_keeps_original() {
+        encrypt_json_file_keeps_original_case(&test_db(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn save_encrypted_or_plaintext_round_trip() {
+        save_encrypted_or_plaintext_round_trip_case(&test_db(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn load_plaintext_fallback() {
+        load_plaintext_fallback_case(&test_db(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    /// Every migration-helper case against PostgreSQL, one fresh schema per
+    /// case. File-based helpers ignore the database and run on SQLite only.
+    #[tokio::test]
+    async fn postgres_suite() {
+        if std::env::var("TEST_POSTGRES_URL").is_err() {
+            eprintln!("skipping: TEST_POSTGRES_URL is not set");
+            return;
+        }
+        let _guard = crate::test_support::pg_lock().lock().await;
+        migrate_env_vars_encrypts_plaintext_case(&test_db(Backend::Postgres).await.unwrap()).await;
+        migrate_ssh_keys_encrypts_plaintext_case(&test_db(Backend::Postgres).await.unwrap()).await;
     }
 }

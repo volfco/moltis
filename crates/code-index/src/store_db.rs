@@ -1,13 +1,13 @@
-//! SQLite + FTS5 storage backend for code-index.
+//! SQLite + PostgreSQL storage backend for code-index.
 //!
-//! Stores chunks with quantized i8 embeddings and uses FTS5 for keyword search.
-//! Vector similarity is done in-memory (brute-force) following the memory system pattern.
-
-use std::path::Path;
+//! Stores chunks with quantized i8 embeddings. Keyword search runs through
+//! FTS5 on SQLite and a generated `tsvector` column on PostgreSQL; vector
+//! similarity is done in-memory (brute-force) following the memory system
+//! pattern.
 
 use {
     async_trait::async_trait,
-    sqlx::{Acquire, Row, SqlitePool, sqlite::SqliteConnectOptions},
+    moltis_db::{Db, Dialect},
 };
 
 use crate::{
@@ -16,19 +16,24 @@ use crate::{
     types::SearchResult,
 };
 
-/// Run database migrations for the code-index SQLite backend.
-pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
-    sqlx::migrate!("./migrations")
-        .run(pool)
-        .await
-        .map_err(|e| Error::IndexStore(format!("code-index migration failed: {e}")))
+/// Run database migrations for the code-index store (either backend).
+pub async fn run_migrations(db: &Db) -> Result<()> {
+    moltis_db::run_migrations(
+        db,
+        sqlx::migrate!("./migrations"),
+        sqlx::migrate!("./migrations_pg"),
+    )
+    .await
+    .map_err(|e| Error::IndexStore(format!("code-index migration failed: {e}")))
 }
 
-/// Escape a user query for safe use as an FTS5 MATCH expression.
+/// Escape a user query for safe use as an FTS5 MATCH expression or a
+/// `websearch_to_tsquery` phrase.
 ///
 /// FTS5 has its own query language (supports AND, OR, NOT, NEAR, phrase literals).
 /// Passing raw input causes parse errors on unbalanced quotes or boolean operators.
-/// We quote the entire query as a phrase literal, escaping internal double-quotes.
+/// We quote the entire query as a phrase literal, escaping internal double-quotes,
+/// so both engines search the whole query as one adjacent phrase.
 fn escape_fts5_query(query: &str) -> String {
     let escaped = query.replace('"', "\"\"");
     format!("\"{escaped}\"")
@@ -74,58 +79,24 @@ mod fts5_tests {
     }
 }
 
-/// SQLite-backed code index store.
-pub struct SqliteCodeIndexStore {
-    pool: SqlitePool,
+/// Dual-backend code index store (SQLite or PostgreSQL).
+pub struct DbCodeIndexStore {
+    db: Db,
 }
 
-impl SqliteCodeIndexStore {
-    /// Create a new SQLite store at the given path.
-    pub async fn new(db_path: &Path) -> Result<Self> {
-        // Ensure parent directory exists — SQLite only creates the file, not directories.
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                Error::IndexStore(format!(
-                    "failed to create code-index directory {}: {e}",
-                    parent.display()
-                ))
-            })?;
-        }
-
-        let options = SqliteConnectOptions::new()
-            .filename(db_path)
-            .create_if_missing(true);
-
-        let pool = SqlitePool::connect_with(options)
-            .await
-            .map_err(|e| Error::IndexStore(format!("failed to connect to SQLite: {e}")))?;
-
-        let store = Self { pool };
+impl DbCodeIndexStore {
+    /// Create a store on a connected backend and run migrations.
+    pub async fn new(db: Db) -> Result<Self> {
+        let store = Self { db };
         store.initialize().await?;
         Ok(store)
-    }
-
-    /// Create a store from an existing pool (for testing).
-    #[cfg(test)]
-    pub(crate) async fn from_pool(pool: SqlitePool) -> Result<Self> {
-        let store = Self { pool };
-        store.initialize().await?;
-        Ok(store)
-    }
-
-    /// Get a connection from the pool.
-    async fn conn(&self) -> Result<sqlx::pool::PoolConnection<sqlx::Sqlite>> {
-        self.pool
-            .acquire()
-            .await
-            .map_err(|e| Error::IndexStore(format!("failed to acquire connection: {e}")))
     }
 }
 
 #[async_trait]
-impl CodeIndexStore for SqliteCodeIndexStore {
+impl CodeIndexStore for DbCodeIndexStore {
     async fn initialize(&self) -> Result<()> {
-        run_migrations(&self.pool).await
+        run_migrations(&self.db).await
     }
 
     async fn upsert_chunks(
@@ -134,21 +105,21 @@ impl CodeIndexStore for SqliteCodeIndexStore {
         file_path: &str,
         chunks: &[CodeChunk],
     ) -> Result<()> {
-        let mut conn = self.conn().await?;
-
         // Use a transaction for batch insert
-        let mut tx = conn
+        let mut tx = self
+            .db
             .begin()
             .await
             .map_err(|e| Error::IndexStore(format!("failed to begin transaction: {e}")))?;
 
         // Delete existing chunks for this file first (full reindex of file)
-        sqlx::query("DELETE FROM code_chunks WHERE project_id = ? AND file_path = ?")
-            .bind(project_id)
-            .bind(file_path)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| Error::IndexStore(format!("failed to delete existing chunks: {e}")))?;
+        moltis_db::tx_execute!(
+            &mut tx,
+            "DELETE FROM code_chunks WHERE project_id = ? AND file_path = ?",
+            project_id,
+            file_path,
+        )
+        .map_err(|e| Error::IndexStore(format!("failed to delete existing chunks: {e}")))?;
 
         // Insert new chunks
         for chunk in chunks {
@@ -158,23 +129,22 @@ impl CodeIndexStore for SqliteCodeIndexStore {
                 .map(|e| quantize(e))
                 .map(|q| q.into_iter().map(|v| v as u8).collect::<Vec<u8>>());
 
-            sqlx::query(
+            moltis_db::tx_execute!(
+                &mut tx,
                 r#"
                 INSERT INTO code_chunks
                     (project_id, file_path, chunk_index, content, embedding, start_line, end_line)
                 VALUES
                     (?, ?, ?, ?, ?, ?, ?)
                 "#,
+                project_id,
+                &chunk.file_path,
+                chunk.chunk_index as i64,
+                &chunk.content,
+                embedding_bytes,
+                chunk.start_line as i64,
+                chunk.end_line as i64,
             )
-            .bind(project_id)
-            .bind(&chunk.file_path)
-            .bind(chunk.chunk_index as i64)
-            .bind(&chunk.content)
-            .bind(embedding_bytes)
-            .bind(chunk.start_line as i64)
-            .bind(chunk.end_line as i64)
-            .execute(&mut *tx)
-            .await
             .map_err(|e| Error::IndexStore(format!("failed to insert chunk: {e}")))?;
         }
 
@@ -186,34 +156,32 @@ impl CodeIndexStore for SqliteCodeIndexStore {
     }
 
     async fn delete_file_chunks(&self, project_id: &str, file_path: &str) -> Result<()> {
-        let mut conn = self.conn().await?;
-
-        sqlx::query("DELETE FROM code_chunks WHERE project_id = ? AND file_path = ?")
-            .bind(project_id)
-            .bind(file_path)
-            .execute(&mut *conn)
-            .await
-            .map_err(|e| Error::IndexStore(format!("failed to delete file chunks: {e}")))?;
+        moltis_db::execute!(
+            &self.db,
+            "DELETE FROM code_chunks WHERE project_id = ? AND file_path = ?",
+            project_id,
+            file_path,
+        )
+        .map_err(|e| Error::IndexStore(format!("failed to delete file chunks: {e}")))?;
 
         Ok(())
     }
 
     async fn clear_project(&self, project_id: &str) -> Result<()> {
-        let mut conn = self.conn().await?;
-
-        sqlx::query("DELETE FROM code_chunks WHERE project_id = ?")
-            .bind(project_id)
-            .execute(&mut *conn)
-            .await
-            .map_err(|e| Error::IndexStore(format!("failed to clear project: {e}")))?;
+        moltis_db::execute!(
+            &self.db,
+            "DELETE FROM code_chunks WHERE project_id = ?",
+            project_id,
+        )
+        .map_err(|e| Error::IndexStore(format!("failed to clear project: {e}")))?;
 
         Ok(())
     }
 
     async fn get_project_chunks(&self, project_id: &str) -> Result<Vec<CodeChunk>> {
-        let mut conn = self.conn().await?;
-
-        let rows = sqlx::query(
+        let rows: Vec<(String, i64, String, Option<Vec<u8>>, i64, i64)> = moltis_db::fetch_all!(
+            &self.db,
+            (String, i64, String, Option<Vec<u8>>, i64, i64),
             r#"
             SELECT
                 file_path,
@@ -226,27 +194,24 @@ impl CodeIndexStore for SqliteCodeIndexStore {
             WHERE project_id = ?
             ORDER BY file_path, chunk_index
             "#,
+            project_id,
         )
-        .bind(project_id)
-        .fetch_all(&mut *conn)
-        .await
         .map_err(|e| Error::IndexStore(format!("failed to fetch chunks: {e}")))?;
 
         let mut chunks = Vec::with_capacity(rows.len());
-        for row in rows {
-            let embedding_bytes: Option<Vec<u8>> = row.get("embedding");
+        for (file_path, chunk_index, content, embedding_bytes, start_line, end_line) in rows {
             let embedding = embedding_bytes.map(|bytes| {
                 let i8_vec: Vec<i8> = bytes.into_iter().map(|b| b as i8).collect();
                 dequantize(&i8_vec)
             });
 
             chunks.push(CodeChunk {
-                file_path: row.get("file_path"),
-                chunk_index: row.get::<i64, _>("chunk_index") as usize,
-                content: row.get("content"),
+                file_path,
+                chunk_index: chunk_index as usize,
+                content,
                 embedding,
-                start_line: row.get::<i64, _>("start_line") as usize,
-                end_line: row.get::<i64, _>("end_line") as usize,
+                start_line: start_line as usize,
+                end_line: end_line as usize,
             });
         }
 
@@ -259,14 +224,17 @@ impl CodeIndexStore for SqliteCodeIndexStore {
         query: &str,
         limit: usize,
     ) -> Result<Vec<SearchResult>> {
-        let mut conn = self.conn().await?;
-
-        // FTS5 query with project filter via JOIN.
-        // Query is escaped as a phrase literal to prevent FTS5 parse errors
-        // on unbalanced quotes or boolean operators from LLM-generated input.
+        // Both engines search the whole query as one phrase literal (escaped
+        // by escape_fts5_query), so multi-word queries require adjacency
+        // identically instead of ANDing loose terms. The tsquery is built
+        // once in FROM so the bind list keeps one bind per placeholder.
         let safe_query = escape_fts5_query(query);
-        let rows = sqlx::query(
-            r#"
+        let rows: Vec<(String, String, i64, i64)> = match self.db.dialect() {
+            Dialect::Sqlite => {
+                moltis_db::fetch_all!(
+                    &self.db,
+                    (String, String, i64, i64),
+                    r#"
             SELECT
                 c.file_path,
                 c.content,
@@ -279,58 +247,71 @@ impl CodeIndexStore for SqliteCodeIndexStore {
             ORDER BY fts.rank
             LIMIT ?
             "#,
-        )
-        .bind(project_id)
-        .bind(&safe_query)
-        .bind(limit as i64)
-        .fetch_all(&mut *conn)
-        .await
+                    project_id,
+                    &safe_query,
+                    limit as i64,
+                )
+            },
+            Dialect::Postgres => {
+                // websearch_to_tsquery reads the quoted form as a phrase (and
+                // never raises a syntax error), mirroring FTS5 phrase MATCH.
+                moltis_db::fetch_all!(
+                    &self.db,
+                    (String, String, i64, i64),
+                    r#"
+            SELECT c.file_path, c.content, c.start_line, c.end_line
+            FROM code_chunks c, websearch_to_tsquery('english', ?) AS q
+            WHERE c.project_id = ? AND c.tsv @@ q
+            ORDER BY ts_rank(c.tsv, q)::float8 DESC
+            LIMIT ?
+            "#,
+                    &safe_query,
+                    project_id,
+                    limit as i64,
+                )
+            },
+        }
         .map_err(|e| Error::IndexStore(format!("keyword search failed: {e}")))?;
 
         let results = rows
             .into_iter()
             .enumerate()
-            .map(|(rank, row)| {
-                let file_path: String = row.get("file_path");
-                let start_line = row.get::<i64, _>("start_line") as usize;
-                SearchResult {
+            .map(
+                |(rank, (file_path, content, start_line, end_line))| SearchResult {
                     chunk_id: format!("{}:{}:{}", project_id, file_path, start_line),
                     path: file_path,
-                    text: row.get("content"),
-                    start_line,
-                    end_line: row.get::<i64, _>("end_line") as usize,
+                    text: content,
+                    start_line: start_line as usize,
+                    end_line: end_line as usize,
                     score: 1.0 / (1.0 + rank as f32), // Map rank to (0, 1] range, higher is better
                     source: "builtin".to_string(),
-                }
-            })
+                },
+            )
             .collect();
 
         Ok(results)
     }
 
     async fn file_count(&self, project_id: &str) -> Result<usize> {
-        let mut conn = self.conn().await?;
-
-        let count: i64 = sqlx::query_scalar(
+        let count: i64 = moltis_db::scalar!(
+            &self.db,
+            i64,
             "SELECT COUNT(DISTINCT file_path) FROM code_chunks WHERE project_id = ?",
+            project_id,
         )
-        .bind(project_id)
-        .fetch_one(&mut *conn)
-        .await
         .map_err(|e| Error::IndexStore(format!("failed to count files: {e}")))?;
 
         Ok(count as usize)
     }
 
     async fn chunk_count(&self, project_id: &str) -> Result<usize> {
-        let mut conn = self.conn().await?;
-
-        let count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM code_chunks WHERE project_id = ?")
-                .bind(project_id)
-                .fetch_one(&mut *conn)
-                .await
-                .map_err(|e| Error::IndexStore(format!("failed to count chunks: {e}")))?;
+        let count: i64 = moltis_db::scalar!(
+            &self.db,
+            i64,
+            "SELECT COUNT(*) FROM code_chunks WHERE project_id = ?",
+            project_id,
+        )
+        .map_err(|e| Error::IndexStore(format!("failed to count chunks: {e}")))?;
 
         Ok(count as usize)
     }
@@ -339,7 +320,22 @@ impl CodeIndexStore for SqliteCodeIndexStore {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::*;
+    use {super::*, moltis_db::DbOptions};
+
+    /// Engine a test case runs against.
+    enum Backend {
+        Sqlite,
+        Postgres,
+    }
+
+    /// Serializes PostgreSQL tests: they share one database, so they must not
+    /// reset the schema while another test is mid-flight. Postgres suites must
+    /// run one crate per process: this lock is per-process and the suites share
+    /// `_sqlx_migrations`.
+    fn pg_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        &LOCK
+    }
 
     fn make_chunk(
         file_path: &str,
@@ -358,22 +354,47 @@ mod tests {
         }
     }
 
-    async fn setup() -> SqliteCodeIndexStore {
-        let pool = SqlitePool::connect(":memory:").await.unwrap();
-        SqliteCodeIndexStore::from_pool(pool).await.unwrap()
+    /// Fresh store with an empty code-index schema. Skips (returns `None`)
+    /// only when `TEST_POSTGRES_URL` is unset; when it is set, any
+    /// connect/reset/migration failure panics so a broken harness can not
+    /// pass green. The caller must hold [`pg_lock`] for [`Backend::Postgres`].
+    async fn store(backend: Backend) -> Option<DbCodeIndexStore> {
+        let db = match backend {
+            Backend::Sqlite => Db::connect(&DbOptions::sqlite(":memory:", 1))
+                .await
+                .unwrap_or_else(|error| panic!("sqlite test db connect failed: {error}")),
+            Backend::Postgres => {
+                let Ok(url) = std::env::var("TEST_POSTGRES_URL") else {
+                    return None;
+                };
+                let db = Db::connect(&DbOptions::postgres(url, 2))
+                    .await
+                    .unwrap_or_else(|error| panic!("postgres test db connect failed: {error}"));
+                // Dropping sqlx's history is required: with it in place the
+                // migrator believes this version is already applied and
+                // creates nothing.
+                moltis_db::execute!(
+                    &db,
+                    "DROP TABLE IF EXISTS code_chunks_fts, code_chunks, _sqlx_migrations CASCADE"
+                )
+                .unwrap_or_else(|error| panic!("postgres test reset failed: {error}"));
+                db
+            },
+        };
+        Some(
+            DbCodeIndexStore::new(db)
+                .await
+                .unwrap_or_else(|error| panic!("code-index test migrations failed: {error}")),
+        )
     }
 
-    #[tokio::test]
-    async fn test_initialize_idempotent() {
-        let store = setup().await;
-        // initialize() was already called in setup(), call again
+    async fn initialize_idempotent_case(store: &DbCodeIndexStore) {
+        // initialize() was already called by the constructor, call again
         store.initialize().await.unwrap();
         store.initialize().await.unwrap();
     }
 
-    #[tokio::test]
-    async fn test_upsert_and_get_chunks() {
-        let store = setup().await;
+    async fn upsert_and_get_chunks_case(store: &DbCodeIndexStore) {
         let chunks = vec![
             make_chunk("foo.rs", 0, "fn main() {}", 1, 1),
             make_chunk("foo.rs", 1, "fn helper() {}", 2, 2),
@@ -392,10 +413,7 @@ mod tests {
         assert_eq!(got[1].content, "fn helper() {}");
     }
 
-    #[tokio::test]
-    async fn test_upsert_replaces_file() {
-        let store = setup().await;
-
+    async fn upsert_replaces_file_case(store: &DbCodeIndexStore) {
         let v1 = vec![make_chunk("a.rs", 0, "version 1", 1, 1)];
         store.upsert_chunks("proj", "a.rs", &v1).await.unwrap();
 
@@ -411,9 +429,7 @@ mod tests {
         assert_eq!(got[1].content, "version 2 line 2");
     }
 
-    #[tokio::test]
-    async fn test_multi_file_isolation() {
-        let store = setup().await;
+    async fn multi_file_isolation_case(store: &DbCodeIndexStore) {
         let chunks_a = vec![make_chunk("a.rs", 0, "file a", 1, 1)];
         let chunks_b = vec![make_chunk("b.rs", 0, "file b", 1, 1)];
         store
@@ -434,9 +450,7 @@ mod tests {
         assert_eq!(got[0].file_path, "b.rs");
     }
 
-    #[tokio::test]
-    async fn test_multi_project_isolation() {
-        let store = setup().await;
+    async fn multi_project_isolation_case(store: &DbCodeIndexStore) {
         let chunks = vec![make_chunk("shared.rs", 0, "content", 1, 1)];
         store
             .upsert_chunks("X", "shared.rs", &chunks)
@@ -454,9 +468,7 @@ mod tests {
         assert_eq!(got_y.len(), 1);
     }
 
-    #[tokio::test]
-    async fn test_delete_file_chunks() {
-        let store = setup().await;
+    async fn delete_file_chunks_case(store: &DbCodeIndexStore) {
         store
             .upsert_chunks("proj", "a.rs", &[make_chunk("a.rs", 0, "a", 1, 1)])
             .await
@@ -473,9 +485,7 @@ mod tests {
         assert_eq!(got[0].file_path, "b.rs");
     }
 
-    #[tokio::test]
-    async fn test_clear_project() {
-        let store = setup().await;
+    async fn clear_project_case(store: &DbCodeIndexStore) {
         let chunks = vec![make_chunk("f.rs", 0, "data", 1, 1)];
         store.upsert_chunks("X", "f.rs", &chunks).await.unwrap();
         store.upsert_chunks("Y", "f.rs", &chunks).await.unwrap();
@@ -486,9 +496,7 @@ mod tests {
         assert_eq!(store.get_project_chunks("Y").await.unwrap().len(), 1);
     }
 
-    #[tokio::test]
-    async fn test_embedding_roundtrip() {
-        let store = setup().await;
+    async fn embedding_roundtrip_case(store: &DbCodeIndexStore) {
         let original = vec![0.5, -0.3, 0.8, 0.1];
         let mut chunk = make_chunk("emb.rs", 0, "embedded code", 1, 5);
         chunk.embedding = Some(original.clone());
@@ -510,9 +518,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_keyword_search_basic() {
-        let store = setup().await;
+    async fn keyword_search_basic_case(store: &DbCodeIndexStore) {
         store
             .upsert_chunks("proj", "main.rs", &[make_chunk(
                 "main.rs",
@@ -539,9 +545,7 @@ mod tests {
         assert!(results[0].path.contains("main.rs"));
     }
 
-    #[tokio::test]
-    async fn test_keyword_search_multi_result() {
-        let store = setup().await;
+    async fn keyword_search_multi_result_case(store: &DbCodeIndexStore) {
         store
             .upsert_chunks("proj", "a.rs", &[make_chunk(
                 "a.rs",
@@ -577,9 +581,46 @@ mod tests {
         assert_eq!(results.len(), 2);
     }
 
-    #[tokio::test]
-    async fn test_keyword_search_no_results() {
-        let store = setup().await;
+    /// Whole-query phrase semantics: multi-word queries require adjacency and
+    /// order, identically on both engines.
+    async fn keyword_search_phrase_requires_adjacency_case(store: &DbCodeIndexStore) {
+        store
+            .upsert_chunks("proj", "adjacent.rs", &[make_chunk(
+                "adjacent.rs",
+                0,
+                "database connection pool",
+                1,
+                1,
+            )])
+            .await
+            .unwrap();
+        store
+            .upsert_chunks("proj", "scattered.rs", &[make_chunk(
+                "scattered.rs",
+                0,
+                "database query connection",
+                1,
+                1,
+            )])
+            .await
+            .unwrap();
+
+        let results = store
+            .search_keyword("proj", "database connection", 10)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].path.contains("adjacent.rs"));
+
+        // Reversed word order is a different phrase — no match.
+        let reversed = store
+            .search_keyword("proj", "connection database", 10)
+            .await
+            .unwrap();
+        assert!(reversed.is_empty());
+    }
+
+    async fn keyword_search_no_results_case(store: &DbCodeIndexStore) {
         store
             .upsert_chunks("proj", "a.rs", &[make_chunk(
                 "a.rs",
@@ -598,9 +639,7 @@ mod tests {
         assert!(results.is_empty());
     }
 
-    #[tokio::test]
-    async fn test_keyword_search_scores_valid() {
-        let store = setup().await;
+    async fn keyword_search_scores_valid_case(store: &DbCodeIndexStore) {
         store
             .upsert_chunks("proj", "a.rs", &[make_chunk(
                 "a.rs",
@@ -632,9 +671,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_file_and_chunk_counts() {
-        let store = setup().await;
+    async fn file_and_chunk_counts_case(store: &DbCodeIndexStore) {
         for file in ["a.rs", "b.rs", "c.rs"] {
             store
                 .upsert_chunks("proj", file, &[
@@ -649,9 +686,7 @@ mod tests {
         assert_eq!(store.chunk_count("proj").await.unwrap(), 6);
     }
 
-    #[tokio::test]
-    async fn test_empty_project() {
-        let store = setup().await;
+    async fn empty_project_case(store: &DbCodeIndexStore) {
         assert!(
             store
                 .get_project_chunks("nonexistent")
@@ -661,5 +696,106 @@ mod tests {
         );
         assert_eq!(store.file_count("nonexistent").await.unwrap(), 0);
         assert_eq!(store.chunk_count("nonexistent").await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_initialize_idempotent() {
+        initialize_idempotent_case(&store(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn test_upsert_and_get_chunks() {
+        upsert_and_get_chunks_case(&store(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn test_upsert_replaces_file() {
+        upsert_replaces_file_case(&store(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn test_multi_file_isolation() {
+        multi_file_isolation_case(&store(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn test_multi_project_isolation() {
+        multi_project_isolation_case(&store(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn test_delete_file_chunks() {
+        delete_file_chunks_case(&store(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn test_clear_project() {
+        clear_project_case(&store(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn test_embedding_roundtrip() {
+        embedding_roundtrip_case(&store(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn test_keyword_search_basic() {
+        keyword_search_basic_case(&store(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn test_keyword_search_multi_result() {
+        keyword_search_multi_result_case(&store(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn test_keyword_search_phrase_requires_adjacency() {
+        keyword_search_phrase_requires_adjacency_case(&store(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn test_keyword_search_no_results() {
+        keyword_search_no_results_case(&store(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn test_keyword_search_scores_valid() {
+        keyword_search_scores_valid_case(&store(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn test_file_and_chunk_counts() {
+        file_and_chunk_counts_case(&store(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn test_empty_project() {
+        empty_project_case(&store(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    /// Every store case against PostgreSQL, one fresh schema per case.
+    #[tokio::test]
+    async fn postgres_suite() {
+        if std::env::var("TEST_POSTGRES_URL").is_err() {
+            eprintln!("skipping: TEST_POSTGRES_URL is not set");
+            return;
+        }
+        let _guard = pg_lock().lock().await;
+        initialize_idempotent_case(&store(Backend::Postgres).await.unwrap()).await;
+        upsert_and_get_chunks_case(&store(Backend::Postgres).await.unwrap()).await;
+        upsert_replaces_file_case(&store(Backend::Postgres).await.unwrap()).await;
+        multi_file_isolation_case(&store(Backend::Postgres).await.unwrap()).await;
+        multi_project_isolation_case(&store(Backend::Postgres).await.unwrap()).await;
+        delete_file_chunks_case(&store(Backend::Postgres).await.unwrap()).await;
+        clear_project_case(&store(Backend::Postgres).await.unwrap()).await;
+        embedding_roundtrip_case(&store(Backend::Postgres).await.unwrap()).await;
+        keyword_search_basic_case(&store(Backend::Postgres).await.unwrap()).await;
+        keyword_search_multi_result_case(&store(Backend::Postgres).await.unwrap()).await;
+        keyword_search_phrase_requires_adjacency_case(&store(Backend::Postgres).await.unwrap())
+            .await;
+        keyword_search_no_results_case(&store(Backend::Postgres).await.unwrap()).await;
+        keyword_search_scores_valid_case(&store(Backend::Postgres).await.unwrap()).await;
+        file_and_chunk_counts_case(&store(Backend::Postgres).await.unwrap()).await;
+        empty_project_case(&store(Backend::Postgres).await.unwrap()).await;
     }
 }
