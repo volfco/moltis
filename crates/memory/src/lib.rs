@@ -15,6 +15,9 @@ pub mod embeddings_openai;
 pub mod error;
 pub mod manager;
 pub mod pgvector;
+pub mod reindex;
+#[cfg(test)]
+mod reindex_tests;
 pub mod reranking;
 pub mod runtime;
 pub mod schema;

@@ -316,6 +316,9 @@ async fn run_postgres_migrations(config: &moltis_config::MoltisConfig) -> anyhow
         .map_err(|e| anyhow::anyhow!("vault migrations failed: {e}"))?;
     println!("  - gateway migrations complete");
 
+    // Same preflight as startup: without it a missing pgvector surfaces as the
+    // raw migration error this command is meant to avoid.
+    moltis_memory::pgvector::preflight(&db).await?;
     moltis_memory::schema::run_migrations(&db)
         .await
         .map_err(|e| anyhow::anyhow!("memory migrations failed: {e}"))?;

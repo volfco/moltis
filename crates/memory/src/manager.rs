@@ -16,9 +16,10 @@ use crate::{
     embeddings::EmbeddingProvider,
     error::Result,
     pgvector::PgvectorStatus,
+    reindex::reembed_all_chunks,
     schema::{ChunkRow, FileRow},
     search::SearchResult,
-    store::{CacheEntry, MemoryStore},
+    store::{CacheEntry, EmbeddingMeta, MemoryStore},
     writer::validate_memory_path,
 };
 
@@ -158,9 +159,126 @@ impl MemoryManager {
         result
     }
 
+    /// Re-index the stored embeddings, taking the sync lock.
+    ///
+    /// Re-embeds every chunk when the provider identity recorded in
+    /// `memory_meta` differs from the configured provider (provider, model or
+    /// dimensions), and unconditionally when `force` is set — e.g. after
+    /// switching to a different provider that happens to use the same
+    /// dimension count.
+    #[tracing::instrument(skip(self))]
+    pub async fn reindex(&self, force: bool) -> Result<ReindexReport> {
+        // Serialize against sync/sync_path: a re-index must never interleave
+        // with a sync pass rewriting the same chunks.
+        let _sync_permit = self.acquire_sync_lock().await?;
+        let Some(guard) = self.store.try_acquire_sync_lock().await? else {
+            info!("memory reindex already running elsewhere; skipping");
+            #[cfg(feature = "metrics")]
+            moltis_metrics::counter!(moltis_metrics::memory::SYNC_LOCK_SKIPS_TOTAL).increment(1);
+            return Ok(ReindexReport {
+                skipped: true,
+                ..Default::default()
+            });
+        };
+        let result = self.reindex_embeddings(force).await;
+        guard.release().await;
+        Ok(result?.unwrap_or_default())
+    }
+
+    /// Re-embed every chunk when the recorded embedding identity differs from
+    /// the configured provider, or unconditionally when `force`.
+    ///
+    /// Returns `None` when the identity matches and no work was needed.
+    /// Callers must hold the sync permits and the sync lock.
+    async fn reindex_embeddings(&self, force: bool) -> Result<Option<ReindexReport>> {
+        let Some(embedder) = self.embedder.as_deref() else {
+            return Ok(None);
+        };
+        // Backends without `memory_meta` (e.g. the zvec index) cannot record
+        // the identity, so treat every pass as unchanged rather than
+        // re-embedding the whole index on each sync.
+        if !self.store.tracks_embedding_identity() {
+            return Ok(None);
+        }
+        let configured = EmbeddingMeta::from_provider(embedder);
+        let recorded = self.store.read_embedding_meta().await?;
+        let reason = match &recorded {
+            // No recorded identity: the stored vectors may come from any
+            // provider, so rebuild them once instead of trusting them. A
+            // fresh index has no chunks, which makes this a no-op.
+            None => ReindexReason::NoRecordedIdentity,
+            Some(meta) if meta.dimensions != configured.dimensions => {
+                ReindexReason::DimensionsChanged
+            },
+            Some(meta) if meta != &configured => ReindexReason::ProviderChanged,
+            Some(_) if force => ReindexReason::Forced,
+            Some(_) => {
+                // Identity matches. Still repair the typed column and index in
+                // case a previous re-index was interrupted after the metadata
+                // write; the step is a no-op once the schema is in place.
+                self.store
+                    .ensure_embedding_schema(configured.dimensions)
+                    .await?;
+                return Ok(None);
+            },
+        };
+
+        let dimensions_before = recorded.as_ref().map(|meta| meta.dimensions);
+        info!(
+            reason = ?reason,
+            dimensions_from = dimensions_before,
+            dimensions_to = configured.dimensions,
+            provider = configured.provider_key,
+            model = configured.model,
+            "memory: re-indexing chunks after an embedding identity change"
+        );
+
+        #[cfg(feature = "metrics")]
+        let start = std::time::Instant::now();
+
+        // Order matters when the dimension changed: the index and the typed
+        // column both reject the new dimension, so relax them, re-embed, and
+        // only then re-apply the type and index. Each step is idempotent, so
+        // an interrupted run resumes on the next sync.
+        if dimensions_before != Some(configured.dimensions) {
+            self.store.relax_embedding_schema().await?;
+        }
+        let chunks_reembedded = reembed_all_chunks(self.store.as_ref(), embedder).await?;
+        self.store.write_embedding_meta(&configured).await?;
+        self.store
+            .ensure_embedding_schema(configured.dimensions)
+            .await?;
+
+        info!(chunks = chunks_reembedded, "memory: re-indexed chunks");
+
+        #[cfg(feature = "metrics")]
+        {
+            moltis_metrics::counter!(moltis_metrics::memory::REINDEX_TOTAL).increment(1);
+            moltis_metrics::counter!(moltis_metrics::memory::REINDEXED_CHUNKS_TOTAL)
+                .increment(chunks_reembedded as u64);
+            moltis_metrics::histogram!(moltis_metrics::memory::REINDEX_DURATION_SECONDS)
+                .record(start.elapsed().as_secs_f64());
+        }
+
+        Ok(Some(ReindexReport {
+            skipped: false,
+            reason: Some(reason),
+            chunks_reembedded,
+            dimensions_before,
+            dimensions_after: configured.dimensions,
+        }))
+    }
+
     /// One full sync pass. Callers must hold the sync permits and sync lock.
     async fn sync_pass(&self) -> Result<SyncReport> {
-        let mut report = SyncReport::default();
+        // Compare the recorded embedding identity with the configured provider
+        // before touching any chunk: a dimension change must re-embed the old
+        // vectors before they are overwritten or the column is retyped.
+        let reindex = self.reindex_embeddings(false).await?;
+        let mut report = SyncReport {
+            reindex,
+            ..Default::default()
+        };
 
         let mut discovered_paths = Vec::new();
 
@@ -242,6 +360,8 @@ impl MemoryManager {
 
     /// Sync a single file by path. Returns true if it was updated.
     pub async fn sync_path(&self, path: &Path) -> Result<bool> {
+        // In-process serialization only: the cross-instance advisory lock
+        // guards full passes (`sync`/`reindex`), not single-file updates.
         let _sync_permit = self.acquire_sync_lock().await?;
         let path_str = path.to_string_lossy().to_string();
         let mut report = SyncReport::default();
@@ -250,6 +370,8 @@ impl MemoryManager {
 
     /// Remove a file path from the memory index after the backing file is gone.
     pub async fn remove_path(&self, path: &Path) -> Result<bool> {
+        // In-process serialization only: the cross-instance advisory lock
+        // guards full passes (`sync`/`reindex`), not single-file removals.
         let _sync_permit = self.acquire_sync_lock().await?;
         let path_str = path.to_string_lossy().to_string();
         let had_file = self.store.get_file(&path_str).await?.is_some();
@@ -577,12 +699,42 @@ impl MemoryWriter for MemoryManager {
 pub struct SyncReport {
     /// True when the pass was skipped: another instance held the sync lock.
     pub skipped: bool,
+    /// Set when the pass re-embedded the index after an identity change.
+    pub reindex: Option<ReindexReport>,
     pub files_updated: usize,
     pub files_unchanged: usize,
     pub files_removed: usize,
     pub errors: usize,
     pub cache_hits: usize,
     pub cache_misses: usize,
+}
+
+/// Why a re-index pass re-embedded the chunks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReindexReason {
+    /// No embedding identity was recorded yet (fresh or pre-upgrade index).
+    NoRecordedIdentity,
+    /// The configured provider produces a different dimension count.
+    DimensionsChanged,
+    /// Same dimensions, different provider key or model.
+    ProviderChanged,
+    /// Re-index was requested explicitly while the identity already matched.
+    Forced,
+}
+
+/// Outcome of [`MemoryManager::reindex`] and of the re-index step of a sync.
+#[derive(Debug, Default, Clone)]
+pub struct ReindexReport {
+    /// True when another instance held the sync lock.
+    pub skipped: bool,
+    /// Why the chunks were re-embedded; `None` when the identity matched.
+    pub reason: Option<ReindexReason>,
+    /// Number of chunks re-embedded (0 when nothing needed to change).
+    pub chunks_reembedded: usize,
+    /// Dimension count of the vectors before the pass, when recorded.
+    pub dimensions_before: Option<usize>,
+    /// Dimension count produced by the active provider.
+    pub dimensions_after: usize,
 }
 
 /// Maximum number of embedding cache rows before LRU eviction kicks in.

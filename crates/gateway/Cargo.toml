@@ -209,6 +209,7 @@ metrics = [
   "moltis-connectors?/metrics",
   "moltis-discord?/metrics",
   "moltis-matrix?/metrics",
+  "moltis-memory/metrics",
   "moltis-metrics/sqlite",
   "moltis-msteams?/metrics",
   "moltis-nostr?/metrics",

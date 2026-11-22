@@ -58,7 +58,8 @@ port = {port}                           # Port number (auto-generated for this i
 # ══════════════════════════════════════════════════════════════════════════════
 # One deployment-wide database engine for every SQL store: a deployment runs
 # on PostgreSQL or SQLite, never both (no fallback). Pool size comes from
-# server.db_pool_max_connections.
+# server.db_pool_max_connections: with PostgreSQL keep it at 2 or more, because
+# a memory sync pass pins one connection for the whole pass.
 
 # [database]
 # backend = "sqlite"                # "sqlite" | "postgres"

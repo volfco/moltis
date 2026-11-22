@@ -191,6 +191,12 @@ pub mod memory {
     pub const SILENT_TURN_FILES_WRITTEN: &str = "moltis_memory_silent_turn_files_written";
     /// Sync passes skipped because another instance held the sync lock
     pub const SYNC_LOCK_SKIPS_TOTAL: &str = "moltis_memory_sync_lock_skips_total";
+    /// Re-index passes run after an embedding identity change
+    pub const REINDEX_TOTAL: &str = "moltis_memory_reindex_total";
+    /// Re-index pass duration in seconds
+    pub const REINDEX_DURATION_SECONDS: &str = "moltis_memory_reindex_duration_seconds";
+    /// Chunks re-embedded by re-index passes
+    pub const REINDEXED_CHUNKS_TOTAL: &str = "moltis_memory_reindexed_chunks_total";
 }
 
 /// Plugin metrics

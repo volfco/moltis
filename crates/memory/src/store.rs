@@ -2,6 +2,7 @@
 use async_trait::async_trait;
 
 use crate::{
+    embeddings::EmbeddingProvider,
     error::Result,
     pgvector::PgvectorStatus,
     schema::{ChunkRow, FileRow},
@@ -25,6 +26,29 @@ pub enum MergeStrategy {
 impl Default for MergeStrategy {
     fn default() -> Self {
         Self::Rrf { k: 60 }
+    }
+}
+
+/// Identity of the embedding provider that produced the stored vectors, as
+/// persisted in the engine-agnostic `memory_meta` table.
+///
+/// Vectors from different providers or dimensions are not comparable, so a
+/// sync pass that sees a different identity re-embeds every chunk text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddingMeta {
+    pub provider_key: String,
+    pub model: String,
+    pub dimensions: usize,
+}
+
+impl EmbeddingMeta {
+    /// The identity of `provider`, as recorded after an embed.
+    pub fn from_provider(provider: &dyn EmbeddingProvider) -> Self {
+        Self {
+            provider_key: provider.provider_key().to_string(),
+            model: provider.model_name().to_string(),
+            dimensions: provider.dimensions(),
+        }
     }
 }
 
@@ -128,5 +152,47 @@ pub trait MemoryStore: Send + Sync {
     /// `None` where the probe does not apply (SQLite and non-SQL stores).
     async fn pgvector_status(&self) -> Result<Option<PgvectorStatus>> {
         Ok(None)
+    }
+
+    // ---- embedding identity ----
+
+    /// Whether this backend persists the embedding identity in `memory_meta`.
+    ///
+    /// Backends that do not are skipped by the identity check: with nothing
+    /// recorded, every sync would look like a provider change and re-embed the
+    /// whole index each pass.
+    fn tracks_embedding_identity(&self) -> bool {
+        false
+    }
+
+    /// The embedding identity recorded in `memory_meta`, if any.
+    ///
+    /// `None` means no embed has been recorded yet (fresh index) or the
+    /// backend does not persist metadata.
+    async fn read_embedding_meta(&self) -> Result<Option<EmbeddingMeta>> {
+        Ok(None)
+    }
+
+    /// Record the embedding identity in `memory_meta`.
+    async fn write_embedding_meta(&self, _meta: &EmbeddingMeta) -> Result<()> {
+        Ok(())
+    }
+
+    /// Prepare the embedding storage for vectors of a different dimension.
+    ///
+    /// PostgreSQL drops the vector index and untypes `chunks.embedding` so a
+    /// re-embed at the new dimension can land; a typed `vector(N)` column
+    /// rejects the new values. Idempotent, and a no-op on backends without
+    /// column typing.
+    async fn relax_embedding_schema(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Make the embedding storage match `dimensions`: type the column as
+    /// `vector(N)` and ensure its index (PostgreSQL only). Idempotent, so a
+    /// re-index interrupted between the metadata write and this call resumes
+    /// here on the next sync.
+    async fn ensure_embedding_schema(&self, _dimensions: usize) -> Result<()> {
+        Ok(())
     }
 }

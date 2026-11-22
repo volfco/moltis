@@ -190,6 +190,9 @@ async fn open_sqlite_store(data_dir: &std::path::Path) -> anyhow::Result<ActiveS
 async fn open_postgres_store(config: &moltis_config::MoltisConfig) -> anyhow::Result<ActiveStore> {
     let url = moltis_gateway::database::postgres_url(config)?;
     let db = moltis_db::Db::connect(&moltis_db::DbOptions::postgres(url.clone(), 2)).await?;
+    // Same preflight as startup: without it a missing pgvector surfaces as the
+    // raw migration error this command is meant to avoid.
+    moltis_memory::pgvector::preflight(&db).await?;
     moltis_memory::schema::run_migrations(&db).await?;
     Ok(ActiveStore::Open {
         store: Box::new(moltis_memory::store_db::DbMemoryStore::new(db)),
