@@ -147,22 +147,19 @@ if PostgreSQL is configured but unreachable, startup aborts with an error.
    url = "postgres://postgres:moltis@localhost/moltis"
    ```
 
-3. Create the pgvector extension once per database (needs superuser):
-   ```bash
-   psql -d moltis -c 'CREATE EXTENSION vector;'
-   ```
-   moltis probes for the extension before running its memory migrations and
-   refuses to start when it is missing, with the exact fix instead of a raw
-   migration error:
-   `pgvector extension is missing in PostgreSQL database 'moltis': run as superuser: CREATE EXTENSION vector;`
-
-4. Restart moltis. Migrations run automatically and create all store tables
-   and the GIN index used for memory keyword search. In SQLite mode the files
-   stay as today (`moltis.db`, `memory.db`,
+3. Restart moltis. Migrations run automatically and create the `vector`
+   extension, all store tables, and the GIN index used for memory keyword
+   search. In SQLite mode the files stay as today (`moltis.db`, `memory.db`,
    `connectors.db`, …); in PostgreSQL mode everything lives in the one
    database.
 
 Notes:
+
+- The `vector` extension is created automatically when the connecting role
+  may create extensions (e.g. the `postgres` superuser). Otherwise startup
+  aborts before the memory migrations with the exact fix instead of a raw
+  migration error: `pgvector extension is missing in PostgreSQL database
+  'moltis': run as superuser: CREATE EXTENSION vector;`
 
 - The Memory settings page shows a pgvector banner (`pgvector: available`, or
   `missing — run CREATE EXTENSION vector as superuser`), and the `memory.status`
@@ -625,9 +622,10 @@ systems.
 ### PostgreSQL backend not available
 
 1. Confirm `database.url` is set and the server is reachable
-2. Confirm the pgvector extension is installed on the server — startup fails
-   with `pgvector extension is missing … run as superuser: CREATE EXTENSION
-   vector;` when it is not; run that command as superuser and restart
+2. The pgvector extension is created automatically when the connecting role
+   may create extensions; if startup fails with `pgvector extension is
+   missing … run as superuser: CREATE EXTENSION vector;`, run that command as
+   superuser and restart
 3. Check the startup error: moltis aborts when the connection or a migration
    fails — it never silently falls back to SQLite
 

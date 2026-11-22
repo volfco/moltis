@@ -1,9 +1,12 @@
 //! pgvector availability probe for the PostgreSQL memory schema.
 //!
-//! The memory migrations require the `vector` extension. When it is missing
-//! the raw migration error hides the fix, so a preflight probe runs before the
-//! migrations and fails startup with the exact remediation instead. The same
-//! probe feeds the `pgvector` field of the `memory.status` RPC.
+//! The memory migrations require the `vector` extension and create it
+//! themselves, but their raw error hides the fix when the connecting role
+//! may not create extensions. A preflight runs before the migrations:
+//! missing extension → attempt `CREATE EXTENSION IF NOT EXISTS vector` (a
+//! privileged role needs no manual step) → only when that is denied, fail
+//! with the exact remediation instead of the raw error. The same probe feeds
+//! the `pgvector` field of the `memory.status` RPC.
 
 use {moltis_db::Db, serde::Serialize};
 
@@ -51,23 +54,32 @@ pub async fn probe(db: &Db) -> Result<Option<PgvectorStatus>> {
     }))
 }
 
-/// Fail when PostgreSQL memory migrations would run without pgvector.
+/// Ensure pgvector is installed before the PostgreSQL memory migrations run.
 ///
-/// The error names the database and the exact remediation. SQLite and exotic
-/// setups without `pg_extension` pass through unchanged.
+/// When the extension is missing this attempts `CREATE EXTENSION IF NOT
+/// EXISTS vector` first — the same statement the migrations run — so a
+/// privileged role (e.g. superuser) needs no manual step. Only when that
+/// attempt fails (insufficient privileges, missing extension package) does
+/// the error surface, naming the database, the exact remediation, and the
+/// cause of the failed creation. SQLite and exotic setups without
+/// `pg_extension` pass through unchanged.
 pub async fn preflight(db: &Db) -> Result<()> {
-    match probe(db).await? {
-        Some(status) if !status.available => {
-            let database: String =
-                moltis_db::scalar!(db, String, "SELECT current_database()::text")
-                    .unwrap_or_else(|_| "unknown".to_string());
-            Err(Error::PgvectorMissing(format!(
-                "pgvector extension is missing in PostgreSQL database '{database}': \
-                 run as superuser: {PGVECTOR_ACTION}"
-            )))
-        },
-        _ => Ok(()),
+    let Some(status) = probe(db).await? else {
+        return Ok(());
+    };
+    if status.available {
+        return Ok(());
     }
+    let cause = match moltis_db::execute!(db, "CREATE EXTENSION IF NOT EXISTS vector") {
+        Ok(_) => return Ok(()),
+        Err(error) => error,
+    };
+    let database: String = moltis_db::scalar!(db, String, "SELECT current_database()::text")
+        .unwrap_or_else(|_| "unknown".to_string());
+    Err(Error::PgvectorMissing(format!(
+        "pgvector extension is missing in PostgreSQL database '{database}': \
+         run as superuser: {PGVECTOR_ACTION} (automatic creation failed: {cause})"
+    )))
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -97,15 +109,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pg_preflight_names_remediation_when_pgvector_missing_then_passes_after_migrations() {
+    async fn pg_preflight_creates_pgvector_without_manual_step() {
         let _guard = crate::test_support::pg_lock().lock().await;
         let Some(db) = crate::test_support::pg_test_db_pre_migration().await else {
             return;
         };
-        // Reruns must see the pre-install state; the schema reset above left
-        // no object that depends on the extension.
-        moltis_db::execute!(&db, "DROP EXTENSION IF EXISTS vector")
-            .unwrap_or_else(|error| panic!("drop test extension failed: {error}"));
+        reset_extension_state(&db).await;
 
         let status = probe(&db)
             .await
@@ -116,9 +125,48 @@ mod tests {
             "fresh database must report pgvector missing"
         );
 
-        let error = preflight(&db)
+        // Documented zero-touch flow: a superuser run must not need a manual
+        // CREATE EXTENSION before the first start.
+        preflight(&db)
             .await
-            .expect_err("missing pgvector must fail the preflight");
+            .expect("privileged preflight must auto-create pgvector");
+        crate::schema::run_migrations(&db).await.unwrap();
+
+        let status = probe(&db)
+            .await
+            .unwrap()
+            .expect("probe applies on PostgreSQL");
+        assert!(
+            status.available,
+            "preflight must leave pgvector installed for the migrations"
+        );
+    }
+
+    #[tokio::test]
+    async fn pg_preflight_names_remediation_when_extension_creation_denied() {
+        let _guard = crate::test_support::pg_lock().lock().await;
+        let Some(db) = crate::test_support::pg_test_db_pre_migration().await else {
+            return;
+        };
+        reset_extension_state(&db).await;
+
+        // A non-superuser role without create rights cannot install pgvector,
+        // so the preflight's create attempt fails and the actionable error
+        // must replace the raw one.
+        moltis_db::execute!(&db, format!("DROP ROLE IF EXISTS {RESTRICTED_ROLE}"))
+            .unwrap_or_else(|error| panic!("drop test role failed: {error}"));
+        moltis_db::execute!(
+            &db,
+            format!("CREATE ROLE {RESTRICTED_ROLE} LOGIN PASSWORD 'restricted'")
+        )
+        .unwrap_or_else(|error| panic!("create test role failed: {error}"));
+        let restricted = Db::connect(&moltis_db::DbOptions::postgres(restricted_url(), 2))
+            .await
+            .unwrap_or_else(|error| panic!("restricted test role must connect: {error}"));
+
+        let error = preflight(&restricted)
+            .await
+            .expect_err("denied creation must fail the preflight");
         let message = error.to_string();
         assert!(
             message.contains("run as superuser: CREATE EXTENSION vector;"),
@@ -130,17 +178,23 @@ mod tests {
             message.contains(&database),
             "error must name the database: {message}"
         );
+    }
 
-        // The migrations create the extension (CREATE EXTENSION IF NOT EXISTS).
-        crate::schema::run_migrations(&db).await.unwrap();
-        let status = probe(&db)
-            .await
-            .unwrap()
-            .expect("probe applies on PostgreSQL");
-        assert!(
-            status.available,
-            "migrated database must report pgvector available"
-        );
-        preflight(&db).await.unwrap();
+    /// Non-superuser role used by the creation-denied test.
+    const RESTRICTED_ROLE: &str = "moltis_pgvector_restricted";
+
+    /// Reruns must see the pre-install state; the schema reset already left
+    /// no object that depends on the extension.
+    async fn reset_extension_state(db: &Db) {
+        moltis_db::execute!(db, "DROP EXTENSION IF EXISTS vector")
+            .unwrap_or_else(|error| panic!("drop test extension failed: {error}"));
+    }
+
+    /// Connect URL for [`RESTRICTED_ROLE`], derived from `TEST_POSTGRES_URL`.
+    fn restricted_url() -> String {
+        let url = std::env::var("TEST_POSTGRES_URL").unwrap();
+        let (_, after_scheme) = url.split_once("://").unwrap();
+        let (_, host_and_db) = after_scheme.split_once('@').unwrap();
+        format!("postgres://{RESTRICTED_ROLE}:restricted@{host_and_db}")
     }
 }
