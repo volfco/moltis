@@ -208,7 +208,7 @@ enum Commands {
         #[command(subcommand)]
         action: db_commands::DbAction,
     },
-    /// Memory search and status.
+    /// Search, inspect, and re-index memory.
     Memory {
         #[command(subcommand)]
         action: memory_commands::MemoryAction,
