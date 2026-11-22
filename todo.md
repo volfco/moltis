@@ -44,6 +44,19 @@ Accepted review fixes to apply consistently across all ported crates:
       saved config (found via `MemorySection`, fixed there). Consider a shared
       `sendRpcWhenReady()` helper in `helpers.ts`.
 
+## Follow-ups from the integration wave
+
+- [ ] Settings UI for the `[database]` engine (config-file only today; the
+      Memory settings page no longer offers it).
+- [ ] `moltis db reset` for PostgreSQL behind a moltis-ownership marker (today
+      it refuses and tells the operator to drop/recreate the database).
+- [ ] Decompose `crates/gateway/src/pairing.rs` (1,526 lines, allowlisted in
+      check-file-size.sh — grew past the 1,500 limit during the port).
+- [ ] Clean up the inert `cron/runs/` directory left by the old JSON store
+      once the `jobs.json.bak` import has aged.
+- [ ] `moltis db migrate`/`clear` do not cover webhooks/vault tables
+      (pre-existing parity gap, unchanged by the port).
+
 ## Memory backend hardening
 
 - [ ] HNSW: `vector(N)` column + dimension recorded in a `memory_meta` table,

@@ -8,25 +8,23 @@ state, long-term memory files, and sandbox persistence, start with
 
 ## Backends
 
-Moltis supports four memory backends:
+Moltis supports three memory backends:
 
-| Feature | Built-in | Zvec | PostgreSQL | QMD |
-|---------|----------|------|------------|-----|
-| **Storage** | SQLite (`memory.db`) | Zvec collection directory | PostgreSQL + pgvector | QMD index |
-| **Search Type** | Hybrid (vector + FTS5 keyword) | Hybrid (HNSW vector + native FTS keyword) | Hybrid (pgvector + `tsvector`) | Hybrid (BM25 + vector + LLM reranking) |
-| **Vector Search** | Brute force in Rust | HNSW index | `ORDER BY embedding <=> query` in the database | HNSW |
-| **Keyword Search** | FTS5 | Native FTS | `tsvector` + GIN | BM25 |
-| **Local Embeddings** | GGUF models via llama-cpp-2 | GGUF models via llama-cpp-2 | GGUF models via llama-cpp-2 | GGUF models |
-| **Remote Embeddings** | OpenAI, Ollama, custom endpoints | OpenAI, Ollama, custom endpoints | OpenAI, Ollama, custom endpoints | Built-in |
-| **Embedding Cache** | SQLite with LRU eviction | Redb persistent K-V store | `embedding_cache` table | Built-in |
-| **Batch API** | OpenAI batch (50% cost saving) | No | OpenAI batch (50% cost saving) | No |
-| **Circuit Breaker** | Fallback chain with auto-recovery | Fallback chain with auto-recovery | Fallback chain with auto-recovery | No |
-| **LLM Reranking** | Optional (configurable) | Optional (configurable) | Optional (configurable) | Built-in with `query` command |
-| **File Watching** | Real-time sync via notify | Real-time sync via notify | Real-time sync via notify | Built-in |
-| **External Dependency** | None (pure Rust) | Requires zvec C library (v0.5.0) | Requires PostgreSQL with pgvector | Requires QMD binary (Node.js/Bun) |
-| **Multi-process access** | Single writer (WAL) | Single writer | Yes (MVCC) | Yes |
-| **Offline Support** | Yes (with local embeddings) | Yes (with local embeddings) | No (needs the database server) | Yes |
-| **Scale sweet spot** | under ~5k chunks | large local corpora | 5k chunks and up, or shared access | large corpora |
+| Feature | Built-in | Zvec | QMD |
+|---------|----------|------|-----|
+| **Storage** | Database engine (SQLite `memory.db` or PostgreSQL) | Zvec collection directory | QMD index |
+| **Search Type** | Hybrid (vector + FTS keyword) | Hybrid (HNSW vector + native FTS keyword) | Hybrid (BM25 + vector + LLM reranking) |
+| **Vector Search** | Brute force in Rust (SQLite) or `ORDER BY embedding <=> query` (PostgreSQL) | HNSW index | HNSW |
+| **Keyword Search** | FTS5 (SQLite) or `tsvector` + GIN (PostgreSQL) | Native FTS | BM25 |
+| **Local Embeddings** | GGUF models via llama-cpp-2 | GGUF models via llama-cpp-2 | GGUF models |
+| **Remote Embeddings** | OpenAI, Ollama, custom endpoints | OpenAI, Ollama, custom endpoints | Built-in |
+| **Embedding Cache** | Database table with LRU eviction | Redb persistent K-V store | Built-in |
+| **Batch API** | OpenAI batch (50% cost saving) | No | No |
+| **Circuit Breaker** | Fallback chain with auto-recovery | Fallback chain with auto-recovery | No |
+| **LLM Reranking** | Optional (configurable) | Optional (configurable) | Built-in with `query` command |
+| **File Watching** | Real-time sync via notify | Real-time sync via notify | Built-in |
+| **External Dependency** | None beyond the chosen database engine | Requires zvec C library (v0.5.0) | Requires QMD binary (Node.js/Bun) |
+| **Offline Support** | Yes (with local embeddings) | Yes (with local embeddings) | Yes |
 
 ### Built-in Backend
 
@@ -110,24 +108,28 @@ metadata index, and the per-path chunk index that `list_files`,
 backend can no longer enumerate files or look up chunks by path until you
 re-index.
 
-### PostgreSQL Backend
+### PostgreSQL as the database engine
 
-Stores the memory index in PostgreSQL using the
-[pgvector](https://github.com/pgvector/pgvector) `vector` column type. Moltis
-writes the same files, chunks, and embedding cache rows as the built-in
-backend, so search behavior (weights, merge strategy, citations, reranking) is
-identical — only the storage and the similarity search move into the database.
+The built-in backend stores its index in whichever database engine
+`[database]` selects — SQLite (the default, zero-dependency) or PostgreSQL
+with the [pgvector](https://github.com/pgvector/pgvector) extension. This is
+a whole-deployment choice: every SQL-backed store (projects, sessions, cron,
+vault, connectors, code-index, auth, memory) uses the same engine. A
+deployment runs PostgreSQL or SQLite, never a mix, and there is no fallback:
+if PostgreSQL is configured but unreachable, startup aborts with an error.
 
-**When to use PostgreSQL:**
+**When to choose PostgreSQL:**
+
 - Your memory corpus is large enough that loading every embedding into the
   process for brute-force search is too slow
-- Several moltis instances should share one memory index
+- Several moltis instances should share one database
 - You already operate a PostgreSQL server
 
-**When to stick with built-in (SQLite):**
+**When to stick with SQLite:**
+
 - You want zero operational overhead and no external services
-- Your memory corpus is small (a few thousand chunks or fewer)
-- You want the simplest possible backup story (one file on disk)
+- Your data is small (a few thousand chunks or fewer)
+- You want the simplest possible backup story (a few files on disk)
 
 **Setup:**
 
@@ -138,43 +140,35 @@ identical — only the storage and the similarity search move into the database.
      -p 5432:5432 pgvector/pgvector:pg17
    ```
 
-2. Point moltis at it in `moltis.toml`:
+2. Point moltis at it in `moltis.toml` (use a dedicated database):
    ```toml
-   [memory]
+   [database]
    backend = "postgres"
-   database_url = "postgres://postgres:moltis@localhost/moltis"
+   url = "postgres://postgres:moltis@localhost/moltis"
    ```
 
-   Or set it from Settings > Memory > PostgreSQL.
-
-3. Restart moltis. Migrations run automatically and create the
-   `vector` extension, the `files`, `chunks`, and `embedding_cache` tables, and
-   the GIN index used for keyword search.
+3. Restart moltis. Migrations run automatically and create the `vector`
+   extension, all store tables, and the GIN index used for memory keyword
+   search. In SQLite mode the files stay as today (`moltis.db`, `memory.db`,
+   `connectors.db`, …); in PostgreSQL mode everything lives in the one
+   database.
 
 Notes:
 
-- The embedding column is deliberately untyped (`vector`, not `vector(1536)`),
-  so a change of embedding provider or dimension does not require a re-index.
-  Similarity search therefore runs as a sequential scan ordered by `<=>`
-  instead of using an HNSW index. Adding `vector(N)` plus an HNSW index is a
-  future optimization, not a requirement.
+- The memory embedding column is deliberately untyped (`vector`, not
+  `vector(1536)`), so a change of embedding provider or dimension does not
+  require a re-index. Similarity search therefore runs as a sequential scan
+  ordered by `<=>` instead of using an HNSW index. Adding `vector(N)` plus an
+  HNSW index is a future optimization, not a requirement.
 - Keyword search uses `websearch_to_tsquery`, which tolerates arbitrary user
   text (quoted phrases, `OR`, leading `-`) without syntax errors.
-- The task tracker, sessions, and cron tables still live in SQLite
-  (`moltis.db`); the `postgres` backend covers the memory index only.
-- `database_url` holds credentials: it is never returned by the settings API.
-  If the backend cannot reach PostgreSQL, moltis logs a warning and falls back
-  to the SQLite backend rather than failing to start.
+- `database.url` holds credentials: it is never returned by the settings API.
+- `moltis db reset` deletes database *files* and is SQLite-only; on
+  PostgreSQL, drop and recreate the database instead.
 
-To move an existing SQLite memory index to PostgreSQL, stop moltis and
-re-index into the new backend (the index is derived data, not the source of
-truth):
-
-```bash
-# 1. switch [memory] backend = "postgres" in moltis.toml
-# 2. start moltis; the next sync re-embeds and re-indexes every memory file
-moltis memory status
-```
+To move an existing SQLite memory index to PostgreSQL, stop moltis, switch
+`[database]`, and start again — the memory index is derived data and re-syncs
+from your memory files on the first sync (`moltis memory status` shows it).
 
 ## Features
 
@@ -334,7 +328,7 @@ Common combinations:
 | Keep `USER.md` from silent enrichment | `user_profile_write_mode = "explicit-only"` |
 | Keep user profile only in config | `user_profile_write_mode = "off"` |
 | Zvec backend experiment | `backend = "zvec"`, `db_path = "memory.zvec"` |
-| Share memory through PostgreSQL | `backend = "postgres"`, `database_url = "postgres://…"` |
+| Put everything on PostgreSQL | `[database]` with `backend = "postgres"`, `url = "postgres://…"` |
 | QMD backend experiment | `backend = "qmd"` |
 
 ## Embedding Providers
@@ -617,14 +611,12 @@ systems.
 
 ### PostgreSQL backend not available
 
-1. Confirm `memory.database_url` is set and the server is reachable
+1. Confirm `database.url` is set and the server is reachable
 2. Confirm the pgvector extension is installed on the server:
    `psql -c "CREATE EXTENSION IF NOT EXISTS vector"` (needs superuser or the
    extension pre-installed by your provider)
-3. Check the gateway log for `postgres backend unavailable` or
-   `memory migrations failed` — moltis falls back to the SQLite backend when
-   the connection or the migration fails, so memory would be written to
-   `memory.db` instead
+3. Check the startup error: moltis aborts when the connection or a migration
+   fails — it never silently falls back to SQLite
 
 ### QMD not available
 

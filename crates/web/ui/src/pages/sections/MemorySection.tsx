@@ -30,8 +30,6 @@ interface MemoryConfig {
 	prompt_memory_mode?: string;
 	qmd_feature_enabled?: boolean;
 	zvec_feature_enabled?: boolean;
-	postgres_backend_available?: boolean;
-	database_url_set?: boolean;
 	enable_prefetch?: boolean;
 	prefetch_limit?: number;
 	auto_extract_interval?: number;
@@ -67,7 +65,6 @@ export function MemorySection(): VNode {
 	const [autoExtractInterval, setAutoExtractInterval] = useState(5);
 	const [enableSessionSummary, setEnableSessionSummary] = useState(true);
 	const [enableSelfImprovement, setEnableSelfImprovement] = useState(true);
-	const [databaseUrl, setDatabaseUrl] = useState("");
 
 	useEffect(() => {
 		let cancelled = false;
@@ -112,7 +109,6 @@ export function MemorySection(): VNode {
 						setEnableSelfImprovement(cfg.enable_self_improvement ?? true);
 						// The stored URL contains credentials and is never echoed back,
 						// so the field starts empty and only overrides when typed into.
-						setDatabaseUrl("");
 					}
 					if (qmdRes?.ok) {
 						setQmdStatus(qmdRes.payload as QmdStatus);
@@ -154,7 +150,6 @@ export function MemorySection(): VNode {
 			auto_extract_interval: autoExtractInterval,
 			enable_session_summary: enableSessionSummary,
 			enable_self_improvement: enableSelfImprovement,
-			database_url: databaseUrl,
 		}).then((res: RpcResponse) => {
 			save.setSaving(false);
 			if (res?.ok) {
@@ -393,16 +388,6 @@ export function MemorySection(): VNode {
 						</button>
 						<button
 							type="button"
-							className={`provider-btn ${backend === "postgres" ? "" : "provider-btn-secondary"}`}
-							onClick={() => {
-								setBackend("postgres");
-								rerender();
-							}}
-						>
-							PostgreSQL
-						</button>
-						<button
-							type="button"
 							className={`provider-btn ${backend === "qmd" ? "" : "provider-btn-secondary"}`}
 							disabled={!qmdFeatureEnabled}
 							onClick={() => {
@@ -413,41 +398,6 @@ export function MemorySection(): VNode {
 							QMD
 						</button>
 					</div>
-
-					{backend === "postgres" ? (
-						<div
-							style={{
-								marginTop: "12px",
-								padding: "12px",
-								borderRadius: "6px",
-								border: "1px solid var(--border)",
-								background: "var(--bg)",
-							}}
-						>
-							<h4 className="text-xs font-medium text-[var(--text-strong)]" style={{ margin: "0 0 8px" }}>
-								PostgreSQL connection
-							</h4>
-							<p className="text-xs text-[var(--muted)]" style={{ margin: "0 0 8px" }}>
-								Requires a PostgreSQL server with the pgvector <code>vector</code> extension. The URL is stored in
-								<code> moltis.toml</code> and never shown again after saving.
-							</p>
-							<input
-								type="password"
-								className="provider-key-input"
-								style={{ width: "100%" }}
-								placeholder={
-									memConfig?.database_url_set
-										? "postgres://user:pass@host/db (already configured — leave blank to keep)"
-										: "postgres://user:pass@localhost/moltis"
-								}
-								value={databaseUrl}
-								onInput={(e: Event) => {
-									setDatabaseUrl(targetValue(e));
-									rerender();
-								}}
-							/>
-						</div>
-					) : null}
 
 					{qmdFeatureEnabled ? null : (
 						<div className="text-xs text-[var(--error)]" style={{ marginTop: "8px" }}>

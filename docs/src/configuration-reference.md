@@ -743,6 +743,15 @@ Each channel account (`channels.<channel_type>.<account_name>`) is an arbitrary 
 ## Memory
 
 
+### `database`
+
+**Struct:** `DatabaseConfig`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `backend` | enum (`sqlite`, `postgres`) | `"sqlite"` | Database engine for every SQL-backed store (projects, sessions, cron, vault, connectors, code-index, auth, memory). A deployment runs on exactly one engine: PostgreSQL or SQLite, never a mix, with no fallback between them. |
+| `url` | optional string | — | PostgreSQL connection URL, required when `backend = "postgres"` (e.g. `postgres://user:pass@localhost/moltis`). Use a dedicated database. Held as a secret: never returned by the settings API. If PostgreSQL is unreachable or migrations fail, startup aborts with an error. |
+
 ### `memory`
 
 **Struct:** `MemoryEmbeddingConfig`
@@ -752,7 +761,7 @@ Each channel account (`channels.<channel_type>.<account_name>`) is an arbitrary 
 | `style` | enum (`hybrid`, `prompt-only`, `search-only`, `off`) | `"hybrid"` | High-level memory orchestration style. |
 | `agent_write_mode` | enum (`hybrid`, `prompt-only`, `search-only`, `off`) | `"hybrid"` | Where agent-authored memory writes are allowed to land. |
 | `user_profile_write_mode` | enum (`explicit-and-auto`, `explicit-only`, `off`) | `"explicit-and-auto"` | How Moltis writes the managed `USER.md` profile surface. |
-| `backend` | enum (`builtin`, `qmd`, `zvec`, `postgres`) | `"builtin"` | Memory backend used for search, retrieval, and indexing. |
+| `backend` | enum (`builtin`, `qmd`, `zvec`) | `"builtin"` | Memory backend used for search, retrieval, and indexing. |
 | `provider` | optional enum (`local`, `ollama`, `openai`, `custom`) | *auto-detect* | Embedding provider. Alias: `embedding_provider`. |
 | `disable_rag` | bool | `false` | Disable RAG embeddings and force keyword-only memory search. |
 | `base_url` | optional string | — | Base URL for the embedding API. Alias: `embedding_base_url`. |
@@ -764,7 +773,6 @@ Each channel account (`channels.<channel_type>.<account_name>`) is an arbitrary 
 | `session_export` | enum (`off`, `on-new-or-reset`) | `"on-new-or-reset"` | How session transcripts are exported into searchable memory. |
 | `qmd` | map (see `memory.qmd`) | `{}` | QMD-specific configuration (only used when backend = `"qmd"`). |
 | `db_path` | optional string | — | Zvec collection directory path (only used when `backend = "zvec"`). Resolved relative to the Moltis data directory. |
-| `database_url` | optional string | — | PostgreSQL connection URL (only used when `backend = "postgres"`). Requires a server with the pgvector `vector` extension. Never returned by the settings API. |
 | `vector_weight` | float | `0.7` | Weight for vector similarity in hybrid search (0.0–1.0). |
 | `keyword_weight` | float | `0.3` | Weight for keyword/FTS similarity in hybrid search (0.0–1.0). |
 
