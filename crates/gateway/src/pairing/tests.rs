@@ -1,0 +1,437 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use {super::*, moltis_db::Db};
+
+async fn test_db() -> Db {
+    let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+    let db = Db::from(pool);
+    crate::run_migrations(&db).await.unwrap();
+    db
+}
+
+#[tokio::test]
+async fn pairing_lifecycle() {
+    let db = test_db().await;
+    let store = PairingStore::new(db);
+
+    // Request pairing.
+    let req = store
+        .request_pair("dev-1", Some("My iPhone"), "ios", None)
+        .await
+        .unwrap();
+    assert_eq!(req.device_id, "dev-1");
+    assert_eq!(req.status, PairStatus::Pending);
+
+    // List pending.
+    let pending = store.list_pending().await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, req.id);
+
+    // Approve.
+    let token = store.approve(&req.id).await.unwrap();
+    assert!(token.token.starts_with("mdt_"));
+    assert_eq!(token.device_id, "dev-1");
+    assert!(!token.scopes.is_empty());
+
+    // Pending should be empty now.
+    let pending = store.list_pending().await.unwrap();
+    assert!(pending.is_empty());
+
+    // Device should be listed.
+    let devices = store.list_devices().await.unwrap();
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0].device_id, "dev-1");
+
+    // Verify token.
+    let verification = store.verify_device_token(&token.token).await.unwrap();
+    assert!(verification.is_some());
+    let v = verification.unwrap();
+    assert_eq!(v.device_id, "dev-1");
+    assert_eq!(v.scopes, token.scopes);
+
+    // Rotate token.
+    let new_token = store.rotate_token("dev-1").await.unwrap();
+    assert_ne!(new_token.token, token.token);
+
+    // Old token should be invalid.
+    let old_verify = store.verify_device_token(&token.token).await.unwrap();
+    assert!(old_verify.is_none());
+
+    // New token should be valid.
+    let new_verify = store.verify_device_token(&new_token.token).await.unwrap();
+    assert!(new_verify.is_some());
+
+    // Revoke device.
+    store.revoke_token("dev-1").await.unwrap();
+    let revoked_verify = store.verify_device_token(&new_token.token).await.unwrap();
+    assert!(revoked_verify.is_none());
+
+    // Device should not be listed.
+    let devices = store.list_devices().await.unwrap();
+    assert!(devices.is_empty());
+}
+
+#[tokio::test]
+async fn reject_pair_request() {
+    let db = test_db().await;
+    let store = PairingStore::new(db);
+
+    let req = store
+        .request_pair("dev-2", None, "android", None)
+        .await
+        .unwrap();
+    store.reject(&req.id).await.unwrap();
+
+    // Should not be in pending.
+    let pending = store.list_pending().await.unwrap();
+    assert!(pending.is_empty());
+
+    // Reject again should fail.
+    let result = store.reject(&req.id).await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn expiry_comparison_handles_fractional_and_legacy_timestamps() {
+    let db = test_db().await;
+    let store = PairingStore::new(db.clone());
+    let expiries = [
+        ("exact-second", "2030-01-01T00:00:00Z"),
+        ("fractional", "2030-01-01T00:00:00.900Z"),
+        ("legacy", "2030-01-01 00:00:01"),
+        ("malformed", "not-a-datetime"),
+    ];
+    let mut requests = Vec::new();
+    for (device_id, expires_at) in expiries {
+        let request = store
+            .request_pair(device_id, None, "test", None)
+            .await
+            .unwrap();
+        moltis_db::execute!(
+            &db,
+            "UPDATE pair_requests SET expires_at = ? WHERE id = ?",
+            expires_at,
+            &request.id,
+        )
+        .unwrap();
+        requests.push(request);
+    }
+
+    let now = "2030-01-01T00:00:00.500Z";
+    let pending = store.list_pending_at(now).await.unwrap();
+    let mut pending_devices: Vec<_> = pending
+        .iter()
+        .map(|request| request.device_id.as_str())
+        .collect();
+    pending_devices.sort_unstable();
+    assert_eq!(pending_devices, ["fractional", "legacy"]);
+
+    assert_eq!(store.evict_expired_at(now).await.unwrap(), 1);
+    assert_eq!(
+        store.get_pair_status(&requests[0].id).await.unwrap(),
+        Some(PairStatus::Expired)
+    );
+    assert_eq!(
+        store.get_pair_status(&requests[3].id).await.unwrap(),
+        Some(PairStatus::Pending)
+    );
+}
+
+#[tokio::test]
+async fn approve_nonexistent_request() {
+    let db = test_db().await;
+    let store = PairingStore::new(db);
+
+    let result = store.approve("nonexistent").await;
+    assert!(matches!(result, Err(Error::PairRequestNotFound)));
+}
+
+#[tokio::test]
+async fn verify_invalid_token() {
+    let db = test_db().await;
+    let store = PairingStore::new(db);
+
+    let result = store.verify_device_token("invalid_token").await.unwrap();
+    assert!(result.is_none());
+}
+
+#[tokio::test]
+async fn create_device_token_directly() {
+    let db = test_db().await;
+    let store = PairingStore::new(db);
+
+    // Create a device token without the pairing handshake.
+    let token = store
+        .create_device_token(Some("My Server"), "linux")
+        .await
+        .unwrap();
+    assert!(token.token.starts_with("mdt_"));
+    assert!(!token.scopes.is_empty());
+
+    // Device should be listed.
+    let devices = store.list_devices().await.unwrap();
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0].device_id, token.device_id);
+    assert_eq!(devices[0].display_name.as_deref(), Some("My Server"));
+    assert_eq!(devices[0].platform, "linux");
+
+    // Token should verify.
+    let verification = store.verify_device_token(&token.token).await.unwrap();
+    assert!(verification.is_some());
+    let v = verification.unwrap();
+    assert_eq!(v.device_id, token.device_id);
+
+    // Can revoke it.
+    store.revoke_token(&token.device_id).await.unwrap();
+    let revoked_verify = store.verify_device_token(&token.token).await.unwrap();
+    assert!(revoked_verify.is_none());
+}
+
+#[tokio::test]
+async fn rotate_nonexistent_device() {
+    let db = test_db().await;
+    let store = PairingStore::new(db);
+
+    let result = store.rotate_token("nonexistent").await;
+    assert!(matches!(result, Err(Error::DeviceNotFound)));
+}
+
+// ── Ed25519 identity tests ──────────────────────────────────────────
+
+fn make_test_keypair() -> (String, ed25519_dalek::SigningKey) {
+    use {base64::Engine, rand::Rng};
+
+    let mut seed = [0u8; 32];
+    rand::rng().fill_bytes(&mut seed);
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let pk_b64 =
+        base64::engine::general_purpose::STANDARD.encode(signing_key.verifying_key().as_bytes());
+    (pk_b64, signing_key)
+}
+
+#[tokio::test]
+async fn find_device_by_public_key_lifecycle() {
+    let db = test_db().await;
+    let store = PairingStore::new(db);
+    let (pk_b64, _) = make_test_keypair();
+
+    // Not found before pairing.
+    assert!(
+        store
+            .find_device_by_public_key(&pk_b64)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Pair with public key.
+    let req = store
+        .request_pair("dev-pk-1", Some("Key Node"), "linux", Some(&pk_b64))
+        .await
+        .unwrap();
+    store.approve(&req.id).await.unwrap();
+
+    // Now found.
+    let device = store
+        .find_device_by_public_key(&pk_b64)
+        .await
+        .unwrap()
+        .expect("device should be found");
+    assert_eq!(device.device_id, "dev-pk-1");
+    assert_eq!(device.public_key.as_deref(), Some(pk_b64.as_str()));
+
+    // Revoke and verify it's no longer found.
+    store.revoke_token("dev-pk-1").await.unwrap();
+    assert!(
+        store
+            .find_device_by_public_key(&pk_b64)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // But it IS marked as revoked.
+    assert!(store.is_public_key_revoked(&pk_b64).await.unwrap());
+}
+
+#[test]
+fn ed25519_challenge_response_valid() {
+    use {base64::Engine, ed25519_dalek::Signer};
+
+    let (pk_b64, signing_key) = make_test_keypair();
+    let (nonce, _nonce_b64) = generate_challenge_nonce();
+
+    let signature = signing_key.sign(&nonce);
+    let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
+
+    assert!(verify_ed25519_challenge(&pk_b64, &nonce, &sig_b64).unwrap());
+}
+
+#[test]
+fn ed25519_challenge_response_wrong_key() {
+    use {base64::Engine, ed25519_dalek::Signer};
+
+    let (_pk_b64, signing_key) = make_test_keypair();
+    let (other_pk_b64, _) = make_test_keypair();
+    let (nonce, _) = generate_challenge_nonce();
+
+    let signature = signing_key.sign(&nonce);
+    let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
+
+    // Verify with the wrong public key should fail.
+    assert!(!verify_ed25519_challenge(&other_pk_b64, &nonce, &sig_b64).unwrap());
+}
+
+#[test]
+fn ed25519_challenge_response_wrong_nonce() {
+    use {base64::Engine, ed25519_dalek::Signer};
+
+    let (pk_b64, signing_key) = make_test_keypair();
+    let (nonce, _) = generate_challenge_nonce();
+    let (wrong_nonce, _) = generate_challenge_nonce();
+
+    let signature = signing_key.sign(&nonce);
+    let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
+
+    // Verify with wrong nonce should fail.
+    assert!(!verify_ed25519_challenge(&pk_b64, &wrong_nonce, &sig_b64).unwrap());
+}
+
+#[tokio::test]
+async fn key_pinning_enforcement() {
+    let db = test_db().await;
+    let store = PairingStore::new(db);
+    let (pk_b64, _) = make_test_keypair();
+    let (other_pk_b64, _) = make_test_keypair();
+
+    // No pinned key for unknown device.
+    assert_eq!(
+        store.check_key_pinning("dev-pin-1", &pk_b64).await.unwrap(),
+        KeyPinningResult::NoPinnedKey
+    );
+
+    // Pair with first key.
+    let req = store
+        .request_pair("dev-pin-1", Some("Pinned Node"), "linux", Some(&pk_b64))
+        .await
+        .unwrap();
+    store.approve(&req.id).await.unwrap();
+
+    // Same key should match.
+    assert_eq!(
+        store.check_key_pinning("dev-pin-1", &pk_b64).await.unwrap(),
+        KeyPinningResult::Match
+    );
+
+    // Different key should be rejected.
+    match store
+        .check_key_pinning("dev-pin-1", &other_pk_b64)
+        .await
+        .unwrap()
+    {
+        KeyPinningResult::Mismatch { expected } => {
+            assert_eq!(expected, pk_b64);
+        },
+        other => panic!("expected Mismatch, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn pin_public_key_reports_actual_outcome() {
+    let db = test_db().await;
+    let store = PairingStore::new(db);
+    let (pk_b64, _) = make_test_keypair();
+    let (other_pk_b64, _) = make_test_keypair();
+
+    assert_eq!(
+        store
+            .pin_public_key("missing-device", &pk_b64)
+            .await
+            .unwrap(),
+        PinPublicKeyResult::DeviceNotFound
+    );
+
+    let token = store
+        .create_device_token(Some("Migrating Node"), "linux")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store
+            .pin_public_key(&token.device_id, &pk_b64)
+            .await
+            .unwrap(),
+        PinPublicKeyResult::Pinned
+    );
+    assert_eq!(
+        store
+            .pin_public_key(&token.device_id, &pk_b64)
+            .await
+            .unwrap(),
+        PinPublicKeyResult::AlreadyPinned
+    );
+
+    match store
+        .pin_public_key(&token.device_id, &other_pk_b64)
+        .await
+        .unwrap()
+    {
+        PinPublicKeyResult::Mismatch { expected } => assert_eq!(expected, pk_b64),
+        other => panic!("expected Mismatch, got {other:?}"),
+    }
+
+    store.revoke_token(&token.device_id).await.unwrap();
+    assert_eq!(
+        store
+            .pin_public_key(&token.device_id, &pk_b64)
+            .await
+            .unwrap(),
+        PinPublicKeyResult::Revoked
+    );
+}
+
+#[tokio::test]
+async fn key_pinning_reports_revoked_device() {
+    let db = test_db().await;
+    let store = PairingStore::new(db);
+    let (pk_b64, _) = make_test_keypair();
+
+    let req = store
+        .request_pair(
+            "dev-revoked-pin",
+            Some("Pinned Node"),
+            "linux",
+            Some(&pk_b64),
+        )
+        .await
+        .unwrap();
+    store.approve(&req.id).await.unwrap();
+    store.revoke_token("dev-revoked-pin").await.unwrap();
+
+    assert_eq!(
+        store
+            .check_key_pinning("dev-revoked-pin", &pk_b64)
+            .await
+            .unwrap(),
+        KeyPinningResult::Revoked
+    );
+}
+
+#[test]
+fn public_key_fingerprint_format() {
+    let (pk_b64, _) = make_test_keypair();
+    let fp = public_key_fingerprint(&pk_b64).unwrap();
+    assert!(fp.starts_with("SHA256:"));
+    assert_eq!(fp.len(), 7 + 44); // SHA256: prefix + 44 base64 chars
+}
+
+#[test]
+fn public_key_fingerprint_rejects_malformed_keys() {
+    use base64::Engine;
+
+    assert!(public_key_fingerprint("not base64").is_err());
+    assert!(public_key_fingerprint("").is_err());
+
+    let too_short = base64::engine::general_purpose::STANDARD.encode([1u8; 31]);
+    assert!(public_key_fingerprint(&too_short).is_err());
+}
