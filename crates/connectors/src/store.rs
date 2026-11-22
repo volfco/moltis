@@ -1273,9 +1273,8 @@ fn now_millis() -> i64 {
 }
 
 fn datetime_to_millis(value: OffsetDateTime) -> Result<i64> {
-    i64::try_from(value.unix_timestamp_nanos().div_euclid(1_000_000)).map_err(|_| {
-        ConnectorError::InvalidInput("timestamp is outside SQLite integer range".to_owned())
-    })
+    i64::try_from(value.unix_timestamp_nanos().div_euclid(1_000_000))
+        .map_err(|_| ConnectorError::InvalidInput("timestamp is outside i64 range".to_owned()))
 }
 
 fn millis_to_datetime(value: i64) -> Result<OffsetDateTime> {
@@ -1288,9 +1287,8 @@ fn optional_datetime(value: Option<i64>) -> Result<Option<OffsetDateTime>> {
 }
 
 fn u64_to_i64(value: u64) -> Result<i64> {
-    i64::try_from(value).map_err(|_| {
-        ConnectorError::InvalidInput("numeric value exceeds SQLite integer range".to_owned())
-    })
+    i64::try_from(value)
+        .map_err(|_| ConnectorError::InvalidInput("numeric value exceeds i64 range".to_owned()))
 }
 
 fn i64_to_u64(value: i64, field: &str) -> Result<u64> {

@@ -27,11 +27,13 @@ pub async fn run_migrations(db: &Db) -> Result<()> {
     .map_err(|e| Error::IndexStore(format!("code-index migration failed: {e}")))
 }
 
-/// Escape a user query for safe use as an FTS5 MATCH expression.
+/// Escape a user query for safe use as an FTS5 MATCH expression or a
+/// `websearch_to_tsquery` phrase.
 ///
 /// FTS5 has its own query language (supports AND, OR, NOT, NEAR, phrase literals).
 /// Passing raw input causes parse errors on unbalanced quotes or boolean operators.
-/// We quote the entire query as a phrase literal, escaping internal double-quotes.
+/// We quote the entire query as a phrase literal, escaping internal double-quotes,
+/// so both engines search the whole query as one adjacent phrase.
 fn escape_fts5_query(query: &str) -> String {
     let escaped = query.replace('"', "\"\"");
     format!("\"{escaped}\"")
@@ -222,15 +224,13 @@ impl CodeIndexStore for DbCodeIndexStore {
         query: &str,
         limit: usize,
     ) -> Result<Vec<SearchResult>> {
-        // FTS5 query with project filter via JOIN on SQLite; generated
-        // tsvector column on PostgreSQL. The tsquery is built once in FROM so
-        // the bind list keeps one bind per placeholder.
+        // Both engines search the whole query as one phrase literal (escaped
+        // by escape_fts5_query), so multi-word queries require adjacency
+        // identically instead of ANDing loose terms. The tsquery is built
+        // once in FROM so the bind list keeps one bind per placeholder.
+        let safe_query = escape_fts5_query(query);
         let rows: Vec<(String, String, i64, i64)> = match self.db.dialect() {
             Dialect::Sqlite => {
-                // Query is escaped as a phrase literal to prevent FTS5 parse
-                // errors on unbalanced quotes or boolean operators from
-                // LLM-generated input.
-                let safe_query = escape_fts5_query(query);
                 moltis_db::fetch_all!(
                     &self.db,
                     (String, String, i64, i64),
@@ -253,8 +253,8 @@ impl CodeIndexStore for DbCodeIndexStore {
                 )
             },
             Dialect::Postgres => {
-                // `websearch_to_tsquery` accepts free-form user text and never
-                // raises a syntax error, so no phrase escaping is needed.
+                // websearch_to_tsquery reads the quoted form as a phrase (and
+                // never raises a syntax error), mirroring FTS5 phrase MATCH.
                 moltis_db::fetch_all!(
                     &self.db,
                     (String, String, i64, i64),
@@ -265,7 +265,7 @@ impl CodeIndexStore for DbCodeIndexStore {
             ORDER BY ts_rank(c.tsv, q)::float8 DESC
             LIMIT ?
             "#,
-                    query,
+                    &safe_query,
                     project_id,
                     limit as i64,
                 )
@@ -329,7 +329,9 @@ mod tests {
     }
 
     /// Serializes PostgreSQL tests: they share one database, so they must not
-    /// reset the schema while another test is mid-flight.
+    /// reset the schema while another test is mid-flight. Postgres suites must
+    /// run one crate per process: this lock is per-process and the suites share
+    /// `_sqlx_migrations`.
     fn pg_lock() -> &'static tokio::sync::Mutex<()> {
         static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
         &LOCK
@@ -579,6 +581,45 @@ mod tests {
         assert_eq!(results.len(), 2);
     }
 
+    /// Whole-query phrase semantics: multi-word queries require adjacency and
+    /// order, identically on both engines.
+    async fn keyword_search_phrase_requires_adjacency_case(store: &DbCodeIndexStore) {
+        store
+            .upsert_chunks("proj", "adjacent.rs", &[make_chunk(
+                "adjacent.rs",
+                0,
+                "database connection pool",
+                1,
+                1,
+            )])
+            .await
+            .unwrap();
+        store
+            .upsert_chunks("proj", "scattered.rs", &[make_chunk(
+                "scattered.rs",
+                0,
+                "database query connection",
+                1,
+                1,
+            )])
+            .await
+            .unwrap();
+
+        let results = store
+            .search_keyword("proj", "database connection", 10)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].path.contains("adjacent.rs"));
+
+        // Reversed word order is a different phrase — no match.
+        let reversed = store
+            .search_keyword("proj", "connection database", 10)
+            .await
+            .unwrap();
+        assert!(reversed.is_empty());
+    }
+
     async fn keyword_search_no_results_case(store: &DbCodeIndexStore) {
         store
             .upsert_chunks("proj", "a.rs", &[make_chunk(
@@ -708,6 +749,11 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_keyword_search_phrase_requires_adjacency() {
+        keyword_search_phrase_requires_adjacency_case(&store(Backend::Sqlite).await.unwrap()).await;
+    }
+
+    #[tokio::test]
     async fn test_keyword_search_no_results() {
         keyword_search_no_results_case(&store(Backend::Sqlite).await.unwrap()).await;
     }
@@ -745,6 +791,8 @@ mod tests {
         embedding_roundtrip_case(&store(Backend::Postgres).await.unwrap()).await;
         keyword_search_basic_case(&store(Backend::Postgres).await.unwrap()).await;
         keyword_search_multi_result_case(&store(Backend::Postgres).await.unwrap()).await;
+        keyword_search_phrase_requires_adjacency_case(&store(Backend::Postgres).await.unwrap())
+            .await;
         keyword_search_no_results_case(&store(Backend::Postgres).await.unwrap()).await;
         keyword_search_scores_valid_case(&store(Backend::Postgres).await.unwrap()).await;
         file_and_chunk_counts_case(&store(Backend::Postgres).await.unwrap()).await;

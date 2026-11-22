@@ -6,6 +6,9 @@
 --     instead of the FTS5 virtual table and its sync triggers, so no trigger
 --     maintenance is needed. The FTS5 index uses the 'porter' stemmer, so the
 --     tsvector uses the matching 'english' regconfig.
+--     Known divergence: PostgreSQL's 'english' dictionary drops stopwords
+--     while FTS5's porter tokenizer keeps them — stopword-only queries match
+--     chunks on SQLite but return nothing on PostgreSQL.
 --   * Integers are BIGINT so they decode as i64 in both backends.
 --   * `created_at` stays TEXT in the same `YYYY-MM-DD HH:MM:SS` UTC form
 --     SQLite's CURRENT_TIMESTAMP writes, so both backends sort identically.

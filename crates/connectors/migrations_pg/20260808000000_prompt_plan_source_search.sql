@@ -4,6 +4,9 @@
 --     `tsvector` column with a GIN index. FTS5 here uses the 'unicode61'
 --     tokenizer (no stemming), so the tsvector uses the matching 'simple'
 --     regconfig; queries use websearch_to_tsquery('simple', ...).
+--     Known divergence: FTS5 unicode61 folds diacritics (remove_diacritics=1)
+--     while PostgreSQL's 'simple' dictionary does not — queries or content
+--     with accented characters can match on SQLite but not on PostgreSQL.
 --   * Integers are BIGINT so they decode as i64 in both backends.
 
 ALTER TABLE connector_datasets ADD COLUMN instruction TEXT;

@@ -13,7 +13,9 @@ pub(crate) enum Backend {
 }
 
 /// Serializes PostgreSQL tests: they share one database, so they must not
-/// reset the schema while another test is mid-flight.
+/// reset the schema while another test is mid-flight. Postgres suites must
+/// run one crate per process: this lock is per-process and the suites share
+/// `_sqlx_migrations`.
 pub(crate) fn pg_lock() -> &'static tokio::sync::Mutex<()> {
     static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     &LOCK
