@@ -471,6 +471,12 @@ pub async fn prepare_gateway_core_with_profile(
     // a failed migration is a startup error, not a degraded feature. On
     // SQLite those stores keep their own files and migrate on open.
     if db.is_postgres() {
+        // Fail startup before the memory migrations when pgvector is missing:
+        // the raw migration error hides the exact fix. Surfaces like a
+        // PostgreSQL outage — hard-fail, no fallback.
+        moltis_memory::pgvector::preflight(&db)
+            .await
+            .map_err(|error| anyhow::anyhow!("memory pgvector preflight failed: {error}"))?;
         moltis_memory::schema::run_migrations(&db)
             .await
             .expect("failed to run memory migrations");

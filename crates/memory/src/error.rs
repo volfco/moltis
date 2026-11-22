@@ -35,6 +35,11 @@ pub enum Error {
     #[error("memory backend error: {0}")]
     Backend(String),
 
+    /// Required PostgreSQL extension is missing from the target database; the
+    /// message names the database and the exact remediation.
+    #[error("{0}")]
+    PgvectorMissing(String),
+
     /// A shared lock was poisoned by a panicking thread.
     #[error("memory store lock poisoned")]
     LockPoisoned,

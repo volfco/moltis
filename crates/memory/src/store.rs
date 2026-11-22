@@ -3,6 +3,7 @@ use async_trait::async_trait;
 
 use crate::{
     error::Result,
+    pgvector::PgvectorStatus,
     schema::{ChunkRow, FileRow},
     search::SearchResult,
     sync_lock::SyncLockGuard,
@@ -120,5 +121,12 @@ pub trait MemoryStore: Send + Sync {
     /// uncontended guard.
     async fn try_acquire_sync_lock(&self) -> Result<Option<SyncLockGuard>> {
         Ok(Some(SyncLockGuard::Uncontended))
+    }
+
+    /// pgvector extension availability for PostgreSQL stores.
+    ///
+    /// `None` where the probe does not apply (SQLite and non-SQL stores).
+    async fn pgvector_status(&self) -> Result<Option<PgvectorStatus>> {
+        Ok(None)
     }
 }

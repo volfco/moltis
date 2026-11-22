@@ -802,6 +802,42 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn memory_status_omits_pgvector_on_sqlite() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .unwrap_or_else(|error| panic!("in-memory SQLite should open: {error}"));
+        let db = moltis_db::Db::from(pool);
+        moltis_memory::schema::run_migrations(&db)
+            .await
+            .unwrap_or_else(|error| panic!("memory migrations should succeed: {error}"));
+        let manager = moltis_memory::manager::MemoryManager::keyword_only(
+            moltis_memory::config::MemoryConfig::default(),
+            Box::new(moltis_memory::store_db::DbMemoryStore::new(db)),
+        );
+        let state = memory_config_test_state(Some(Arc::new(manager)));
+
+        let response = dispatch_memory_method_response_with_state(
+            "memory.status",
+            serde_json::json!({}),
+            state,
+        )
+        .await;
+        assert!(
+            response.ok,
+            "memory.status should succeed: {:?}",
+            response.error
+        );
+        let payload = response
+            .payload
+            .unwrap_or_else(|| panic!("memory.status should return a payload"));
+        assert_eq!(payload["available"], true);
+        assert!(
+            payload.get("pgvector").is_none(),
+            "SQLite runs must omit the pgvector key: {payload}"
+        );
+    }
+
     #[test]
     fn memory_backend_names_match_update_contract() {
         // Values memory.config.update accepts.

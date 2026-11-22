@@ -14,6 +14,7 @@ pub mod embeddings_local;
 pub mod embeddings_openai;
 pub mod error;
 pub mod manager;
+pub mod pgvector;
 pub mod reranking;
 pub mod runtime;
 pub mod schema;

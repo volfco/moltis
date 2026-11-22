@@ -15,6 +15,7 @@ use crate::{
     config::MemoryConfig,
     embeddings::EmbeddingProvider,
     error::Result,
+    pgvector::PgvectorStatus,
     schema::{ChunkRow, FileRow},
     search::SearchResult,
     store::{CacheEntry, MemoryStore},
@@ -42,6 +43,8 @@ pub struct MemoryStatus {
     pub backend_type: String,
     /// HNSW index build percentage (zvec only).
     pub hnsw_percent: Option<f64>,
+    /// pgvector extension availability (PostgreSQL only; `None` elsewhere).
+    pub pgvector: Option<PgvectorStatus>,
 }
 
 impl MemoryStatus {
@@ -509,6 +512,7 @@ impl MemoryManager {
             db_size_bytes,
             backend_type: self.store.store_type().to_string(),
             hnsw_percent: self.store.hnsw_percent(),
+            pgvector: self.store.pgvector_status().await?,
         })
     }
 }

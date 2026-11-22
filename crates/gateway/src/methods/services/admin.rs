@@ -802,18 +802,26 @@ pub(super) fn register(reg: &mut MethodRegistry) {
             Box::pin(async move {
                 if let Some(ref mm) = ctx.state.memory_manager {
                     match mm.status().await {
-                        Ok(status) => Ok(serde_json::json!({
-                            "available": true,
-                            "backend": mm.backend_name(),
-                            "backend_type": status.backend_type,
-                            "hnsw_percent": status.hnsw_percent,
-                            "total_files": status.total_files,
-                            "total_chunks": status.total_chunks,
-                            "db_size": status.db_size_bytes,
-                            "db_size_display": status.db_size_display(),
-                            "embedding_model": status.embedding_model,
-                            "has_embeddings": mm.has_embeddings(),
-                        })),
+                        Ok(status) => {
+                            let mut payload = serde_json::json!({
+                                "available": true,
+                                "backend": mm.backend_name(),
+                                "backend_type": status.backend_type,
+                                "hnsw_percent": status.hnsw_percent,
+                                "total_files": status.total_files,
+                                "total_chunks": status.total_chunks,
+                                "db_size": status.db_size_bytes,
+                                "db_size_display": status.db_size_display(),
+                                "embedding_model": status.embedding_model,
+                                "has_embeddings": mm.has_embeddings(),
+                            });
+                            if let Some(pgvector) = status.pgvector {
+                                // Absent (not null) on SQLite per the RPC contract.
+                                payload["pgvector"] = serde_json::to_value(pgvector)
+                                    .unwrap_or(serde_json::Value::Null);
+                            }
+                            Ok(payload)
+                        },
                         Err(e) => Ok(serde_json::json!({
                             "available": false,
                             "error": e.to_string(),
