@@ -3,9 +3,13 @@ use thiserror::Error;
 /// Errors produced by the `moltis-auth` crate.
 #[derive(Debug, Error)]
 pub enum Error {
-    /// SQLite / sqlx database error.
+    /// SQL database error from the active backend (SQLite or PostgreSQL).
     #[error(transparent)]
     Database(#[from] sqlx::Error),
+
+    /// Database backend error (connections, transactions).
+    #[error(transparent)]
+    Db(#[from] moltis_db::DbError),
 
     /// I/O error.
     #[error(transparent)]

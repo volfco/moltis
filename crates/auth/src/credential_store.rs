@@ -2,9 +2,9 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+use moltis_db::Db;
 #[cfg(feature = "vault")]
 use moltis_vault::Vault;
-use sqlx::SqlitePool;
 
 mod api_keys;
 mod env_vars;
@@ -29,9 +29,9 @@ pub use {
 #[cfg(feature = "vault")]
 pub use sessions::{PasswordVaultChangeError, VaultInitializeError, VaultInitializeOutcome};
 
-/// Single-user credential store backed by SQLite.
+/// Single-user credential store backed by SQLite or PostgreSQL.
 pub struct CredentialStore {
-    pool: SqlitePool,
+    db: Db,
     setup_complete: AtomicBool,
     /// When true, auth has been explicitly disabled via "remove all auth".
     /// The middleware and status endpoint treat this as "no auth configured".

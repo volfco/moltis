@@ -3,7 +3,9 @@ use std::sync::atomic::Ordering;
 #[cfg(feature = "vault")]
 use std::sync::Arc;
 
-use sqlx::SqlitePool;
+use moltis_db::{Db, execute, fetch_one, fetch_optional};
+#[cfg(feature = "vault")]
+use moltis_db::{tx_execute, tx_fetch_optional};
 
 #[cfg(feature = "vault")]
 use moltis_vault::Vault;
@@ -12,7 +14,9 @@ use crate::{
     Error, Result,
     credential_store::{
         CredentialStore,
-        util::{DUMMY_ARGON2_HASH, generate_token, hash_password, verify_password},
+        util::{
+            DUMMY_ARGON2_HASH, days_from_now_sql, generate_token, hash_password, verify_password,
+        },
     },
 };
 
@@ -30,6 +34,8 @@ pub enum PasswordVaultChangeError {
     #[error(transparent)]
     Database(#[from] sqlx::Error),
     #[error(transparent)]
+    Db(#[from] moltis_db::DbError),
+    #[error(transparent)]
     Auth(#[from] Error),
     #[error(transparent)]
     Vault(#[from] moltis_vault::VaultError),
@@ -44,6 +50,8 @@ pub enum VaultInitializeError {
     AlreadyInitialized,
     #[error(transparent)]
     Database(#[from] sqlx::Error),
+    #[error(transparent)]
+    Db(#[from] moltis_db::DbError),
     #[error(transparent)]
     Auth(#[from] Error),
     #[error(transparent)]
@@ -72,25 +80,22 @@ impl CredentialStore {
     /// Open a database at the given path, reset all auth, and close it.
     pub async fn reset_from_db_path(db_path: &std::path::Path) -> Result<()> {
         let db_url = format!("sqlite:{}", db_path.display());
-        let pool = SqlitePool::connect(&db_url).await?;
-        let store = Self::new(pool).await?;
+        let pool = sqlx::SqlitePool::connect(&db_url).await?;
+        let store = Self::new(Db::from(pool)).await?;
         store.reset_all().await
     }
 
     /// Create a new store and initialize tables.
     /// Reads `auth.disabled` from the discovered config file.
-    pub async fn new(pool: SqlitePool) -> Result<Self> {
+    pub async fn new(db: Db) -> Result<Self> {
         let config = moltis_config::discover_and_load();
-        Self::with_config(pool, &config.auth).await
+        Self::with_config(db, &config.auth).await
     }
 
     /// Create a new store with explicit auth config (avoids reading from disk).
-    pub async fn with_config(
-        pool: SqlitePool,
-        auth_config: &moltis_config::AuthConfig,
-    ) -> Result<Self> {
+    pub async fn with_config(db: Db, auth_config: &moltis_config::AuthConfig) -> Result<Self> {
         let store = Self {
-            pool,
+            db,
             setup_complete: std::sync::atomic::AtomicBool::new(false),
             auth_disabled: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "vault")]
@@ -101,16 +106,24 @@ impl CredentialStore {
         store.init().await?;
         let has = store.has_password().await? || store.has_passkeys().await?;
         store.setup_complete.store(has, Ordering::Relaxed);
-        sqlx::query(
-            "INSERT OR IGNORE INTO auth_state (id, auth_disabled, updated_at) VALUES (1, ?, datetime('now'))",
-        )
-        .bind(if auth_config.disabled { 1_i64 } else { 0_i64 })
-        .execute(&store.pool)
-        .await?;
-        let db_disabled: Option<(i64,)> =
-            sqlx::query_as("SELECT auth_disabled FROM auth_state WHERE id = 1")
-                .fetch_optional(&store.pool)
-                .await?;
+        let now = store.db.dialect().now_expr();
+        execute!(
+            &store.db,
+            &format!(
+                "INSERT INTO auth_state (id, auth_disabled, updated_at) VALUES (1, ?, {now})
+                 ON CONFLICT(id) DO NOTHING"
+            ),
+            if auth_config.disabled {
+                1_i64
+            } else {
+                0_i64
+            }
+        )?;
+        let db_disabled: Option<(i64,)> = fetch_optional!(
+            &store.db,
+            (i64,),
+            "SELECT auth_disabled FROM auth_state WHERE id = 1"
+        )?;
         let disabled = db_disabled.map_or(auth_config.disabled, |(value,)| value != 0);
         store.auth_disabled.store(disabled, Ordering::Relaxed);
         Ok(store)
@@ -119,12 +132,12 @@ impl CredentialStore {
     /// Create a new store with vault support for encrypting environment variables.
     #[cfg(feature = "vault")]
     pub async fn with_vault(
-        pool: SqlitePool,
+        db: Db,
         auth_config: &moltis_config::AuthConfig,
         vault: Option<Arc<Vault>>,
     ) -> Result<Self> {
         let store = Self {
-            pool,
+            db,
             setup_complete: std::sync::atomic::AtomicBool::new(false),
             auth_disabled: std::sync::atomic::AtomicBool::new(false),
             vault,
@@ -133,16 +146,24 @@ impl CredentialStore {
         store.init().await?;
         let has = store.has_password().await? || store.has_passkeys().await?;
         store.setup_complete.store(has, Ordering::Relaxed);
-        sqlx::query(
-            "INSERT OR IGNORE INTO auth_state (id, auth_disabled, updated_at) VALUES (1, ?, datetime('now'))",
-        )
-        .bind(if auth_config.disabled { 1_i64 } else { 0_i64 })
-        .execute(&store.pool)
-        .await?;
-        let db_disabled: Option<(i64,)> =
-            sqlx::query_as("SELECT auth_disabled FROM auth_state WHERE id = 1")
-                .fetch_optional(&store.pool)
-                .await?;
+        let now = store.db.dialect().now_expr();
+        execute!(
+            &store.db,
+            &format!(
+                "INSERT INTO auth_state (id, auth_disabled, updated_at) VALUES (1, ?, {now})
+                 ON CONFLICT(id) DO NOTHING"
+            ),
+            if auth_config.disabled {
+                1_i64
+            } else {
+                0_i64
+            }
+        )?;
+        let db_disabled: Option<(i64,)> = fetch_optional!(
+            &store.db,
+            (i64,),
+            "SELECT auth_disabled FROM auth_state WHERE id = 1"
+        )?;
         let disabled = db_disabled.map_or(auth_config.disabled, |(value,)| value != 0);
         store.auth_disabled.store(disabled, Ordering::Relaxed);
         Ok(store)
@@ -150,126 +171,201 @@ impl CredentialStore {
 
     /// Initialize auth tables.
     ///
-    /// **Note**: Schema is now managed by sqlx migrations. This method is a no-op
-    /// when running with the gateway (migrations have already run). It's retained
-    /// for standalone tests that use in-memory databases.
+    /// **Note**: Schema is normally managed by gateway migrations (one set per
+    /// backend). This method is retained for standalone use and tests that
+    /// bring up an empty database; `IF NOT EXISTS` keeps it idempotent against
+    /// an already-migrated schema. The PostgreSQL arm mirrors the SQLite DDL
+    /// per the port checklist: `INTEGER` → `BIGINT`, `AUTOINCREMENT` →
+    /// `GENERATED ALWAYS AS IDENTITY`, `BLOB` → `BYTEA`, timestamps stay TEXT.
     async fn init(&self) -> Result<()> {
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS auth_password (
-                id            INTEGER PRIMARY KEY CHECK (id = 1),
-                password_hash TEXT    NOT NULL,
-                created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
-                updated_at    TEXT    NOT NULL DEFAULT (datetime('now'))
-            )",
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS passkeys (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                credential_id BLOB    NOT NULL UNIQUE,
-                name          TEXT    NOT NULL,
-                passkey_data  BLOB    NOT NULL,
-                created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
-            )",
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS api_keys (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                label      TEXT    NOT NULL,
-                key_hash   TEXT    NOT NULL,
-                key_prefix TEXT    NOT NULL,
-                created_at TEXT    NOT NULL DEFAULT (datetime('now')),
-                revoked_at TEXT,
-                scopes     TEXT,
-                key_salt   TEXT
-            )",
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS auth_sessions (
-                token      TEXT PRIMARY KEY,
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                expires_at TEXT NOT NULL
-            )",
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS auth_audit_log (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_type TEXT    NOT NULL,
-                client_ip  TEXT,
-                detail     TEXT,
-                created_at TEXT    NOT NULL DEFAULT (datetime('now'))
-            )",
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS env_variables (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                key        TEXT    NOT NULL UNIQUE,
-                value      TEXT    NOT NULL,
-                encrypted  INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT    NOT NULL DEFAULT (datetime('now')),
-                updated_at TEXT    NOT NULL DEFAULT (datetime('now'))
-            )",
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS ssh_keys (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                name        TEXT    NOT NULL UNIQUE,
-                private_key TEXT    NOT NULL,
-                public_key  TEXT    NOT NULL,
-                fingerprint TEXT    NOT NULL,
-                encrypted   INTEGER NOT NULL DEFAULT 0,
-                created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
-                updated_at  TEXT    NOT NULL DEFAULT (datetime('now'))
-            )",
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS ssh_targets (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                label       TEXT    NOT NULL UNIQUE,
-                target      TEXT    NOT NULL,
-                port        INTEGER,
-                known_host  TEXT,
-                auth_mode   TEXT    NOT NULL DEFAULT 'system',
-                key_id      INTEGER,
-                is_default  INTEGER NOT NULL DEFAULT 0,
-                created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
-                updated_at  TEXT    NOT NULL DEFAULT (datetime('now')),
-                FOREIGN KEY(key_id) REFERENCES ssh_keys(id)
-            )",
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS auth_state (
-                id            INTEGER PRIMARY KEY CHECK (id = 1),
-                auth_disabled INTEGER NOT NULL DEFAULT 0,
-                updated_at    TEXT    NOT NULL DEFAULT (datetime('now'))
-            )",
-        )
-        .execute(&self.pool)
-        .await?;
-
+        let now = self.db.dialect().now_default();
+        let ddl = match self.db.dialect() {
+            moltis_db::Dialect::Sqlite => vec![
+                format!(
+                    "CREATE TABLE IF NOT EXISTS auth_password (
+                        id            INTEGER PRIMARY KEY CHECK (id = 1),
+                        password_hash TEXT    NOT NULL,
+                        created_at    TEXT    NOT NULL DEFAULT {now},
+                        updated_at    TEXT    NOT NULL DEFAULT {now}
+                    )"
+                ),
+                format!(
+                    "CREATE TABLE IF NOT EXISTS passkeys (
+                        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                        credential_id BLOB    NOT NULL UNIQUE,
+                        name          TEXT    NOT NULL,
+                        passkey_data  BLOB    NOT NULL,
+                        created_at    TEXT    NOT NULL DEFAULT {now}
+                    )"
+                ),
+                format!(
+                    "CREATE TABLE IF NOT EXISTS api_keys (
+                        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                        label      TEXT    NOT NULL,
+                        key_hash   TEXT    NOT NULL,
+                        key_prefix TEXT    NOT NULL,
+                        created_at TEXT    NOT NULL DEFAULT {now},
+                        revoked_at TEXT,
+                        scopes     TEXT,
+                        key_salt   TEXT
+                    )"
+                ),
+                format!(
+                    "CREATE TABLE IF NOT EXISTS auth_sessions (
+                        token      TEXT PRIMARY KEY,
+                        created_at TEXT NOT NULL DEFAULT {now},
+                        expires_at TEXT NOT NULL
+                    )"
+                ),
+                format!(
+                    "CREATE TABLE IF NOT EXISTS auth_audit_log (
+                        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                        event_type TEXT    NOT NULL,
+                        client_ip  TEXT,
+                        detail     TEXT,
+                        created_at TEXT    NOT NULL DEFAULT {now}
+                    )"
+                ),
+                format!(
+                    "CREATE TABLE IF NOT EXISTS env_variables (
+                        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                        key        TEXT    NOT NULL UNIQUE,
+                        value      TEXT    NOT NULL,
+                        encrypted  INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT    NOT NULL DEFAULT {now},
+                        updated_at TEXT    NOT NULL DEFAULT {now}
+                    )"
+                ),
+                format!(
+                    "CREATE TABLE IF NOT EXISTS ssh_keys (
+                        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name        TEXT    NOT NULL UNIQUE,
+                        private_key TEXT    NOT NULL,
+                        public_key  TEXT    NOT NULL,
+                        fingerprint TEXT    NOT NULL,
+                        encrypted   INTEGER NOT NULL DEFAULT 0,
+                        created_at  TEXT    NOT NULL DEFAULT {now},
+                        updated_at  TEXT    NOT NULL DEFAULT {now}
+                    )"
+                ),
+                format!(
+                    "CREATE TABLE IF NOT EXISTS ssh_targets (
+                        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                        label       TEXT    NOT NULL UNIQUE,
+                        target      TEXT    NOT NULL,
+                        port        INTEGER,
+                        known_host  TEXT,
+                        auth_mode   TEXT    NOT NULL DEFAULT 'system',
+                        key_id      INTEGER,
+                        is_default  INTEGER NOT NULL DEFAULT 0,
+                        created_at  TEXT    NOT NULL DEFAULT {now},
+                        updated_at  TEXT    NOT NULL DEFAULT {now},
+                        FOREIGN KEY(key_id) REFERENCES ssh_keys(id)
+                    )"
+                ),
+                format!(
+                    "CREATE TABLE IF NOT EXISTS auth_state (
+                        id            INTEGER PRIMARY KEY CHECK (id = 1),
+                        auth_disabled INTEGER NOT NULL DEFAULT 0,
+                        updated_at    TEXT    NOT NULL DEFAULT {now}
+                    )"
+                ),
+            ],
+            moltis_db::Dialect::Postgres => vec![
+                format!(
+                    "CREATE TABLE IF NOT EXISTS auth_password (
+                        id            BIGINT PRIMARY KEY CHECK (id = 1),
+                        password_hash TEXT   NOT NULL,
+                        created_at    TEXT   NOT NULL DEFAULT {now},
+                        updated_at    TEXT   NOT NULL DEFAULT {now}
+                    )"
+                ),
+                format!(
+                    "CREATE TABLE IF NOT EXISTS passkeys (
+                        id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                        credential_id BYTEA  NOT NULL UNIQUE,
+                        name          TEXT   NOT NULL,
+                        passkey_data  BYTEA  NOT NULL,
+                        created_at    TEXT   NOT NULL DEFAULT {now}
+                    )"
+                ),
+                format!(
+                    "CREATE TABLE IF NOT EXISTS api_keys (
+                        id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                        label      TEXT   NOT NULL,
+                        key_hash   TEXT   NOT NULL,
+                        key_prefix TEXT   NOT NULL,
+                        created_at TEXT   NOT NULL DEFAULT {now},
+                        revoked_at TEXT,
+                        scopes     TEXT,
+                        key_salt   TEXT
+                    )"
+                ),
+                format!(
+                    "CREATE TABLE IF NOT EXISTS auth_sessions (
+                        token      TEXT PRIMARY KEY,
+                        created_at TEXT NOT NULL DEFAULT {now},
+                        expires_at TEXT NOT NULL
+                    )"
+                ),
+                format!(
+                    "CREATE TABLE IF NOT EXISTS auth_audit_log (
+                        id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                        event_type TEXT   NOT NULL,
+                        client_ip  TEXT,
+                        detail     TEXT,
+                        created_at TEXT   NOT NULL DEFAULT {now}
+                    )"
+                ),
+                format!(
+                    "CREATE TABLE IF NOT EXISTS env_variables (
+                        id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                        key        TEXT   NOT NULL UNIQUE,
+                        value      TEXT   NOT NULL,
+                        encrypted  BIGINT NOT NULL DEFAULT 0,
+                        created_at TEXT   NOT NULL DEFAULT {now},
+                        updated_at TEXT   NOT NULL DEFAULT {now}
+                    )"
+                ),
+                format!(
+                    "CREATE TABLE IF NOT EXISTS ssh_keys (
+                        id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                        name        TEXT   NOT NULL UNIQUE,
+                        private_key TEXT   NOT NULL,
+                        public_key  TEXT   NOT NULL,
+                        fingerprint TEXT   NOT NULL,
+                        encrypted   BIGINT NOT NULL DEFAULT 0,
+                        created_at  TEXT   NOT NULL DEFAULT {now},
+                        updated_at  TEXT   NOT NULL DEFAULT {now}
+                    )"
+                ),
+                format!(
+                    "CREATE TABLE IF NOT EXISTS ssh_targets (
+                        id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                        label       TEXT   NOT NULL UNIQUE,
+                        target      TEXT   NOT NULL,
+                        port        BIGINT,
+                        known_host  TEXT,
+                        auth_mode   TEXT   NOT NULL DEFAULT 'system',
+                        key_id      BIGINT,
+                        is_default  BIGINT NOT NULL DEFAULT 0,
+                        created_at  TEXT   NOT NULL DEFAULT {now},
+                        updated_at  TEXT   NOT NULL DEFAULT {now},
+                        FOREIGN KEY(key_id) REFERENCES ssh_keys(id)
+                    )"
+                ),
+                format!(
+                    "CREATE TABLE IF NOT EXISTS auth_state (
+                        id            BIGINT PRIMARY KEY CHECK (id = 1),
+                        auth_disabled BIGINT NOT NULL DEFAULT 0,
+                        updated_at    TEXT   NOT NULL DEFAULT {now}
+                    )"
+                ),
+            ],
+        };
+        for statement in ddl {
+            execute!(&self.db, &statement)?;
+        }
         Ok(())
     }
 
@@ -290,28 +386,32 @@ impl CredentialStore {
     }
 
     async fn persist_auth_disabled(&self, disabled: bool) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO auth_state (id, auth_disabled, updated_at)
-             VALUES (1, ?, datetime('now'))
-             ON CONFLICT(id) DO UPDATE
-             SET auth_disabled = excluded.auth_disabled, updated_at = excluded.updated_at",
-        )
-        .bind(if disabled {
-            1_i64
-        } else {
-            0_i64
-        })
-        .execute(&self.pool)
-        .await?;
+        let now = self.db.dialect().now_expr();
+        execute!(
+            &self.db,
+            &format!(
+                "INSERT INTO auth_state (id, auth_disabled, updated_at)
+                 VALUES (1, ?, {now})
+                 ON CONFLICT(id) DO UPDATE
+                 SET auth_disabled = excluded.auth_disabled, updated_at = excluded.updated_at"
+            ),
+            if disabled {
+                1_i64
+            } else {
+                0_i64
+            }
+        )?;
         moltis_config::update_config(|c| c.auth.disabled = disabled)?;
         Ok(())
     }
 
     /// Whether a password has been set.
     pub async fn has_password(&self) -> Result<bool> {
-        let row: Option<(i64,)> = sqlx::query_as("SELECT id FROM auth_password WHERE id = 1")
-            .fetch_optional(&self.pool)
-            .await?;
+        let row: Option<(i64,)> = fetch_optional!(
+            &self.db,
+            (i64,),
+            "SELECT id FROM auth_password WHERE id = 1"
+        )?;
         Ok(row.is_some())
     }
 
@@ -321,10 +421,11 @@ impl CredentialStore {
             return Err(Error::Validation("password already set".into()));
         }
         let hash = hash_password(password)?;
-        sqlx::query("INSERT INTO auth_password (id, password_hash) VALUES (1, ?)")
-            .bind(&hash)
-            .execute(&self.pool)
-            .await?;
+        execute!(
+            &self.db,
+            "INSERT INTO auth_password (id, password_hash) VALUES (1, ?)",
+            &hash
+        )?;
         self.setup_complete.store(true, Ordering::Relaxed);
         self.auth_disabled.store(false, Ordering::Relaxed);
         self.persist_auth_disabled(false).await?;
@@ -351,10 +452,11 @@ impl CredentialStore {
             return Err(Error::Validation("password already set".into()));
         }
         let hash = hash_password(password)?;
-        sqlx::query("INSERT INTO auth_password (id, password_hash) VALUES (1, ?)")
-            .bind(&hash)
-            .execute(&self.pool)
-            .await?;
+        execute!(
+            &self.db,
+            "INSERT INTO auth_password (id, password_hash) VALUES (1, ?)",
+            &hash
+        )?;
         self.mark_setup_complete().await?;
         Ok(())
     }
@@ -385,11 +487,9 @@ impl CredentialStore {
                 .map_err(map_vault_password_change_error)?;
         }
 
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.db.begin().await?;
         let has_password: Option<(i64,)> =
-            sqlx::query_as("SELECT id FROM auth_password WHERE id = 1")
-                .fetch_optional(&mut *tx)
-                .await?;
+            tx_fetch_optional!(&mut tx, (i64,), "SELECT id FROM auth_password WHERE id = 1")?;
         if has_password.is_some() {
             return Err(Error::Validation("password already set".into()).into());
         }
@@ -411,18 +511,21 @@ impl CredentialStore {
         };
 
         let hash = hash_password(password)?;
-        sqlx::query("INSERT INTO auth_password (id, password_hash) VALUES (1, ?)")
-            .bind(&hash)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query(
-            "INSERT INTO auth_state (id, auth_disabled, updated_at)
-             VALUES (1, 0, datetime('now'))
-             ON CONFLICT(id) DO UPDATE
-             SET auth_disabled = 0, updated_at = excluded.updated_at",
-        )
-        .execute(&mut *tx)
-        .await?;
+        tx_execute!(
+            &mut tx,
+            "INSERT INTO auth_password (id, password_hash) VALUES (1, ?)",
+            &hash
+        )?;
+        let now = self.db.dialect().now_expr();
+        tx_execute!(
+            &mut tx,
+            &format!(
+                "INSERT INTO auth_state (id, auth_disabled, updated_at)
+                 VALUES (1, 0, {now})
+                 ON CONFLICT(id) DO UPDATE
+                 SET auth_disabled = 0, updated_at = excluded.updated_at"
+            )
+        )?;
 
         tx.commit().await?;
         if recovery_key.is_some() {
@@ -466,10 +569,11 @@ impl CredentialStore {
     /// When no password is set, a dummy Argon2 verification is performed
     /// to prevent timing side channels that would reveal whether a password exists.
     pub async fn verify_password(&self, password: &str) -> Result<bool> {
-        let row: Option<(String,)> =
-            sqlx::query_as("SELECT password_hash FROM auth_password WHERE id = 1")
-                .fetch_optional(&self.pool)
-                .await?;
+        let row: Option<(String,)> = fetch_optional!(
+            &self.db,
+            (String,),
+            "SELECT password_hash FROM auth_password WHERE id = 1"
+        )?;
         let hash = match row {
             Some((h,)) => h,
             None => {
@@ -488,16 +592,14 @@ impl CredentialStore {
             return Err(Error::Validation("current password is incorrect".into()));
         }
         let hash = hash_password(new_password)?;
-        sqlx::query(
-            "UPDATE auth_password SET password_hash = ?, updated_at = datetime('now') WHERE id = 1",
-        )
-        .bind(&hash)
-        .execute(&self.pool)
-        .await?;
+        let now = self.db.dialect().now_expr();
+        execute!(
+            &self.db,
+            &format!("UPDATE auth_password SET password_hash = ?, updated_at = {now} WHERE id = 1"),
+            &hash
+        )?;
 
-        sqlx::query("DELETE FROM auth_sessions")
-            .execute(&self.pool)
-            .await?;
+        execute!(&self.db, "DELETE FROM auth_sessions")?;
 
         Ok(())
     }
@@ -514,11 +616,12 @@ impl CredentialStore {
             return Ok(());
         };
 
-        let mut tx = self.pool.begin().await?;
-        let row: Option<(String,)> =
-            sqlx::query_as("SELECT password_hash FROM auth_password WHERE id = 1")
-                .fetch_optional(&mut *tx)
-                .await?;
+        let mut tx = self.db.begin().await?;
+        let row: Option<(String,)> = tx_fetch_optional!(
+            &mut tx,
+            (String,),
+            "SELECT password_hash FROM auth_password WHERE id = 1"
+        )?;
         let Some((current_hash,)) = row else {
             return Err(PasswordVaultChangeError::IncorrectCurrentPassword);
         };
@@ -556,16 +659,14 @@ impl CredentialStore {
         }
 
         let hash = hash_password(new_password)?;
-        sqlx::query(
-            "UPDATE auth_password SET password_hash = ?, updated_at = datetime('now') WHERE id = 1",
-        )
-        .bind(&hash)
-        .execute(&mut *tx)
-        .await?;
+        let now = self.db.dialect().now_expr();
+        tx_execute!(
+            &mut tx,
+            &format!("UPDATE auth_password SET password_hash = ?, updated_at = {now} WHERE id = 1"),
+            &hash
+        )?;
 
-        sqlx::query("DELETE FROM auth_sessions")
-            .execute(&mut *tx)
-            .await?;
+        tx_execute!(&mut tx, "DELETE FROM auth_sessions")?;
 
         tx.commit().await?;
         Ok(())
@@ -580,11 +681,12 @@ impl CredentialStore {
             return Err(moltis_vault::VaultError::NotInitialized.into());
         };
 
-        let mut tx = self.pool.begin().await?;
-        let row: Option<(String,)> =
-            sqlx::query_as("SELECT password_hash FROM auth_password WHERE id = 1")
-                .fetch_optional(&mut *tx)
-                .await?;
+        let mut tx = self.db.begin().await?;
+        let row: Option<(String,)> = tx_fetch_optional!(
+            &mut tx,
+            (String,),
+            "SELECT password_hash FROM auth_password WHERE id = 1"
+        )?;
         let Some((current_hash,)) = row else {
             return Err(VaultInitializeError::IncorrectCurrentPassword);
         };
@@ -620,82 +722,69 @@ impl CredentialStore {
     /// Enforces a cap of [`MAX_SESSIONS`] active (non-expired) sessions.
     /// When the cap is reached, the oldest sessions are deleted to make room.
     pub async fn create_session(&self) -> Result<String> {
-        sqlx::query("DELETE FROM auth_sessions WHERE expires_at <= datetime('now')")
-            .execute(&self.pool)
-            .await?;
+        let now = self.db.dialect().now_expr();
+        execute!(
+            &self.db,
+            &format!("DELETE FROM auth_sessions WHERE expires_at <= {now}")
+        )?;
 
-        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM auth_sessions")
-            .fetch_one(&self.pool)
-            .await?;
-        if count.0 >= Self::MAX_SESSIONS {
-            let to_delete = count.0 - Self::MAX_SESSIONS + 1;
-            sqlx::query(
+        let (count,) = fetch_one!(&self.db, (i64,), "SELECT COUNT(*) FROM auth_sessions")?;
+        if count >= Self::MAX_SESSIONS {
+            let to_delete = count - Self::MAX_SESSIONS + 1;
+            execute!(
+                &self.db,
                 "DELETE FROM auth_sessions WHERE token IN (SELECT token FROM auth_sessions ORDER BY created_at ASC LIMIT ?)",
-            )
-            .bind(to_delete)
-            .execute(&self.pool)
-            .await?;
+                to_delete
+            )?;
         }
 
         let token = generate_token();
-        sqlx::query(
-            "INSERT INTO auth_sessions (token, expires_at) VALUES (?, datetime('now', '+30 days'))",
-        )
-        .bind(&token)
-        .execute(&self.pool)
-        .await?;
+        let expires = days_from_now_sql(self.db.dialect(), 30);
+        execute!(
+            &self.db,
+            &format!("INSERT INTO auth_sessions (token, expires_at) VALUES (?, {expires})"),
+            &token
+        )?;
         Ok(token)
     }
 
     /// Validate a session token. Returns true if valid and not expired.
     pub async fn validate_session(&self, token: &str) -> Result<bool> {
-        let row: Option<(String,)> = sqlx::query_as(
-            "SELECT token FROM auth_sessions WHERE token = ? AND expires_at > datetime('now')",
-        )
-        .bind(token)
-        .fetch_optional(&self.pool)
-        .await?;
+        let now = self.db.dialect().now_expr();
+        let row: Option<(String,)> = fetch_optional!(
+            &self.db,
+            (String,),
+            &format!("SELECT token FROM auth_sessions WHERE token = ? AND expires_at > {now}"),
+            token
+        )?;
         Ok(row.is_some())
     }
 
     /// Delete a session (logout).
     pub async fn delete_session(&self, token: &str) -> Result<()> {
-        sqlx::query("DELETE FROM auth_sessions WHERE token = ?")
-            .bind(token)
-            .execute(&self.pool)
-            .await?;
+        execute!(&self.db, "DELETE FROM auth_sessions WHERE token = ?", token)?;
         Ok(())
     }
 
     /// Clean up expired sessions.
     pub async fn cleanup_expired_sessions(&self) -> Result<u64> {
-        let result = sqlx::query("DELETE FROM auth_sessions WHERE expires_at <= datetime('now')")
-            .execute(&self.pool)
-            .await?;
-        Ok(result.rows_affected())
+        let now = self.db.dialect().now_expr();
+        let deleted = execute!(
+            &self.db,
+            &format!("DELETE FROM auth_sessions WHERE expires_at <= {now}")
+        )?;
+        Ok(deleted)
     }
 
     /// Remove all authentication data: password, sessions, passkeys, API keys.
     /// After this, `is_setup_complete()` returns false and the middleware passes all requests through.
     pub async fn reset_all(&self) -> Result<()> {
-        sqlx::query("DELETE FROM auth_password")
-            .execute(&self.pool)
-            .await?;
-        sqlx::query("DELETE FROM auth_sessions")
-            .execute(&self.pool)
-            .await?;
-        sqlx::query("DELETE FROM passkeys")
-            .execute(&self.pool)
-            .await?;
-        sqlx::query("DELETE FROM api_keys")
-            .execute(&self.pool)
-            .await?;
-        sqlx::query("DELETE FROM ssh_targets")
-            .execute(&self.pool)
-            .await?;
-        sqlx::query("DELETE FROM ssh_keys")
-            .execute(&self.pool)
-            .await?;
+        execute!(&self.db, "DELETE FROM auth_password")?;
+        execute!(&self.db, "DELETE FROM auth_sessions")?;
+        execute!(&self.db, "DELETE FROM passkeys")?;
+        execute!(&self.db, "DELETE FROM api_keys")?;
+        execute!(&self.db, "DELETE FROM ssh_targets")?;
+        execute!(&self.db, "DELETE FROM ssh_keys")?;
         self.setup_complete.store(false, Ordering::Relaxed);
         self.auth_disabled.store(true, Ordering::Relaxed);
         self.persist_auth_disabled(true).await?;
@@ -720,7 +809,7 @@ impl CredentialStore {
     }
 
     /// Get a reference to the underlying database pool.
-    pub fn db_pool(&self) -> &SqlitePool {
-        &self.pool
+    pub fn db_pool(&self) -> &Db {
+        &self.db
     }
 }

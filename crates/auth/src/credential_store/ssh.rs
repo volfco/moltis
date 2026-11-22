@@ -1,33 +1,39 @@
 use std::convert::TryFrom;
 
-use secrecy::Secret;
+use {
+    moltis_db::{
+        execute, fetch_all, fetch_one, fetch_optional, tx_execute, tx_fetch_one, tx_fetch_optional,
+    },
+    secrecy::Secret,
+};
 
 use crate::{
     Error, Result,
     credential_store::{
         CredentialStore, SshAuthMode, SshKeyEntry, SshResolvedTarget, SshTargetEntry,
+        util::iso_timestamp,
     },
 };
 
 impl CredentialStore {
     pub async fn list_ssh_keys(&self) -> Result<Vec<SshKeyEntry>> {
-        let rows: Vec<(i64, String, String, String, String, String, i64, i64)> = sqlx::query_as(
+        let rows: Vec<(i64, String, String, String, String, String, i64, i64)> = fetch_all!(
+            &self.db,
+            (i64, String, String, String, String, String, i64, i64),
             "SELECT
                 k.id,
                 k.name,
                 k.public_key,
                 k.fingerprint,
-                strftime('%Y-%m-%dT%H:%M:%SZ', k.created_at),
-                strftime('%Y-%m-%dT%H:%M:%SZ', k.updated_at),
+                k.created_at,
+                k.updated_at,
                 COALESCE(k.encrypted, 0),
                 COUNT(t.id)
             FROM ssh_keys k
             LEFT JOIN ssh_targets t ON t.key_id = k.id
             GROUP BY k.id, k.name, k.public_key, k.fingerprint, k.created_at, k.updated_at, k.encrypted
             ORDER BY k.name ASC",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        )?;
 
         Ok(rows
             .into_iter()
@@ -46,8 +52,8 @@ impl CredentialStore {
                     name,
                     public_key,
                     fingerprint,
-                    created_at,
-                    updated_at,
+                    created_at: iso_timestamp(&created_at),
+                    updated_at: iso_timestamp(&updated_at),
                     encrypted: encrypted != 0,
                     target_count,
                 },
@@ -89,38 +95,38 @@ impl CredentialStore {
         #[cfg(not(feature = "vault"))]
         let (store_private_key, encrypted) = (private_key.to_owned(), 0_i64);
 
-        let result = sqlx::query(
+        let (id,) = fetch_one!(
+            &self.db,
+            (i64,),
             "INSERT INTO ssh_keys (name, private_key, public_key, fingerprint, encrypted)
-             VALUES (?, ?, ?, ?, ?)",
-        )
-        .bind(name)
-        .bind(store_private_key)
-        .bind(public_key.trim())
-        .bind(fingerprint.trim())
-        .bind(encrypted)
-        .execute(&self.pool)
-        .await?;
+             VALUES (?, ?, ?, ?, ?) RETURNING id",
+            name,
+            store_private_key,
+            public_key.trim(),
+            fingerprint.trim(),
+            encrypted
+        )?;
 
-        Ok(result.last_insert_rowid())
+        Ok(id)
     }
 
     pub async fn delete_ssh_key(&self, id: i64) -> Result<()> {
-        let deleted = sqlx::query(
+        let deleted = execute!(
+            &self.db,
             "DELETE FROM ssh_keys
              WHERE id = ?
                AND NOT EXISTS (SELECT 1 FROM ssh_targets WHERE key_id = ?)",
-        )
-        .bind(id)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+            id,
+            id
+        )?;
 
-        if deleted.rows_affected() == 0 {
-            let in_use: Option<(i64,)> =
-                sqlx::query_as("SELECT COUNT(1) FROM ssh_targets WHERE key_id = ?")
-                    .bind(id)
-                    .fetch_optional(&self.pool)
-                    .await?;
+        if deleted == 0 {
+            let in_use: Option<(i64,)> = fetch_optional!(
+                &self.db,
+                (i64,),
+                "SELECT COUNT(1) FROM ssh_targets WHERE key_id = ?",
+                id
+            )?;
             if in_use.is_some_and(|(count,)| count > 0) {
                 return Err(Error::Ssh(
                     "ssh key is still assigned to one or more targets".into(),
@@ -131,12 +137,12 @@ impl CredentialStore {
     }
 
     pub async fn get_ssh_private_key(&self, key_id: i64) -> Result<Option<Secret<String>>> {
-        let row: Option<(String, String, i64)> = sqlx::query_as(
+        let row: Option<(String, String, i64)> = fetch_optional!(
+            &self.db,
+            (String, String, i64),
             "SELECT name, private_key, COALESCE(encrypted, 0) FROM ssh_keys WHERE id = ?",
-        )
-        .bind(key_id)
-        .fetch_optional(&self.pool)
-        .await?;
+            key_id
+        )?;
 
         let Some((name, private_key, encrypted)) = row else {
             return Ok(None);
@@ -177,7 +183,21 @@ impl CredentialStore {
             i64,
             String,
             String,
-        )> = sqlx::query_as(
+        )> = fetch_all!(
+            &self.db,
+            (
+                i64,
+                String,
+                String,
+                Option<i64>,
+                Option<String>,
+                String,
+                Option<i64>,
+                Option<String>,
+                i64,
+                String,
+                String,
+            ),
             "SELECT
                 t.id,
                 t.label,
@@ -188,14 +208,12 @@ impl CredentialStore {
                 t.key_id,
                 k.name,
                 COALESCE(t.is_default, 0),
-                strftime('%Y-%m-%dT%H:%M:%SZ', t.created_at),
-                strftime('%Y-%m-%dT%H:%M:%SZ', t.updated_at)
+                t.created_at,
+                t.updated_at
             FROM ssh_targets t
             LEFT JOIN ssh_keys k ON k.id = t.key_id
             ORDER BY t.is_default DESC, t.label ASC",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        )?;
 
         rows.into_iter()
             .map(
@@ -223,8 +241,8 @@ impl CredentialStore {
                         key_id,
                         key_name,
                         is_default: is_default != 0,
-                        created_at,
-                        updated_at,
+                        created_at: iso_timestamp(&created_at),
+                        updated_at: iso_timestamp(&updated_at),
                     })
                 },
             )
@@ -260,10 +278,12 @@ impl CredentialStore {
                 let Some(key_id) = key_id else {
                     return Err(Error::Ssh("managed ssh targets require a key".into()));
                 };
-                let exists: Option<(i64,)> = sqlx::query_as("SELECT id FROM ssh_keys WHERE id = ?")
-                    .bind(key_id)
-                    .fetch_optional(&self.pool)
-                    .await?;
+                let exists: Option<(i64,)> = fetch_optional!(
+                    &self.db,
+                    (i64,),
+                    "SELECT id FROM ssh_keys WHERE id = ?",
+                    key_id
+                )?;
                 if exists.is_none() {
                     return Err(Error::Ssh("selected ssh key does not exist".into()));
                 }
@@ -271,62 +291,61 @@ impl CredentialStore {
             },
         };
 
-        let mut tx = self.pool.begin().await?;
-        let has_default: Option<(i64,)> =
-            sqlx::query_as("SELECT COUNT(1) FROM ssh_targets WHERE is_default = 1")
-                .fetch_optional(&mut *tx)
-                .await?;
+        let mut tx = self.db.begin().await?;
+        let has_default: Option<(i64,)> = tx_fetch_optional!(
+            &mut tx,
+            (i64,),
+            "SELECT COUNT(1) FROM ssh_targets WHERE is_default = 1"
+        )?;
         let should_be_default = is_default || has_default.unwrap_or((0,)).0 == 0;
         if should_be_default {
-            sqlx::query("UPDATE ssh_targets SET is_default = 0")
-                .execute(&mut *tx)
-                .await?;
+            tx_execute!(&mut tx, "UPDATE ssh_targets SET is_default = 0")?;
         }
 
-        let result = sqlx::query(
+        let (id,) = tx_fetch_one!(
+            &mut tx,
+            (i64,),
             "INSERT INTO ssh_targets (label, target, port, known_host, auth_mode, key_id, is_default)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(label)
-        .bind(target)
-        .bind(port.map(i64::from))
-        .bind(known_host)
-        .bind(auth_mode.as_db_str())
-        .bind(key_id)
-        .bind(if should_be_default { 1_i64 } else { 0_i64 })
-        .execute(&mut *tx)
-        .await?;
+             VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
+            label,
+            target,
+            port.map(i64::from),
+            known_host,
+            auth_mode.as_db_str(),
+            key_id,
+            if should_be_default { 1_i64 } else { 0_i64 }
+        )?;
         tx.commit().await?;
 
-        Ok(result.last_insert_rowid())
+        Ok(id)
     }
 
     pub async fn delete_ssh_target(&self, id: i64) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
-        let was_default: Option<(i64,)> =
-            sqlx::query_as("SELECT COALESCE(is_default, 0) FROM ssh_targets WHERE id = ?")
-                .bind(id)
-                .fetch_optional(&mut *tx)
-                .await?;
+        let mut tx = self.db.begin().await?;
+        let was_default: Option<(i64,)> = tx_fetch_optional!(
+            &mut tx,
+            (i64,),
+            "SELECT COALESCE(is_default, 0) FROM ssh_targets WHERE id = ?",
+            id
+        )?;
 
-        sqlx::query("DELETE FROM ssh_targets WHERE id = ?")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
+        tx_execute!(&mut tx, "DELETE FROM ssh_targets WHERE id = ?", id)?;
 
         if was_default.is_some_and(|(flag,)| flag != 0) {
-            let replacement: Option<(i64,)> = sqlx::query_as(
-                "SELECT id FROM ssh_targets ORDER BY updated_at DESC, created_at DESC, id DESC LIMIT 1",
-            )
-            .fetch_optional(&mut *tx)
-            .await?;
+            let replacement: Option<(i64,)> = tx_fetch_optional!(
+                &mut tx,
+                (i64,),
+                "SELECT id FROM ssh_targets ORDER BY updated_at DESC, created_at DESC, id DESC LIMIT 1"
+            )?;
             if let Some((replacement_id,)) = replacement {
-                sqlx::query(
-                    "UPDATE ssh_targets SET is_default = 1, updated_at = datetime('now') WHERE id = ?",
-                )
-                .bind(replacement_id)
-                .execute(&mut *tx)
-                .await?;
+                let now = self.db.dialect().now_expr();
+                tx_execute!(
+                    &mut tx,
+                    &format!(
+                        "UPDATE ssh_targets SET is_default = 1, updated_at = {now} WHERE id = ?"
+                    ),
+                    replacement_id
+                )?;
             }
         }
 
@@ -335,17 +354,15 @@ impl CredentialStore {
     }
 
     pub async fn set_default_ssh_target(&self, id: i64) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
-        sqlx::query("UPDATE ssh_targets SET is_default = 0")
-            .execute(&mut *tx)
-            .await?;
-        let updated = sqlx::query(
-            "UPDATE ssh_targets SET is_default = 1, updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
-        if updated.rows_affected() == 0 {
+        let mut tx = self.db.begin().await?;
+        tx_execute!(&mut tx, "UPDATE ssh_targets SET is_default = 0")?;
+        let now = self.db.dialect().now_expr();
+        let updated = tx_execute!(
+            &mut tx,
+            &format!("UPDATE ssh_targets SET is_default = 1, updated_at = {now} WHERE id = ?"),
+            id
+        )?;
+        if updated == 0 {
             return Err(Error::Ssh("ssh target not found".into()));
         }
         tx.commit().await?;
@@ -361,23 +378,22 @@ impl CredentialStore {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned);
-        let result = sqlx::query(
-            "UPDATE ssh_targets SET known_host = ?, updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(known_host)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
-        if result.rows_affected() == 0 {
+        let now = self.db.dialect().now_expr();
+        let result = execute!(
+            &self.db,
+            &format!("UPDATE ssh_targets SET known_host = ?, updated_at = {now} WHERE id = ?"),
+            known_host,
+            id
+        )?;
+        if result == 0 {
             return Err(Error::Ssh("ssh target not found".into()));
         }
         Ok(())
     }
 
     pub async fn ssh_target_count(&self) -> Result<usize> {
-        let row: Option<(i64,)> = sqlx::query_as("SELECT COUNT(1) FROM ssh_targets")
-            .fetch_optional(&self.pool)
-            .await?;
+        let row: Option<(i64,)> =
+            fetch_optional!(&self.db, (i64,), "SELECT COUNT(1) FROM ssh_targets")?;
         let count = row.unwrap_or((0,)).0;
         Ok(usize::try_from(count).unwrap_or_default())
     }
@@ -392,7 +408,18 @@ impl CredentialStore {
             String,
             Option<i64>,
             Option<String>,
-        )> = sqlx::query_as(
+        )> = fetch_optional!(
+            &self.db,
+            (
+                i64,
+                String,
+                String,
+                Option<i64>,
+                Option<String>,
+                String,
+                Option<i64>,
+                Option<String>,
+            ),
             "SELECT
                     t.id,
                     t.label,
@@ -407,9 +434,7 @@ impl CredentialStore {
                  WHERE t.is_default = 1
                  ORDER BY t.updated_at DESC
                  LIMIT 1",
-        )
-        .fetch_optional(&self.pool)
-        .await?;
+        )?;
 
         let Some((id, label, target, port, known_host, auth_mode, key_id, key_name)) = row else {
             return Ok(None);
@@ -467,7 +492,18 @@ impl CredentialStore {
             String,
             Option<i64>,
             Option<String>,
-        )> = sqlx::query_as(
+        )> = fetch_optional!(
+            &self.db,
+            (
+                i64,
+                String,
+                String,
+                Option<i64>,
+                Option<String>,
+                String,
+                Option<i64>,
+                Option<String>,
+            ),
             "SELECT
                     t.id,
                     t.label,
@@ -480,10 +516,8 @@ impl CredentialStore {
                  FROM ssh_targets t
                  LEFT JOIN ssh_keys k ON k.id = t.key_id
                  WHERE t.id = ?",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
+            id
+        )?;
 
         let Some((id, label, target, port, known_host, auth_mode, key_id, key_name)) = row else {
             return Ok(None);

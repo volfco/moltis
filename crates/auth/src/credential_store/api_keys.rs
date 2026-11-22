@@ -1,8 +1,10 @@
+use moltis_db::{execute, fetch_all, fetch_one};
+
 use crate::{
     Result,
     credential_store::{
         ApiKeyEntry, ApiKeyVerification, CredentialStore,
-        util::{generate_token, hmac_sha256_hex, sha256_hex},
+        util::{generate_token, hmac_sha256_hex, iso_timestamp, sha256_hex},
     },
 };
 
@@ -23,26 +25,26 @@ impl CredentialStore {
             .filter(|s| !s.is_empty())
             .map(|s| serde_json::to_string(s).unwrap_or_default());
 
-        let result = sqlx::query(
-            "INSERT INTO api_keys (label, key_hash, key_prefix, scopes, key_salt) VALUES (?, ?, ?, ?, ?)",
-        )
-        .bind(label)
-        .bind(&hash)
-        .bind(prefix)
-        .bind(&scopes_json)
-        .bind(&salt)
-        .execute(&self.pool)
-        .await?;
-        Ok((result.last_insert_rowid(), raw_key))
+        let (id,) = fetch_one!(
+            &self.db,
+            (i64,),
+            "INSERT INTO api_keys (label, key_hash, key_prefix, scopes, key_salt) VALUES (?, ?, ?, ?, ?) RETURNING id",
+            label,
+            &hash,
+            prefix,
+            &scopes_json,
+            &salt
+        )?;
+        Ok((id, raw_key))
     }
 
     /// List all API keys (active only, not revoked).
     pub async fn list_api_keys(&self) -> Result<Vec<ApiKeyEntry>> {
-        let rows: Vec<(i64, String, String, String, Option<String>)> = sqlx::query_as(
-            "SELECT id, label, key_prefix, strftime('%Y-%m-%dT%H:%M:%SZ', created_at), scopes FROM api_keys WHERE revoked_at IS NULL ORDER BY created_at DESC",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<(i64, String, String, String, Option<String>)> = fetch_all!(
+            &self.db,
+            (i64, String, String, String, Option<String>),
+            "SELECT id, label, key_prefix, created_at, scopes FROM api_keys WHERE revoked_at IS NULL ORDER BY created_at DESC",
+        )?;
         Ok(rows
             .into_iter()
             .map(|(id, label, key_prefix, created_at, scopes_json)| {
@@ -53,7 +55,7 @@ impl CredentialStore {
                     id,
                     label,
                     key_prefix,
-                    created_at,
+                    created_at: iso_timestamp(&created_at),
                     scopes,
                 }
             })
@@ -62,12 +64,12 @@ impl CredentialStore {
 
     /// Revoke an API key by id.
     pub async fn revoke_api_key(&self, key_id: i64) -> Result<()> {
-        sqlx::query(
-            "UPDATE api_keys SET revoked_at = datetime('now') WHERE id = ? AND revoked_at IS NULL",
-        )
-        .bind(key_id)
-        .execute(&self.pool)
-        .await?;
+        let now = self.db.dialect().now_expr();
+        execute!(
+            &self.db,
+            &format!("UPDATE api_keys SET revoked_at = {now} WHERE id = ? AND revoked_at IS NULL"),
+            key_id
+        )?;
         Ok(())
     }
 
@@ -76,11 +78,11 @@ impl CredentialStore {
     ///
     /// Supports both salted (HMAC-SHA256) and legacy unsalted (SHA-256) keys.
     pub async fn verify_api_key(&self, raw_key: &str) -> Result<Option<ApiKeyVerification>> {
-        let rows: Vec<(i64, String, Option<String>, Option<String>)> = sqlx::query_as(
+        let rows: Vec<(i64, String, Option<String>, Option<String>)> = fetch_all!(
+            &self.db,
+            (i64, String, Option<String>, Option<String>),
             "SELECT id, key_hash, scopes, key_salt FROM api_keys WHERE revoked_at IS NULL",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        )?;
 
         for (key_id, stored_hash, scopes_json, salt) in rows {
             let matches = if let Some(ref s) = salt {

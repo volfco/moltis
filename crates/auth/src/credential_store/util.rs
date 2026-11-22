@@ -5,6 +5,7 @@ use {
             PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng,
         },
     },
+    moltis_db::Dialect,
     sha2::{Digest, Sha256},
 };
 
@@ -68,4 +69,27 @@ pub(crate) fn safe_equal(a: &str, b: &str) -> bool {
         .zip(b.as_bytes())
         .fold(0u8, |acc, (x, y)| acc | (x ^ y));
     diff == 0
+}
+
+/// Format a stored `YYYY-MM-DD HH:MM:SS` UTC timestamp as ISO-8601
+/// `YYYY-MM-DDTHH:MM:SSZ`. Both backends store timestamps as that text form,
+/// so the conversion happens here instead of in dialect-specific SQL.
+pub(crate) fn iso_timestamp(value: &str) -> String {
+    match value.split_once(' ') {
+        Some((date, time)) => format!("{date}T{time}Z"),
+        None => value.to_owned(),
+    }
+}
+
+/// SQL expression for the current UTC time shifted by `days` days, rendered
+/// as `YYYY-MM-DD HH:MM:SS` text for comparison against stored timestamps.
+pub(crate) fn days_from_now_sql(dialect: Dialect, days: i64) -> String {
+    match dialect {
+        Dialect::Sqlite => format!("datetime('now', '{days:+} days')"),
+        Dialect::Postgres => {
+            format!(
+                "to_char(now() AT TIME ZONE 'utc' + interval '{days} days', 'YYYY-MM-DD HH24:MI:SS')"
+            )
+        },
+    }
 }
