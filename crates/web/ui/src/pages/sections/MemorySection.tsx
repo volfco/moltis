@@ -30,6 +30,8 @@ interface MemoryConfig {
 	prompt_memory_mode?: string;
 	qmd_feature_enabled?: boolean;
 	zvec_feature_enabled?: boolean;
+	postgres_backend_available?: boolean;
+	database_url_set?: boolean;
 	enable_prefetch?: boolean;
 	prefetch_limit?: number;
 	auto_extract_interval?: number;
@@ -65,42 +67,70 @@ export function MemorySection(): VNode {
 	const [autoExtractInterval, setAutoExtractInterval] = useState(5);
 	const [enableSessionSummary, setEnableSessionSummary] = useState(true);
 	const [enableSelfImprovement, setEnableSelfImprovement] = useState(true);
+	const [databaseUrl, setDatabaseUrl] = useState("");
 
 	useEffect(() => {
-		Promise.all([sendRpc("memory.status", {}), sendRpc("memory.config.get", {}), sendRpc("memory.qmd.status", {})])
-			.then(([statusRes, configRes, qmdRes]: [RpcResponse, RpcResponse, RpcResponse]) => {
-				if (statusRes?.ok) {
-					setMemStatus(statusRes.payload as MemoryStatus);
-				}
-				if (configRes?.ok) {
-					const cfg = configRes.payload as MemoryConfig;
-					setMemConfig(cfg);
-					setStyle(cfg.style || "hybrid");
-					setAgentWriteMode(cfg.agent_write_mode || "hybrid");
-					setUserProfileWriteMode(cfg.user_profile_write_mode || "explicit-and-auto");
-					setBackend(cfg.backend || "builtin");
-					setProvider(cfg.provider || "auto");
-					setCitations(cfg.citations || "auto");
-					setLlmReranking(cfg.llm_reranking ?? false);
-					setSearchMergeStrategy(cfg.search_merge_strategy || "rrf");
-					setSessionExport(cfg.session_export || "on-new-or-reset");
-					setPromptMemoryMode(cfg.prompt_memory_mode || "live-reload");
-					setEnablePrefetch(cfg.enable_prefetch ?? true);
-					setPrefetchLimit(cfg.prefetch_limit ?? 3);
-					setAutoExtractInterval(cfg.auto_extract_interval ?? 5);
-					setEnableSessionSummary(cfg.enable_session_summary ?? true);
-					setEnableSelfImprovement(cfg.enable_self_improvement ?? true);
-				}
-				if (qmdRes?.ok) {
-					setQmdStatus(qmdRes.payload as QmdStatus);
-				}
-				setMemLoading(false);
-				rerender();
-			})
-			.catch(() => {
-				setMemLoading(false);
-				rerender();
-			});
+		let cancelled = false;
+		let attempts = 0;
+
+		// The section can mount before the WebSocket is open; an UNAVAILABLE
+		// response must be retried or the form would silently show defaults
+		// that differ from the saved config.
+		function load(): void {
+			Promise.all([sendRpc("memory.status", {}), sendRpc("memory.config.get", {}), sendRpc("memory.qmd.status", {})])
+				.then(([statusRes, configRes, qmdRes]: [RpcResponse, RpcResponse, RpcResponse]) => {
+					if (cancelled) return;
+					const unavailable =
+						(statusRes as { error?: { code?: string } })?.error?.code === "UNAVAILABLE" ||
+						(configRes as { error?: { code?: string } })?.error?.code === "UNAVAILABLE";
+					if (unavailable && attempts < 20) {
+						attempts += 1;
+						setTimeout(load, 150);
+						return;
+					}
+
+					if (statusRes?.ok) {
+						setMemStatus(statusRes.payload as MemoryStatus);
+					}
+					if (configRes?.ok) {
+						const cfg = configRes.payload as MemoryConfig;
+						setMemConfig(cfg);
+						setStyle(cfg.style || "hybrid");
+						setAgentWriteMode(cfg.agent_write_mode || "hybrid");
+						setUserProfileWriteMode(cfg.user_profile_write_mode || "explicit-and-auto");
+						setBackend(cfg.backend || "builtin");
+						setProvider(cfg.provider || "auto");
+						setCitations(cfg.citations || "auto");
+						setLlmReranking(cfg.llm_reranking ?? false);
+						setSearchMergeStrategy(cfg.search_merge_strategy || "rrf");
+						setSessionExport(cfg.session_export || "on-new-or-reset");
+						setPromptMemoryMode(cfg.prompt_memory_mode || "live-reload");
+						setEnablePrefetch(cfg.enable_prefetch ?? true);
+						setPrefetchLimit(cfg.prefetch_limit ?? 3);
+						setAutoExtractInterval(cfg.auto_extract_interval ?? 5);
+						setEnableSessionSummary(cfg.enable_session_summary ?? true);
+						setEnableSelfImprovement(cfg.enable_self_improvement ?? true);
+						// The stored URL contains credentials and is never echoed back,
+						// so the field starts empty and only overrides when typed into.
+						setDatabaseUrl("");
+					}
+					if (qmdRes?.ok) {
+						setQmdStatus(qmdRes.payload as QmdStatus);
+					}
+					setMemLoading(false);
+					rerender();
+				})
+				.catch(() => {
+					if (cancelled) return;
+					setMemLoading(false);
+					rerender();
+				});
+		}
+
+		load();
+		return () => {
+			cancelled = true;
+		};
 	}, []);
 
 	function onSave(e: Event): void {
@@ -124,6 +154,7 @@ export function MemorySection(): VNode {
 			auto_extract_interval: autoExtractInterval,
 			enable_session_summary: enableSessionSummary,
 			enable_self_improvement: enableSelfImprovement,
+			database_url: databaseUrl,
 		}).then((res: RpcResponse) => {
 			save.setSaving(false);
 			if (res?.ok) {
@@ -362,6 +393,16 @@ export function MemorySection(): VNode {
 						</button>
 						<button
 							type="button"
+							className={`provider-btn ${backend === "postgres" ? "" : "provider-btn-secondary"}`}
+							onClick={() => {
+								setBackend("postgres");
+								rerender();
+							}}
+						>
+							PostgreSQL
+						</button>
+						<button
+							type="button"
 							className={`provider-btn ${backend === "qmd" ? "" : "provider-btn-secondary"}`}
 							disabled={!qmdFeatureEnabled}
 							onClick={() => {
@@ -372,6 +413,41 @@ export function MemorySection(): VNode {
 							QMD
 						</button>
 					</div>
+
+					{backend === "postgres" ? (
+						<div
+							style={{
+								marginTop: "12px",
+								padding: "12px",
+								borderRadius: "6px",
+								border: "1px solid var(--border)",
+								background: "var(--bg)",
+							}}
+						>
+							<h4 className="text-xs font-medium text-[var(--text-strong)]" style={{ margin: "0 0 8px" }}>
+								PostgreSQL connection
+							</h4>
+							<p className="text-xs text-[var(--muted)]" style={{ margin: "0 0 8px" }}>
+								Requires a PostgreSQL server with the pgvector <code>vector</code> extension. The URL is stored in
+								<code> moltis.toml</code> and never shown again after saving.
+							</p>
+							<input
+								type="password"
+								className="provider-key-input"
+								style={{ width: "100%" }}
+								placeholder={
+									memConfig?.database_url_set
+										? "postgres://user:pass@host/db (already configured — leave blank to keep)"
+										: "postgres://user:pass@localhost/moltis"
+								}
+								value={databaseUrl}
+								onInput={(e: Event) => {
+									setDatabaseUrl(targetValue(e));
+									rerender();
+								}}
+							/>
+						</div>
+					) : null}
 
 					{qmdFeatureEnabled ? null : (
 						<div className="text-xs text-[var(--error)]" style={{ marginTop: "8px" }}>

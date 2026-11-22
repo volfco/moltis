@@ -215,7 +215,7 @@ async fn run_migrations() -> anyhow::Result<()> {
     let memory_url = format!("sqlite:{}?mode=rwc", memory_db.display());
     let memory_pool = sqlx::SqlitePool::connect(&memory_url).await?;
 
-    moltis_memory::schema::run_migrations(&memory_pool)
+    moltis_memory::schema::run_migrations(&moltis_db::Db::from(memory_pool.clone()))
         .await
         .map_err(|e| anyhow::anyhow!("memory migrations failed: {e}"))?;
     println!("  - memory migrations complete");
@@ -388,7 +388,7 @@ mod tests {
         let memory_url = format!("sqlite:{}?mode=rwc", memory_db.display());
         let memory_pool = sqlx::SqlitePool::connect(&memory_url).await.unwrap();
 
-        moltis_memory::schema::run_migrations(&memory_pool)
+        moltis_memory::schema::run_migrations(&moltis_db::Db::from(memory_pool.clone()))
             .await
             .unwrap();
 

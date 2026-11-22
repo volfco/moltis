@@ -1,4 +1,5 @@
-//! Memory management: markdown files → chunked → embedded → hybrid search in SQLite.
+//! Memory management: markdown files → chunked → embedded → hybrid search in
+//! SQLite or PostgreSQL.
 
 pub mod chunker;
 pub mod config;
@@ -19,7 +20,9 @@ pub mod schema;
 pub mod search;
 pub mod session_export;
 pub mod store;
-pub mod store_sqlite;
+pub mod store_db;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod tools;
 #[cfg(feature = "file-watcher")]
 pub mod watcher;

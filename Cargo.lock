@@ -1044,6 +1044,7 @@ dependencies = [
  "moltis-agents",
  "moltis-code-index",
  "moltis-config",
+ "moltis-db",
  "moltis-memory",
  "moltis-memory-zvec",
  "moltis-providers",
@@ -7265,6 +7266,7 @@ dependencies = [
  "moltis-config",
  "moltis-connectors",
  "moltis-cron",
+ "moltis-db",
  "moltis-gateway",
  "moltis-hermes-import",
  "moltis-httpd",
@@ -7497,6 +7499,7 @@ dependencies = [
  "moltis-channels",
  "moltis-common",
  "moltis-config",
+ "moltis-db",
  "moltis-memory",
  "moltis-metrics",
  "moltis-observability",
@@ -7784,6 +7787,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "moltis-db"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "serde",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "moltis-discord"
 version = "0.1.0"
 dependencies = [
@@ -7868,6 +7884,7 @@ dependencies = [
  "moltis-connector-himalaya",
  "moltis-connectors",
  "moltis-cron",
+ "moltis-db",
  "moltis-discord",
  "moltis-external-agents",
  "moltis-hermes-import",
@@ -8168,6 +8185,7 @@ dependencies = [
  "llama-cpp-2",
  "moltis-agents",
  "moltis-common",
+ "moltis-db",
  "moltis-metrics",
  "moltis-splitter",
  "moltis-tools",
@@ -8555,6 +8573,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "moltis-agents",
+ "moltis-db",
  "moltis-memory",
  "serde",
  "serde_json",
@@ -12584,6 +12603,7 @@ dependencies = [
  "memchr",
  "once_cell",
  "percent-encoding",
+ "rustls 0.23.39",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -12593,6 +12613,7 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "url",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

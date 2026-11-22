@@ -375,14 +375,18 @@ exit 0
     async fn search_mode_matches_rag_and_rerank_flags() {
         let tmp = TempDir::new().unwrap();
         let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
-        moltis_memory::schema::run_migrations(&pool).await.unwrap();
+        moltis_memory::schema::run_migrations(&moltis_db::Db::from(pool.clone()))
+            .await
+            .unwrap();
         let config = moltis_memory::config::MemoryConfig {
             db_path: ":memory:".into(),
             data_dir: Some(tmp.path().to_path_buf()),
             llm_reranking: true,
             ..Default::default()
         };
-        let store = Box::new(moltis_memory::store_sqlite::SqliteMemoryStore::new(pool));
+        let store = Box::new(moltis_memory::store_db::DbMemoryStore::from_sqlite_pool(
+            pool,
+        ));
         let fallback = Arc::new(MemoryManager::keyword_only(config, store));
         let manager = Arc::new(QmdManager::new(crate::manager::QmdManagerConfig::default()));
 
@@ -403,14 +407,18 @@ exit 0
         fs::write(&file_path, content).unwrap();
 
         let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
-        moltis_memory::schema::run_migrations(&pool).await.unwrap();
+        moltis_memory::schema::run_migrations(&moltis_db::Db::from(pool.clone()))
+            .await
+            .unwrap();
         let config = moltis_memory::config::MemoryConfig {
             db_path: ":memory:".into(),
             data_dir: Some(tmp.path().to_path_buf()),
             memory_dirs: vec![memory_dir.clone()],
             ..Default::default()
         };
-        let store = Box::new(moltis_memory::store_sqlite::SqliteMemoryStore::new(pool));
+        let store = Box::new(moltis_memory::store_db::DbMemoryStore::from_sqlite_pool(
+            pool,
+        ));
         let fallback = Arc::new(MemoryManager::keyword_only(config, store));
         fallback.sync().await.unwrap();
 
@@ -454,14 +462,18 @@ exit 0
         fs::write(&file_path, content).unwrap();
 
         let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
-        moltis_memory::schema::run_migrations(&pool).await.unwrap();
+        moltis_memory::schema::run_migrations(&moltis_db::Db::from(pool.clone()))
+            .await
+            .unwrap();
         let config = moltis_memory::config::MemoryConfig {
             db_path: ":memory:".into(),
             data_dir: Some(tmp.path().to_path_buf()),
             memory_dirs: vec![memory_dir.clone()],
             ..Default::default()
         };
-        let store = Box::new(moltis_memory::store_sqlite::SqliteMemoryStore::new(pool));
+        let store = Box::new(moltis_memory::store_db::DbMemoryStore::from_sqlite_pool(
+            pool,
+        ));
         let fallback = Arc::new(MemoryManager::keyword_only(config, store));
 
         let manager = Arc::new(QmdManager::new(crate::manager::QmdManagerConfig {

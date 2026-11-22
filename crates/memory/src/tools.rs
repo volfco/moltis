@@ -350,7 +350,7 @@ mod tests {
         super::*,
         crate::{
             config::MemoryConfig, embeddings::EmbeddingProvider, manager::MemoryManager,
-            schema::run_migrations, store_sqlite::SqliteMemoryStore,
+            schema::run_migrations, store_db::DbMemoryStore,
         },
         sqlx::SqlitePool,
         tempfile::TempDir,
@@ -403,7 +403,9 @@ mod tests {
         std::fs::create_dir_all(&mem_dir).unwrap();
 
         let pool = SqlitePool::connect(":memory:").await.unwrap();
-        run_migrations(&pool).await.unwrap();
+        run_migrations(&moltis_db::Db::from(pool.clone()))
+            .await
+            .unwrap();
 
         let config = MemoryConfig {
             db_path: ":memory:".into(),
@@ -416,7 +418,7 @@ mod tests {
             ..Default::default()
         };
 
-        let store = Box::new(SqliteMemoryStore::new(pool));
+        let store = Box::new(DbMemoryStore::from_sqlite_pool(pool));
         let embedder = Box::new(MockEmbedder);
         let manager = Arc::new(MemoryManager::new(config, store, embedder));
         (manager, tmp)

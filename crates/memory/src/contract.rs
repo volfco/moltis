@@ -176,13 +176,15 @@ pub async fn empty_search_returns_empty(store: &dyn MemoryStore) -> anyhow::Resu
 mod tests {
     use {
         super::*,
-        crate::{schema::run_migrations, store_sqlite::SqliteMemoryStore},
+        crate::{schema::run_migrations, store_db::DbMemoryStore},
     };
 
-    async fn test_store() -> SqliteMemoryStore {
+    async fn test_store() -> DbMemoryStore {
         let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
-        run_migrations(&pool).await.unwrap();
-        SqliteMemoryStore::new(pool)
+        run_migrations(&moltis_db::Db::from(pool.clone()))
+            .await
+            .unwrap();
+        DbMemoryStore::from_sqlite_pool(pool)
     }
 
     #[tokio::test]
@@ -207,5 +209,36 @@ mod tests {
     async fn contract_empty_search_returns_empty() {
         let store = test_store().await;
         empty_search_returns_empty(&store).await.unwrap();
+    }
+
+    /// Same contract against PostgreSQL. Runs only when `TEST_POSTGRES_URL`
+    /// is set, so `cargo test` works without a database server.
+    mod postgres {
+        use super::*;
+
+        async fn test_store() -> Option<DbMemoryStore> {
+            let db = crate::test_support::pg_test_db().await?;
+            Some(DbMemoryStore::new(db))
+        }
+
+        macro_rules! pg_test {
+            ($name:ident => $body:expr) => {
+                #[tokio::test]
+                async fn $name() {
+                    let _guard = crate::test_support::pg_lock().lock().await;
+                    let Some(store) = test_store().await else {
+                        eprintln!("skipping: TEST_POSTGRES_URL is not set");
+                        return;
+                    };
+                    #[allow(clippy::redundant_closure_call)]
+                    ($body)(&store).await.unwrap();
+                }
+            };
+        }
+
+        pg_test!(pg_contract_ingest_then_search => ingest_then_search_returns_result);
+        pg_test!(pg_contract_delete_removes_from_search => delete_removes_from_search);
+        pg_test!(pg_contract_keyword_search_finds_exact_match => keyword_search_finds_exact_match);
+        pg_test!(pg_contract_empty_search_returns_empty => empty_search_returns_empty);
     }
 }

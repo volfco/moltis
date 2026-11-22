@@ -40,6 +40,7 @@ moltis-connector-gmail    = { optional = true, workspace = true }
 moltis-connector-himalaya = { optional = true, workspace = true }
 moltis-connectors         = { optional = true, workspace = true }
 moltis-cron               = { workspace = true }
+moltis-db                 = { workspace = true }
 moltis-discord            = { optional = true, workspace = true }
 moltis-external-agents    = { workspace = true }
 moltis-hermes-import      = { optional = true, workspace = true }

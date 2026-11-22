@@ -334,6 +334,7 @@ fn parse_memory_backend(value: &str) -> Result<moltis_config::MemoryBackend, Err
     match value {
         "builtin" => Ok(moltis_config::MemoryBackend::Builtin),
         "qmd" => Ok(moltis_config::MemoryBackend::Qmd),
+        "postgres" => Ok(moltis_config::MemoryBackend::Postgres),
         #[cfg(feature = "zvec")]
         "zvec" => Ok(moltis_config::MemoryBackend::Zvec),
         _ => Err(invalid_memory_config_value("backend", value)),
@@ -344,6 +345,7 @@ fn configured_memory_backend_name(backend: moltis_config::MemoryBackend) -> &'st
     match backend {
         moltis_config::MemoryBackend::Builtin => "builtin",
         moltis_config::MemoryBackend::Qmd => "qmd",
+        moltis_config::MemoryBackend::Postgres => "postgres",
         #[cfg(feature = "zvec")]
         moltis_config::MemoryBackend::Zvec => "zvec",
         #[cfg(not(feature = "zvec"))]
@@ -351,16 +353,15 @@ fn configured_memory_backend_name(backend: moltis_config::MemoryBackend) -> &'st
     }
 }
 
-fn editable_memory_backend_name(
-    configured_backend: moltis_config::MemoryBackend,
-    active_backend: Option<&str>,
-) -> &'static str {
+/// Map the backend a running store reports to the value `memory.config.update`
+/// accepts ("sqlite" is the built-in backend's runtime name).
+fn active_memory_backend_name(active_backend: &str) -> &'static str {
     match active_backend {
-        Some("sqlite") => "builtin",
-        Some("qmd") => "qmd",
-        #[cfg(feature = "zvec")]
-        Some("zvec") => "zvec",
-        _ => configured_memory_backend_name(configured_backend),
+        "sqlite" => "builtin",
+        "qmd" => "qmd",
+        "zvec" => "zvec",
+        "postgres" => "postgres",
+        _ => "builtin",
     }
 }
 
@@ -767,12 +768,13 @@ mod tests {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:")
             .await
             .unwrap_or_else(|error| panic!("in-memory SQLite should open: {error}"));
-        moltis_memory::schema::run_migrations(&pool)
+        let db = moltis_db::Db::from(pool);
+        moltis_memory::schema::run_migrations(&db)
             .await
             .unwrap_or_else(|error| panic!("memory migrations should succeed: {error}"));
         let manager = moltis_memory::manager::MemoryManager::keyword_only(
             moltis_memory::config::MemoryConfig::default(),
-            Box::new(moltis_memory::store_sqlite::SqliteMemoryStore::new(pool)),
+            Box::new(moltis_memory::store_db::DbMemoryStore::new(db)),
         );
         let state = memory_config_test_state(Some(Arc::new(manager)));
 
@@ -802,35 +804,38 @@ mod tests {
     }
 
     #[test]
-    fn editable_memory_backend_names_match_update_contract() {
+    fn memory_backend_names_match_update_contract() {
+        // Values memory.config.update accepts.
         assert_eq!(
-            editable_memory_backend_name(moltis_config::MemoryBackend::Builtin, None),
+            configured_memory_backend_name(moltis_config::MemoryBackend::Builtin),
             "builtin"
         );
         assert_eq!(
-            editable_memory_backend_name(moltis_config::MemoryBackend::Qmd, None),
+            configured_memory_backend_name(moltis_config::MemoryBackend::Qmd),
             "qmd"
         );
         assert_eq!(
-            editable_memory_backend_name(moltis_config::MemoryBackend::Qmd, Some("sqlite")),
-            "builtin"
-        );
-        assert_eq!(
-            editable_memory_backend_name(moltis_config::MemoryBackend::Builtin, Some("qmd")),
-            "qmd"
-        );
-        assert_eq!(
-            editable_memory_backend_name(
-                moltis_config::MemoryBackend::Qmd,
-                Some("unknown-backend")
-            ),
-            "qmd"
+            configured_memory_backend_name(moltis_config::MemoryBackend::Postgres),
+            "postgres"
         );
 
-        #[cfg(feature = "zvec")]
-        assert_eq!(
-            editable_memory_backend_name(moltis_config::MemoryBackend::Builtin, Some("zvec")),
-            "zvec"
+        // Runtime names are translated to the editable names.
+        assert_eq!(active_memory_backend_name("sqlite"), "builtin");
+        assert_eq!(active_memory_backend_name("qmd"), "qmd");
+        assert_eq!(active_memory_backend_name("postgres"), "postgres");
+        assert_eq!(active_memory_backend_name("zvec"), "zvec");
+        assert_eq!(active_memory_backend_name("unknown-backend"), "builtin");
+
+        assert!(
+            matches!(
+                parse_memory_backend("postgres"),
+                Ok(moltis_config::MemoryBackend::Postgres)
+            ),
+            "postgres must be an accepted memory backend"
+        );
+        assert!(
+            parse_memory_backend("sqlite").is_err(),
+            "runtime backend names must not be accepted by memory.config.update"
         );
     }
 

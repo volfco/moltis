@@ -29,14 +29,16 @@ pub struct ChunkRow {
 
 /// Run database migrations for the memory system.
 ///
-/// This creates the `files`, `chunks`, `embedding_cache` tables and the
-/// `chunks_fts` full-text search virtual table. Memory uses its own database
-/// (`memory.db`) separate from the main `moltis.db`.
-pub async fn run_migrations(pool: &sqlx::SqlitePool) -> crate::error::Result<()> {
-    sqlx::migrate!("./migrations")
-        .set_ignore_missing(true)
-        .run(pool)
-        .await?;
+/// SQLite creates `files`, `chunks`, `embedding_cache` and the `chunks_fts`
+/// virtual table; PostgreSQL creates the same tables with a pgvector
+/// `vector` column and a generated `tsvector` column instead.
+pub async fn run_migrations(db: &moltis_db::Db) -> crate::error::Result<()> {
+    moltis_db::run_migrations(
+        db,
+        sqlx::migrate!("./migrations"),
+        sqlx::migrate!("./migrations_pg"),
+    )
+    .await?;
     Ok(())
 }
 
@@ -48,12 +50,10 @@ mod tests {
     #[tokio::test]
     async fn test_run_migrations() {
         let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
-        run_migrations(&pool).await.unwrap();
+        let db = moltis_db::Db::from(pool);
+        run_migrations(&db).await.unwrap();
         // Verify tables exist
-        let row: (i64,) = sqlx::query_as("SELECT count(*) FROM files")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+        let row: (i64,) = moltis_db::fetch_one!(&db, (i64,), "SELECT count(*) FROM files").unwrap();
         assert_eq!(row.0, 0);
     }
 }

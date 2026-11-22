@@ -229,6 +229,27 @@ pub(crate) async fn init_memory_system(
         }
     }
 
+    if mem_cfg.backend == moltis_config::MemoryBackend::Postgres {
+        match try_init_postgres(mem_cfg, db_pool_max_connections).await {
+            Ok(store) => {
+                return build_memory_runtime_from_store(
+                    mem_cfg,
+                    data_dir,
+                    embedder,
+                    store,
+                    start_background_tasks,
+                )
+                .await;
+            },
+            Err(e) => {
+                warn!(
+                    "memory: postgres backend unavailable ({e:#}), falling back to built-in \
+                     SQLite backend (memory will be stored in memory.db, not PostgreSQL)"
+                );
+            },
+        }
+    }
+
     let memory_db_path = data_dir.join("memory.db");
     let memory_pool_result = {
         use {
@@ -258,7 +279,8 @@ pub(crate) async fn init_memory_system(
     };
     match memory_pool_result {
         Ok(memory_pool) => {
-            if let Err(e) = moltis_memory::schema::run_migrations(&memory_pool).await {
+            let memory_db = moltis_db::Db::from(memory_pool.clone());
+            if let Err(e) = moltis_memory::schema::run_migrations(&memory_db).await {
                 tracing::warn!("memory migration failed: {e}");
                 None
             } else {
@@ -288,7 +310,7 @@ async fn build_memory_runtime(
     start_background_tasks: bool,
 ) -> Option<moltis_memory::runtime::DynMemoryRuntime> {
     let store: Box<dyn moltis_memory::store::MemoryStore> = Box::new(
-        moltis_memory::store_sqlite::SqliteMemoryStore::new(memory_pool),
+        moltis_memory::store_db::DbMemoryStore::from_sqlite_pool(memory_pool),
     );
     build_memory_runtime_from_store(mem_cfg, data_dir, embedder, store, start_background_tasks)
         .await
@@ -299,6 +321,8 @@ async fn build_memory_runtime(
 fn validate_memory_backend(backend: moltis_config::MemoryBackend) {
     match backend {
         moltis_config::MemoryBackend::Builtin => {},
+        // PostgreSQL is always compiled in (sqlx's driver is pure Rust).
+        moltis_config::MemoryBackend::Postgres => {},
         moltis_config::MemoryBackend::Zvec => {
             #[cfg(not(feature = "zvec"))]
             warn!(
@@ -402,7 +426,46 @@ async fn try_init_zvec(
     Ok(Box::new(store))
 }
 
-/// Build the memory runtime from a pre-created store (used by both SQLite and zvec backends).
+/// Initialize the PostgreSQL + pgvector memory backend.
+///
+/// Fails when no URL is configured or the server is unreachable; the caller
+/// logs the error and falls back to SQLite.
+async fn try_init_postgres(
+    cfg: &moltis_config::schema::MemoryEmbeddingConfig,
+    db_pool_max_connections: u32,
+) -> anyhow::Result<Box<dyn moltis_memory::store::MemoryStore>> {
+    let url = cfg
+        .database_url
+        .as_ref()
+        .map(|secret| secret.expose_secret().clone())
+        .filter(|url| !url.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "memory.database_url is required for the postgres backend \
+                 (e.g. postgres://user:pass@localhost/moltis)"
+            )
+        })?;
+
+    let db = moltis_db::Db::connect(&moltis_db::DbOptions::postgres(
+        url,
+        db_pool_max_connections,
+    ))
+    .await
+    .map_err(|e| anyhow::anyhow!("cannot connect to PostgreSQL: {e}"))?;
+
+    moltis_memory::schema::run_migrations(&db)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "memory migrations failed (is the pgvector `vector` extension available?): {e}"
+            )
+        })?;
+
+    info!("using postgres (pgvector) memory backend");
+    Ok(Box::new(moltis_memory::store_db::DbMemoryStore::new(db)))
+}
+
+/// Build the memory runtime from a pre-created store (used by SQLite, zvec and postgres backends).
 async fn build_memory_runtime_from_store(
     mem_cfg: &moltis_config::schema::MemoryEmbeddingConfig,
     data_dir: &FsPath,
@@ -463,7 +526,11 @@ async fn build_memory_runtime_from_store(
         moltis_memory::manager::MemoryManager::keyword_only(memory_runtime_config, store)
     });
     let manager: moltis_memory::runtime::DynMemoryRuntime = match mem_cfg.backend {
-        moltis_config::MemoryBackend::Builtin => builtin_manager.clone(),
+        // The Postgres backend is the built-in manager over a pgvector store,
+        // so it reuses the builtin runtime.
+        moltis_config::MemoryBackend::Builtin | moltis_config::MemoryBackend::Postgres => {
+            builtin_manager.clone()
+        },
         moltis_config::MemoryBackend::Qmd => {
             #[cfg(feature = "qmd")]
             {

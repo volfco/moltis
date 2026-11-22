@@ -7,7 +7,7 @@ use {
     moltis_memory::{
         schema::ChunkRow,
         store::{MemoryStore, MergeStrategy},
-        store_sqlite::SqliteMemoryStore,
+        store_db::DbMemoryStore,
     },
     rand::{RngExt, SeedableRng, rngs::StdRng},
 };
@@ -119,7 +119,7 @@ fn query_embedding(dim: usize) -> Vec<f32> {
 
 // ── SQLite helpers ────────────────────────────────────────────────────────────
 
-async fn create_sqlite_disk(db_path: &Path) -> SqliteMemoryStore {
+async fn create_sqlite_disk(db_path: &Path) -> DbMemoryStore {
     use sqlx::sqlite::SqliteConnectOptions;
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent).unwrap();
@@ -128,14 +128,18 @@ async fn create_sqlite_disk(db_path: &Path) -> SqliteMemoryStore {
         .filename(db_path)
         .create_if_missing(true);
     let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
-    moltis_memory::run_migrations(&pool).await.unwrap();
-    SqliteMemoryStore::new(pool)
+    moltis_memory::run_migrations(&moltis_db::Db::from(pool.clone()))
+        .await
+        .unwrap();
+    DbMemoryStore::from_sqlite_pool(pool)
 }
 
-async fn create_sqlite_in_memory() -> SqliteMemoryStore {
+async fn create_sqlite_in_memory() -> DbMemoryStore {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
-    moltis_memory::run_migrations(&pool).await.unwrap();
-    SqliteMemoryStore::new(pool)
+    moltis_memory::run_migrations(&moltis_db::Db::from(pool.clone()))
+        .await
+        .unwrap();
+    DbMemoryStore::from_sqlite_pool(pool)
 }
 
 // ── Zvec helpers ──────────────────────────────────────────────────────────────
@@ -189,7 +193,7 @@ async fn zvec_batched_upsert(store: &moltis_memory_zvec::ZvecMemoryStore, chunks
 // ═══════════════════════════════════════════════════════════════════════════════
 
 struct SearchFixtureSqlite {
-    store: SqliteMemoryStore,
+    store: DbMemoryStore,
     _db_dir: tempfile::TempDir,
 }
 

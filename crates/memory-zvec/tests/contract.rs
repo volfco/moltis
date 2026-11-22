@@ -86,10 +86,13 @@ fn small_embedding() -> Vec<f32> {
     v
 }
 
-async fn create_sqlite_store() -> moltis_memory::store_sqlite::SqliteMemoryStore {
+async fn create_sqlite_store() -> moltis_memory::store_db::DbMemoryStore {
     let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
-    moltis_memory::schema::run_migrations(&pool).await.unwrap();
-    moltis_memory::store_sqlite::SqliteMemoryStore::new(pool)
+    let store = moltis_memory::store_db::DbMemoryStore::from_sqlite_pool(pool);
+    moltis_memory::schema::run_migrations(moltis_memory::store_db::DbMemoryStore::db(&store))
+        .await
+        .unwrap();
+    store
 }
 
 async fn create_zvec_store() -> ZvecStoreGuard {

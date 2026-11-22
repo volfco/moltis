@@ -119,7 +119,8 @@ fn memory_db_path() -> std::path::PathBuf {
 enum ActiveStore {
     Open {
         store: Box<dyn moltis_memory::store::MemoryStore>,
-        display_path: std::path::PathBuf,
+        /// Filesystem path (SQLite/zvec) or redacted host/database (PostgreSQL).
+        location: String,
     },
     NotFound {
         message: String,
@@ -144,6 +145,7 @@ async fn open_store_for_backend(
     match mem_cfg.backend {
         #[cfg(feature = "zvec")]
         moltis_config::MemoryBackend::Zvec => open_zvec_store(mem_cfg, data_dir).await,
+        moltis_config::MemoryBackend::Postgres => open_postgres_store(mem_cfg).await,
         _ => open_sqlite_store(data_dir).await,
     }
 }
@@ -161,12 +163,56 @@ async fn open_sqlite_store(data_dir: &std::path::Path) -> anyhow::Result<ActiveS
     }
     let db_url = format!("sqlite:{}?mode=ro", db_path.display());
     let pool = sqlx::SqlitePool::connect(&db_url).await?;
-    let store: Box<dyn moltis_memory::store::MemoryStore> =
-        Box::new(moltis_memory::store_sqlite::SqliteMemoryStore::new(pool));
+    let store: Box<dyn moltis_memory::store::MemoryStore> = Box::new(
+        moltis_memory::store_db::DbMemoryStore::from_sqlite_pool(pool),
+    );
     Ok(ActiveStore::Open {
         store,
-        display_path: db_path,
+        location: db_path.display().to_string(),
     })
+}
+
+/// Open the PostgreSQL backend from `memory.database_url`.
+///
+/// Migrations are idempotent, so this also works before the gateway has ever
+/// run against the database.
+async fn open_postgres_store(
+    mem_cfg: &moltis_config::schema::MemoryEmbeddingConfig,
+) -> anyhow::Result<ActiveStore> {
+    use secrecy::ExposeSecret;
+
+    let url = mem_cfg
+        .database_url
+        .as_ref()
+        .map(|secret| secret.expose_secret().clone())
+        .filter(|url| !url.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "memory.database_url is required for backend = \"postgres\" \
+                 (e.g. postgres://user:pass@localhost/moltis)"
+            )
+        })?;
+
+    let db = moltis_db::Db::connect(&moltis_db::DbOptions::postgres(url.clone(), 2)).await?;
+    moltis_memory::schema::run_migrations(&db).await?;
+    Ok(ActiveStore::Open {
+        store: Box::new(moltis_memory::store_db::DbMemoryStore::new(db)),
+        location: redact_database_url(&url),
+    })
+}
+
+/// Strip credentials from a database URL so it can be printed or logged.
+fn redact_database_url(url: &str) -> String {
+    match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let (_, host_and_db) = match rest.rsplit_once('@') {
+                Some((_, tail)) => ("", tail),
+                None => ("", rest),
+            };
+            format!("{scheme}://{host_and_db}")
+        },
+        None => url.to_string(),
+    }
 }
 
 /// Open the zvec backend's collection under `<data_dir>/<db_path>`.
@@ -226,11 +272,11 @@ async fn open_zvec_store(
     // persisted via flush(). Do not call rebuild_keyword_index — it
     // upserts all chunks and can corrupt the FTS RocksDB.
 
-    let display_path = format!("{}_{}", display_path.display(), dim).into();
+    let location = format!("{}_{}", display_path.display(), dim);
 
     Ok(ActiveStore::Open {
         store: Box::new(store),
-        display_path,
+        location,
     })
 }
 
@@ -432,12 +478,9 @@ async fn show_status() -> anyhow::Result<()> {
     // running and holds the zvec lock, fall back to a limited status from
     // config + filesystem metadata.
     match open_store_for_backend(&config.memory, &data_dir).await {
-        Ok(ActiveStore::Open {
-            store,
-            display_path,
-        }) => {
+        Ok(ActiveStore::Open { store, location }) => {
             let mem_config = moltis_memory::config::MemoryConfig {
-                db_path: display_path.to_string_lossy().to_string(),
+                db_path: location.clone(),
                 ..Default::default()
             };
             let manager = moltis_memory::manager::MemoryManager::keyword_only(mem_config, store);
@@ -450,7 +493,7 @@ async fn show_status() -> anyhow::Result<()> {
             println!("  Embedding model: {}", embedding_model);
             println!("  Backend:         {}", status.backend_type);
             println!("  Database size:   {}", status.db_size_display());
-            println!("  Database path:   {}", display_path.display());
+            println!("  Database path:   {location}");
         },
         Ok(ActiveStore::NotFound { message }) => {
             println!("{message}");
@@ -461,6 +504,7 @@ async fn show_status() -> anyhow::Result<()> {
             let embedding_model = format_embedding_model(&config);
             let backend_name = match config.memory.backend {
                 moltis_config::MemoryBackend::Zvec => "zvec",
+                moltis_config::MemoryBackend::Postgres => "postgres",
                 _ => "sqlite",
             };
 
@@ -860,7 +904,9 @@ mod tests {
 
         // Create and populate the database
         let pool = sqlx::SqlitePool::connect(&db_url).await.unwrap();
-        moltis_memory::schema::run_migrations(&pool).await.unwrap();
+        moltis_memory::schema::run_migrations(&moltis_db::Db::from(pool.clone()))
+            .await
+            .unwrap();
 
         // Insert test data
         sqlx::query("INSERT INTO files (path, source, hash, mtime, size) VALUES (?, ?, ?, ?, ?)")
@@ -897,7 +943,7 @@ mod tests {
 
         // Search should find results
         let pool = open_memory_pool().await.unwrap();
-        let store = moltis_memory::store_sqlite::SqliteMemoryStore::new(pool);
+        let store = moltis_memory::store_db::DbMemoryStore::from_sqlite_pool(pool);
         let results = moltis_memory::search::keyword_only_search(&store, "rust", 5)
             .await
             .unwrap();
@@ -913,13 +959,15 @@ mod tests {
         let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
 
         let pool = sqlx::SqlitePool::connect(&db_url).await.unwrap();
-        moltis_memory::schema::run_migrations(&pool).await.unwrap();
+        moltis_memory::schema::run_migrations(&moltis_db::Db::from(pool.clone()))
+            .await
+            .unwrap();
         pool.close().await;
 
         moltis_config::set_data_dir(tmp.path().to_path_buf());
 
         let pool = open_memory_pool().await.unwrap();
-        let store = moltis_memory::store_sqlite::SqliteMemoryStore::new(pool);
+        let store = moltis_memory::store_db::DbMemoryStore::from_sqlite_pool(pool);
         let results = moltis_memory::search::keyword_only_search(&store, "nonexistent", 5)
             .await
             .unwrap();
@@ -945,7 +993,9 @@ mod tests {
         let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
 
         let pool = sqlx::SqlitePool::connect(&db_url).await.unwrap();
-        moltis_memory::schema::run_migrations(&pool).await.unwrap();
+        moltis_memory::schema::run_migrations(&moltis_db::Db::from(pool.clone()))
+            .await
+            .unwrap();
 
         // Insert a file and chunk
         sqlx::query("INSERT INTO files (path, source, hash, mtime, size) VALUES (?, ?, ?, ?, ?)")
@@ -981,7 +1031,7 @@ mod tests {
 
         // Status should succeed and report 1 file, 1 chunk
         let ro_pool = open_memory_pool().await.unwrap();
-        let store = moltis_memory::store_sqlite::SqliteMemoryStore::new(ro_pool);
+        let store = moltis_memory::store_db::DbMemoryStore::from_sqlite_pool(ro_pool);
         let config = moltis_memory::config::MemoryConfig {
             db_path: db_path.to_string_lossy().to_string(),
             ..Default::default()
@@ -1195,11 +1245,8 @@ mod tests {
 
             let cfg = mem_cfg_zvec("memory.zvec", Some(768));
             match open_store_for_backend(&cfg, tmp.path()).await.unwrap() {
-                ActiveStore::Open {
-                    store,
-                    display_path,
-                } => {
-                    assert_eq!(display_path, format!("{}_768", stem.display()));
+                ActiveStore::Open { store, location } => {
+                    assert_eq!(location, format!("{}_768", stem.display()));
                     // Diagnostic: confirm the chunk persisted across reopen.
                     let persisted = store.get_chunk_by_id("route-1").await.unwrap();
                     assert!(

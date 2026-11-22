@@ -24,6 +24,7 @@ default-members = [
   "crates/connectors",
   "crates/cron",
   "crates/ctl",
+  "crates/db",
   "crates/discord",
   "crates/external-agents",
   "crates/gateway",
@@ -103,6 +104,7 @@ members = [
   "crates/connectors",
   "crates/cron",
   "crates/ctl",
+  "crates/db",
   "crates/external-agents",
   "crates/gateway",
   "crates/graphql",
@@ -229,7 +231,13 @@ tracing-subscriber    = { features = ["env-filter", "json"], version = "0.3" }
 clap      = { features = ["derive", "env"], version = "4" }
 indicatif = "0.17"
 # Database
-sqlx = { features = ["migrate", "runtime-tokio", "sqlite"], version = "0.8" }
+sqlx = { features = [
+  "migrate",
+  "postgres",
+  "runtime-tokio",
+  "sqlite",
+  "tls-rustls-ring-webpki",
+], version = "0.8" }
 # Embedded key-value store (zvec memory backend cache + file index)
 redb = "2"
 # Zvec vector database (memory backend)
@@ -426,6 +434,7 @@ moltis-connector-gmail    = { path = "crates/connector-gmail" }
 moltis-connector-himalaya = { path = "crates/connector-himalaya" }
 moltis-connectors         = { path = "crates/connectors" }
 moltis-cron               = { path = "crates/cron" }
+moltis-db                 = { path = "crates/db" }
 moltis-discord            = { path = "crates/discord" }
 moltis-external-agents    = { path = "crates/external-agents" }
 moltis-gateway            = { default-features = false, path = "crates/gateway" }

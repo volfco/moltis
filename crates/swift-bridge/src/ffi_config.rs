@@ -240,6 +240,7 @@ pub extern "C" fn moltis_memory_config_get() -> *mut c_char {
                 moltis_config::MemoryBackend::Builtin => "builtin".to_owned(),
                 moltis_config::MemoryBackend::Qmd => "qmd".to_owned(),
                 moltis_config::MemoryBackend::Zvec => "zvec".to_owned(),
+                moltis_config::MemoryBackend::Postgres => "postgres".to_owned(),
             },
             provider: match memory.provider {
                 Some(moltis_config::MemoryProvider::Local) => "local".to_owned(),
@@ -321,6 +322,7 @@ pub extern "C" fn moltis_memory_config_update(request_json: *const c_char) -> *m
             moltis_config::MemoryBackend::Builtin => "builtin".to_owned(),
             moltis_config::MemoryBackend::Qmd => "qmd".to_owned(),
             moltis_config::MemoryBackend::Zvec => "zvec".to_owned(),
+            moltis_config::MemoryBackend::Postgres => "postgres".to_owned(),
         });
         let provider = request.provider.unwrap_or_else(|| match current.provider {
             Some(moltis_config::MemoryProvider::Local) => "local".to_owned(),

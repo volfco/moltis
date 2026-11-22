@@ -11,6 +11,7 @@ grep-searcher      = { workspace = true }
 moltis-agents      = { workspace = true }
 moltis-code-index  = { workspace = true }
 moltis-config      = { workspace = true }
+moltis-db          = { workspace = true }
 moltis-memory      = { workspace = true }
 moltis-memory-zvec = { optional = true, workspace = true }
 moltis-providers   = { workspace = true }

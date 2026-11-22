@@ -314,6 +314,23 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # PostgreSQL-backed tests (moltis-db, moltis-memory) skip unless this URL
+    # is set, so the service is only consumed by those tests.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: moltis
+          POSTGRES_DB: moltis
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      TEST_POSTGRES_URL: postgres://postgres:moltis@127.0.0.1:55432/moltis
     steps:
       - name: Free disk space
         run: |

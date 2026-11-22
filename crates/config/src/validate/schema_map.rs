@@ -619,6 +619,7 @@ pub(super) fn build_schema_map() -> KnownKeys {
                 ("session_export", Leaf),
                 ("qmd", qmd()),
                 ("db_path", Leaf),
+                ("database_url", Leaf),
                 ("vector_weight", Leaf),
                 ("keyword_weight", Leaf),
                 ("enable_prefetch", Leaf),

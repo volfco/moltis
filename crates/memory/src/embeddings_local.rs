@@ -257,7 +257,7 @@ mod tests {
     async fn real_default_model_handles_context_edges_and_indexing() {
         use crate::{
             config::MemoryConfig, manager::MemoryManager, schema::run_migrations,
-            store_sqlite::SqliteMemoryStore,
+            store_db::DbMemoryStore,
         };
 
         let model_path = std::env::var("MOLTIS_TEST_LOCAL_MODEL")
@@ -344,7 +344,7 @@ mod tests {
         let pool = sqlx::SqlitePool::connect(":memory:")
             .await
             .expect("in-memory SQLite should connect");
-        run_migrations(&pool)
+        run_migrations(&moltis_db::Db::from(pool.clone()))
             .await
             .expect("memory migrations should run");
         let config = MemoryConfig {
@@ -354,7 +354,7 @@ mod tests {
         };
         let manager = MemoryManager::new(
             config,
-            Box::new(SqliteMemoryStore::new(pool)),
+            Box::new(DbMemoryStore::from_sqlite_pool(pool)),
             Box::new(provider),
         );
 

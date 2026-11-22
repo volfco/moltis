@@ -7,7 +7,7 @@ use {
     moltis_agents::model::{CompletionResponse, StreamEvent, Usage, UserContent},
     moltis_memory::{
         config::MemoryConfig, embeddings::EmbeddingProvider, manager::MemoryManager,
-        schema::run_migrations, store_sqlite::SqliteMemoryStore,
+        schema::run_migrations, store_db::DbMemoryStore,
     },
     sqlx::SqlitePool,
     tempfile::TempDir,
@@ -169,7 +169,9 @@ async fn setup_agent_memory(
     std::fs::write(&memory_path, content).unwrap();
 
     let pool = SqlitePool::connect(":memory:").await.unwrap();
-    run_migrations(&pool).await.unwrap();
+    run_migrations(&moltis_db::Db::from(pool.clone()))
+        .await
+        .unwrap();
     let config = MemoryConfig {
         db_path: ":memory:".into(),
         data_dir: Some(tmp.path().to_path_buf()),
@@ -183,7 +185,7 @@ async fn setup_agent_memory(
 
     let manager = Arc::new(MemoryManager::new(
         config,
-        Box::new(SqliteMemoryStore::new(pool)),
+        Box::new(DbMemoryStore::from_sqlite_pool(pool)),
         Box::new(MockEmbedder),
     ));
     manager.sync().await.unwrap();

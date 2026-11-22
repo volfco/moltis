@@ -7,6 +7,7 @@ use crate::methods::voice;
 use std::{path::PathBuf, sync::Arc};
 
 #[cfg(any(feature = "qmd", feature = "code-index-builtin"))]
+use secrecy::ExposeSecret;
 use tracing::info;
 
 pub(super) fn register(reg: &mut MethodRegistry) {
@@ -888,16 +889,16 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                 let memory = &config.memory;
                 let chat = &config.chat;
 
-                // Report the active backend using the editable config value.
-                // The builtin runtime identifies its SQLite implementation as
-                // "sqlite", while memory.config.update accepts "builtin".
-                let active_backend = editable_memory_backend_name(
-                    memory.backend,
-                    ctx.state
-                        .memory_manager
-                        .as_ref()
-                        .map(|manager| manager.backend_name()),
-                );
+                // Report the *configured* backend, so a choice that only takes
+                // effect after a restart (for example switching to postgres)
+                // is still visible in the settings form. The backend the
+                // process is actually serving is reported separately as
+                // `active_backend`.
+                let active_backend = ctx
+                    .state
+                    .memory_manager
+                    .as_ref()
+                    .map(|manager| active_memory_backend_name(manager.backend_name()));
                 Ok(serde_json::json!({
                     "style": match memory.style {
                         moltis_config::MemoryStyle::Hybrid => "hybrid",
@@ -916,7 +917,8 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                         moltis_config::UserProfileWriteMode::ExplicitOnly => "explicit-only",
                         moltis_config::UserProfileWriteMode::Off => "off",
                     },
-                    "backend": active_backend,
+                    "backend": configured_memory_backend_name(memory.backend),
+                    "active_backend": active_backend,
                     "provider": match memory.provider {
                         Some(moltis_config::MemoryProvider::Local) => "local",
                         Some(moltis_config::MemoryProvider::Ollama) => "ollama",
@@ -945,6 +947,11 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                     },
                     "qmd_feature_enabled": cfg!(feature = "qmd"),
                     "zvec_feature_enabled": cfg!(feature = "zvec"),
+                    "postgres_backend_available": true,
+                    "database_url_set": memory
+                        .database_url
+                        .as_ref()
+                        .is_some_and(|url| !url.expose_secret().trim().is_empty()),
                     "enable_prefetch": memory.enable_prefetch,
                     "prefetch_limit": memory.prefetch_limit,
                     "auto_extract_interval": memory.auto_extract_interval,
@@ -1053,6 +1060,10 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                     });
                 let prompt_memory_mode_value = parse_prompt_memory_mode(prompt_memory_mode)?;
                 let mut effective_disable_rag = current_memory.disable_rag;
+                let mut database_url_set = current_memory
+                    .database_url
+                    .as_ref()
+                    .is_some_and(|url| !url.expose_secret().trim().is_empty());
                 let enable_prefetch = ctx
                     .params
                     .get("enable_prefetch")
@@ -1080,11 +1091,33 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                     .get("enable_self_improvement")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(current_config.skills.enable_self_improvement);
+                // `database_url` holds credentials, so it is accepted on write
+                // but never echoed back by memory.config.get.
+                let database_url = ctx
+                    .params
+                    .get("database_url")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .map(|url| {
+                        if url.is_empty() {
+                            None
+                        } else {
+                            Some(secrecy::Secret::new(url.to_string()))
+                        }
+                    });
                 if let Err(e) = moltis_config::update_config(|cfg| {
                     cfg.memory.style = style_value;
                     cfg.memory.agent_write_mode = agent_write_mode_value;
                     cfg.memory.user_profile_write_mode = user_profile_write_mode_value;
                     cfg.memory.backend = backend_value;
+                    if let Some(url) = &database_url {
+                        cfg.memory.database_url = url.clone();
+                    }
+                    database_url_set = cfg
+                        .memory
+                        .database_url
+                        .as_ref()
+                        .is_some_and(|url| !url.expose_secret().trim().is_empty());
                     cfg.memory.provider = provider_value;
                     cfg.memory.citations = citations_value;
                     cfg.memory.llm_reranking = llm_reranking;
@@ -1107,6 +1140,7 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                 Ok(serde_json::json!({
                     "style": style,
                     "agent_write_mode": agent_write_mode,
+                    "database_url_set": database_url_set,
                     "user_profile_write_mode": user_profile_write_mode,
                     "backend": backend,
                     "provider": provider,

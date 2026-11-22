@@ -8,6 +8,9 @@ pub enum Error {
     Database(#[from] sqlx::Error),
 
     #[error(transparent)]
+    Db(#[from] moltis_db::DbError),
+
+    #[error(transparent)]
     Io(#[from] std::io::Error),
 
     #[error(transparent)]

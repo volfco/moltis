@@ -1,0 +1,25 @@
+[package]
+description       = "Database backend abstraction: SQLite (default) or PostgreSQL"
+edition.workspace = true
+name              = "moltis-db"
+version.workspace = true
+
+[features]
+default = ["sqlite", "postgres"]
+postgres = []
+sqlite   = []
+
+[dependencies]
+anyhow      = { workspace = true }
+async-trait = { workspace = true }
+serde       = { workspace = true }
+sqlx        = { workspace = true }
+thiserror   = { workspace = true }
+tokio       = { workspace = true }
+tracing     = { workspace = true }
+
+[dev-dependencies]
+tokio = { features = ["macros", "rt-multi-thread"], workspace = true }
+
+[lints]
+workspace = true

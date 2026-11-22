@@ -150,6 +150,24 @@ pub(super) fn check_semantic_warnings(config: &MoltisConfig, diagnostics: &mut V
         });
     }
 
+    // memory backend = postgres requires a connection URL
+    if config.memory.backend == crate::schema::MemoryBackend::Postgres
+        && config
+            .memory
+            .database_url
+            .as_ref()
+            .is_none_or(|url| url.expose_secret().trim().is_empty())
+    {
+        diagnostics.push(Diagnostic {
+            severity: Severity::Error,
+            category: "config",
+            path: "memory.database_url".into(),
+            message: "memory.backend = \"postgres\" requires memory.database_url, \
+                      e.g. \"postgres://user:pass@localhost/moltis\""
+                .into(),
+        });
+    }
+
     // TLS cert without key or vice versa
     let has_cert = config.tls.cert_path.is_some();
     let has_key = config.tls.key_path.is_some();

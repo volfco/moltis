@@ -54,6 +54,7 @@ web-ui             = ["dep:chrono"]
 default = ["llm-compaction"]
 
 [dev-dependencies]
+moltis-db = { workspace = true }
 async-stream    = { workspace = true }
 moltis-channels = { workspace = true }
 moltis-protocol = { workspace = true }

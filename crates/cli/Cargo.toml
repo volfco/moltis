@@ -82,6 +82,7 @@ moltis-common           = { workspace = true }
 moltis-config           = { workspace = true }
 moltis-connectors       = { optional = true, workspace = true }
 moltis-cron             = { workspace = true }
+moltis-db               = { workspace = true }
 moltis-gateway          = { workspace = true }
 moltis-hermes-import    = { optional = true, workspace = true }
 moltis-httpd            = { workspace = true }
