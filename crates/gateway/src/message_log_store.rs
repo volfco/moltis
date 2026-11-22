@@ -122,7 +122,7 @@ impl MessageLog for DbMessageLog {
         let rows = fetch_all!(
             &self.db,
             (String, Option<String>, Option<String>, i64, i64, bool),
-            "SELECT peer_id, username, sender_name,
+            "SELECT peer_id, MAX(username) as username, MAX(sender_name) as sender_name,
                     COUNT(*) as message_count,
                     MAX(created_at) as last_seen,
                     MAX(CASE WHEN access_granted THEN 1 ELSE 0 END) > 0 as last_access_granted

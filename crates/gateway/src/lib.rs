@@ -87,6 +87,11 @@ pub(crate) fn config_override_test_lock() -> std::sync::MutexGuard<'static, ()> 
         .unwrap_or_else(|error| error.into_inner())
 }
 
+#[cfg(test)]
+mod postgres_tests;
+#[cfg(test)]
+mod test_support;
+
 /// Run database migrations for the gateway crate.
 ///
 /// This creates the auth tables (auth_password, passkeys, api_keys, auth_sessions),
