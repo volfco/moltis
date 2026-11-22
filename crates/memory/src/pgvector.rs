@@ -43,10 +43,14 @@ pub async fn probe(db: &Db) -> Result<Option<PgvectorStatus>> {
     if !catalog_present {
         return Ok(None);
     }
+    // An installed extension is not enough: the `vector` type must also
+    // resolve on this connection, or a role whose search_path hides the
+    // extension's schema gets "available" and then fails in the migrations.
     let available: bool = moltis_db::scalar!(
         db,
         bool,
-        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_extension WHERE extname = 'vector')"
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_extension WHERE extname = 'vector') \
+         AND to_regtype('vector') IS NOT NULL"
     )?;
     Ok(Some(PgvectorStatus {
         available,
@@ -74,6 +78,12 @@ pub async fn preflight(db: &Db) -> Result<()> {
         Ok(_) => return Ok(()),
         Err(error) => error,
     };
+    // `IF NOT EXISTS` races with a concurrent first-boot install: the loser
+    // can see a duplicate-extension error while the extension is in fact
+    // there. Re-probe before reporting a privilege problem.
+    if probe(db).await?.is_some_and(|status| status.available) {
+        return Ok(());
+    }
     let database: String = moltis_db::scalar!(db, String, "SELECT current_database()::text")
         .unwrap_or_else(|_| "unknown".to_string());
     Err(Error::PgvectorMissing(format!(
@@ -178,6 +188,13 @@ mod tests {
             message.contains(&database),
             "error must name the database: {message}"
         );
+
+        // Leave no role behind: reruns and later tests must see a clean cluster.
+        let restricted_role = RESTRICTED_ROLE;
+        moltis_db::execute!(&db, format!("DROP OWNED BY {restricted_role}"))
+            .unwrap_or_else(|error| panic!("drop restricted role objects failed: {error}"));
+        moltis_db::execute!(&db, format!("DROP ROLE IF EXISTS {restricted_role}"))
+            .unwrap_or_else(|error| panic!("drop test role failed: {error}"));
     }
 
     /// Non-superuser role used by the creation-denied test.
@@ -194,7 +211,8 @@ mod tests {
     fn restricted_url() -> String {
         let url = std::env::var("TEST_POSTGRES_URL").unwrap();
         let (_, after_scheme) = url.split_once("://").unwrap();
-        let (_, host_and_db) = after_scheme.split_once('@').unwrap();
+        // `rsplit_once`: passwords may contain '@'.
+        let (_, host_and_db) = after_scheme.rsplit_once('@').unwrap();
         format!("postgres://{RESTRICTED_ROLE}:restricted@{host_and_db}")
     }
 }
