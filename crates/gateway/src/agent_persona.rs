@@ -6,6 +6,7 @@
 //! root workspace for backward compatibility.
 
 use {
+    moltis_db::{Db, execute, fetch_all, fetch_optional, scalar, tx_execute},
     serde::{Deserialize, Serialize},
     std::{
         path::{Path, PathBuf},
@@ -23,6 +24,8 @@ pub enum AgentError {
     #[error(transparent)]
     Db(#[from] sqlx::Error),
     #[error(transparent)]
+    DbError(#[from] moltis_db::DbError),
+    #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Config(#[from] moltis_config::Error),
@@ -35,9 +38,10 @@ impl From<AgentError> for moltis_protocol::ErrorShape {
             AgentError::NotFound(_) | AgentError::InvalidRequest(_) => {
                 Self::new(error_codes::INVALID_REQUEST, err.to_string())
             },
-            AgentError::Db(_) | AgentError::Io(_) | AgentError::Config(_) => {
-                Self::new(error_codes::UNAVAILABLE, err.to_string())
-            },
+            AgentError::Db(_)
+            | AgentError::DbError(_)
+            | AgentError::Io(_)
+            | AgentError::Config(_) => Self::new(error_codes::UNAVAILABLE, err.to_string()),
         }
     }
 }
@@ -159,26 +163,26 @@ pub fn validate_agent_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-/// SQLite-backed agent persona store.
+/// Database-backed agent persona store (SQLite or PostgreSQL).
 pub struct AgentPersonaStore {
-    pool: sqlx::SqlitePool,
+    db: Db,
 }
 
 impl AgentPersonaStore {
-    pub fn new(pool: sqlx::SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(db: Db) -> Self {
+        Self { db }
     }
 
     /// Return the current default agent ID.
     ///
     /// If no explicit default row is set, this falls back to `"main"`.
     pub async fn default_id(&self) -> Result<String> {
-        let row = sqlx::query_scalar::<_, String>(
+        let row = fetch_optional!(
+            &self.db,
+            (String,),
             "SELECT id FROM agents WHERE is_default = 1 ORDER BY updated_at DESC LIMIT 1",
-        )
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.unwrap_or_else(|| "main".to_string()))
+        )?;
+        Ok(row.map(|(id,)| id).unwrap_or_else(|| "main".to_string()))
     }
 
     /// Set the default agent ID.
@@ -187,18 +191,17 @@ impl AgentPersonaStore {
             return Err(AgentError::NotFound(format!("agent '{id}' not found")));
         }
 
-        let mut tx = self.pool.begin().await?;
-        sqlx::query("UPDATE agents SET is_default = 0")
-            .execute(&mut *tx)
-            .await?;
+        let mut tx = self.db.begin().await?;
+        tx_execute!(&mut tx, "UPDATE agents SET is_default = 0")?;
 
         let now = now_ms();
-        let updated = sqlx::query("UPDATE agents SET is_default = 1, updated_at = ? WHERE id = ?")
-            .bind(now)
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-        if updated.rows_affected() == 0 {
+        let updated = tx_execute!(
+            &mut tx,
+            "UPDATE agents SET is_default = 1, updated_at = ? WHERE id = ?",
+            now,
+            id,
+        )?;
+        if updated == 0 {
             return Err(AgentError::NotFound(format!("agent '{id}' not found")));
         }
 
@@ -238,22 +241,20 @@ impl AgentPersonaStore {
     /// List all agents from the database.
     pub async fn list(&self) -> Result<Vec<AgentPersona>> {
         let _ = self.ensure_main_workspace_seeded();
-        let agents: Vec<AgentPersona> =
-            sqlx::query_as::<_, AgentRow>("SELECT * FROM agents ORDER BY created_at ASC")
-                .fetch_all(&self.pool)
-                .await?
-                .into_iter()
-                .map(Into::into)
-                .collect();
+        let agents: Vec<AgentPersona> = fetch_all!(
+            &self.db,
+            AgentRow,
+            "SELECT * FROM agents ORDER BY created_at ASC",
+        )?
+        .into_iter()
+        .map(Into::into)
+        .collect();
         Ok(agents)
     }
 
     /// Get a single agent by ID.
     pub async fn get(&self, id: &str) -> Result<Option<AgentPersona>> {
-        let row = sqlx::query_as::<_, AgentRow>("SELECT * FROM agents WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
+        let row = fetch_optional!(&self.db, AgentRow, "SELECT * FROM agents WHERE id = ?", id)?;
         Ok(row.map(Into::into))
     }
 
@@ -262,20 +263,19 @@ impl AgentPersonaStore {
         validate_agent_id(&params.id)?;
 
         let now = now_ms();
-        sqlx::query(
+        execute!(
+            &self.db,
             r#"INSERT INTO agents (id, name, is_default, emoji, theme, description, voice_persona_id, created_at, updated_at)
                VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?)"#,
-        )
-        .bind(&params.id)
-        .bind(&params.name)
-        .bind(&params.emoji)
-        .bind(&params.theme)
-        .bind(&params.description)
-        .bind(&params.voice_persona_id)
-        .bind(now)
-        .bind(now)
-        .execute(&self.pool)
-        .await?;
+            &params.id,
+            &params.name,
+            &params.emoji,
+            &params.theme,
+            &params.description,
+            &params.voice_persona_id,
+            now,
+            now,
+        )?;
 
         self.ensure_workspace(&params.id)?;
 
@@ -314,18 +314,17 @@ impl AgentPersonaStore {
         let voice_persona_id = params.voice_persona_id.or(existing.voice_persona_id);
         let now = now_ms();
 
-        sqlx::query(
+        execute!(
+            &self.db,
             "UPDATE agents SET name = ?, emoji = ?, theme = ?, description = ?, voice_persona_id = ?, updated_at = ? WHERE id = ?",
-        )
-        .bind(&name)
-        .bind(&emoji)
-        .bind(&theme)
-        .bind(&description)
-        .bind(&voice_persona_id)
-        .bind(now)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+            &name,
+            &emoji,
+            &theme,
+            &description,
+            &voice_persona_id,
+            now,
+            id,
+        )?;
 
         // Update workspace IDENTITY.md.
         let identity = moltis_config::schema::AgentIdentity {
@@ -361,12 +360,9 @@ impl AgentPersonaStore {
             ));
         }
 
-        let result = sqlx::query("DELETE FROM agents WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        let affected = execute!(&self.db, "DELETE FROM agents WHERE id = ?", id)?;
 
-        if result.rows_affected() == 0 {
+        if affected == 0 {
             return Err(AgentError::NotFound(format!("agent '{id}' not found")));
         }
 
@@ -400,10 +396,11 @@ impl AgentPersonaStore {
     /// from the existing `[identity]` config in `moltis.toml` and
     /// `IDENTITY.md`. Subsequent calls are a no-op if the row exists.
     pub async fn ensure_main_row(&self) -> Result<()> {
-        let existing =
-            sqlx::query_scalar::<_, String>("SELECT id FROM agents WHERE id = 'main' LIMIT 1")
-                .fetch_optional(&self.pool)
-                .await?;
+        let existing = fetch_optional!(
+            &self.db,
+            (String,),
+            "SELECT id FROM agents WHERE id = 'main' LIMIT 1",
+        )?;
 
         if existing.is_some() {
             return Ok(());
@@ -419,11 +416,11 @@ impl AgentPersonaStore {
         let theme = identity.as_ref().and_then(|i| i.theme.clone());
 
         // Default to is_default=1 unless another agent already holds that flag.
-        let has_other_default =
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM agents WHERE is_default = 1")
-                .fetch_one(&self.pool)
-                .await?
-                > 0;
+        let has_other_default = scalar!(
+            &self.db,
+            i64,
+            "SELECT COUNT(*) FROM agents WHERE is_default = 1"
+        )? > 0;
 
         let is_default: i64 = if has_other_default {
             0
@@ -432,18 +429,18 @@ impl AgentPersonaStore {
         };
         let now = now_ms();
 
-        sqlx::query(
-            r#"INSERT OR IGNORE INTO agents (id, name, is_default, emoji, theme, description, created_at, updated_at)
-               VALUES ('main', ?, ?, ?, ?, 'Default agent', ?, ?)"#,
-        )
-        .bind(&name)
-        .bind(is_default)
-        .bind(&emoji)
-        .bind(&theme)
-        .bind(now)
-        .bind(now)
-        .execute(&self.pool)
-        .await?;
+        execute!(
+            &self.db,
+            r#"INSERT INTO agents (id, name, is_default, emoji, theme, description, created_at, updated_at)
+               VALUES ('main', ?, ?, ?, ?, 'Default agent', ?, ?)
+               ON CONFLICT DO NOTHING"#,
+            &name,
+            is_default,
+            &emoji,
+            &theme,
+            now,
+            now,
+        )?;
 
         Ok(())
     }
@@ -485,31 +482,17 @@ mod tests {
         assert!(validate_agent_id(&"a".repeat(51)).is_err());
     }
 
-    async fn test_pool() -> sqlx::SqlitePool {
+    async fn test_db() -> Db {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
-        sqlx::query(
-            r#"CREATE TABLE IF NOT EXISTS agents (
-                id                TEXT PRIMARY KEY,
-                name              TEXT NOT NULL,
-                is_default        INTEGER NOT NULL DEFAULT 0,
-                emoji             TEXT,
-                theme             TEXT,
-                description       TEXT,
-                voice_persona_id  TEXT,
-                created_at        INTEGER NOT NULL,
-                updated_at        INTEGER NOT NULL
-            )"#,
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        pool
+        let db = Db::from(pool);
+        crate::run_migrations(&db).await.unwrap();
+        db
     }
 
     #[tokio::test]
     async fn test_list_includes_main() {
-        let pool = test_pool().await;
-        let store = AgentPersonaStore::new(pool);
+        let db = test_db().await;
+        let store = AgentPersonaStore::new(db);
         store.ensure_main_row().await.unwrap();
         let agents = store.list().await.unwrap();
         assert!(!agents.is_empty());
@@ -519,8 +502,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_ensure_main_row_idempotent() {
-        let pool = test_pool().await;
-        let store = AgentPersonaStore::new(pool);
+        let db = test_db().await;
+        let store = AgentPersonaStore::new(db);
         store.ensure_main_row().await.unwrap();
         store.ensure_main_row().await.unwrap();
         let agents = store.list().await.unwrap();
@@ -529,8 +512,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_and_get() {
-        let pool = test_pool().await;
-        let store = AgentPersonaStore::new(pool);
+        let db = test_db().await;
+        let store = AgentPersonaStore::new(db);
 
         let agent = store
             .create(CreateAgentParams {
@@ -555,8 +538,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_rejects_main() {
-        let pool = test_pool().await;
-        let store = AgentPersonaStore::new(pool);
+        let db = test_db().await;
+        let store = AgentPersonaStore::new(db);
         let result = store
             .create(CreateAgentParams {
                 id: "main".to_string(),
@@ -572,8 +555,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_rejects_invalid_id() {
-        let pool = test_pool().await;
-        let store = AgentPersonaStore::new(pool);
+        let db = test_db().await;
+        let store = AgentPersonaStore::new(db);
         let result = store
             .create(CreateAgentParams {
                 id: "INVALID".to_string(),
@@ -589,8 +572,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_update() {
-        let pool = test_pool().await;
-        let store = AgentPersonaStore::new(pool);
+        let db = test_db().await;
+        let store = AgentPersonaStore::new(db);
         store
             .create(CreateAgentParams {
                 id: "writer".to_string(),
@@ -620,8 +603,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_main_allowed() {
-        let pool = test_pool().await;
-        let store = AgentPersonaStore::new(pool);
+        let db = test_db().await;
+        let store = AgentPersonaStore::new(db);
         store.ensure_main_row().await.unwrap();
         let updated = store
             .update("main", UpdateAgentParams {
@@ -639,8 +622,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete() {
-        let pool = test_pool().await;
-        let store = AgentPersonaStore::new(pool);
+        let db = test_db().await;
+        let store = AgentPersonaStore::new(db);
         store
             .create(CreateAgentParams {
                 id: "temp".to_string(),
@@ -659,15 +642,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_main_rejected() {
-        let pool = test_pool().await;
-        let store = AgentPersonaStore::new(pool);
+        let db = test_db().await;
+        let store = AgentPersonaStore::new(db);
         assert!(store.delete("main").await.is_err());
     }
 
     #[tokio::test]
     async fn test_set_default_non_main() {
-        let pool = test_pool().await;
-        let store = AgentPersonaStore::new(pool);
+        let db = test_db().await;
+        let store = AgentPersonaStore::new(db);
         store.ensure_main_row().await.unwrap();
         store
             .create(CreateAgentParams {
@@ -689,8 +672,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_default_rejected() {
-        let pool = test_pool().await;
-        let store = AgentPersonaStore::new(pool);
+        let db = test_db().await;
+        let store = AgentPersonaStore::new(db);
         store
             .create(CreateAgentParams {
                 id: "ops".to_string(),
@@ -708,15 +691,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_nonexistent() {
-        let pool = test_pool().await;
-        let store = AgentPersonaStore::new(pool);
+        let db = test_db().await;
+        let store = AgentPersonaStore::new(db);
         assert!(store.delete("nonexistent").await.is_err());
     }
 
     #[tokio::test]
     async fn test_list_order() {
-        let pool = test_pool().await;
-        let store = AgentPersonaStore::new(pool);
+        let db = test_db().await;
+        let store = AgentPersonaStore::new(db);
         store.ensure_main_row().await.unwrap();
 
         store
@@ -752,8 +735,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_main() {
-        let pool = test_pool().await;
-        let store = AgentPersonaStore::new(pool);
+        let db = test_db().await;
+        let store = AgentPersonaStore::new(db);
         store.ensure_main_row().await.unwrap();
         let main = store.get("main").await.unwrap().unwrap();
         assert_eq!(main.id, "main");

@@ -478,7 +478,7 @@ pub async fn prepare_gateway_core_with_profile(
     moltis_webhooks::run_migrations(&db_pool)
         .await
         .expect("failed to run webhooks migrations");
-    crate::run_migrations(&db_pool)
+    crate::run_migrations(&moltis_db::Db::from(db_pool.clone()))
         .await
         .expect("failed to run gateway migrations");
 
@@ -589,7 +589,7 @@ pub async fn prepare_gateway_core_with_profile(
     }
 
     let message_log: Arc<dyn moltis_channels::message_log::MessageLog> = Arc::new(
-        crate::message_log_store::SqliteMessageLog::new(db_pool.clone()),
+        crate::message_log_store::DbMessageLog::new(moltis_db::Db::from(db_pool.clone())),
     );
 
     // Migrate from projects.toml if it exists.
@@ -655,13 +655,15 @@ pub async fn prepare_gateway_core_with_profile(
         db_pool.clone(),
         event_bus_for_metadata,
     ));
-    let session_share_store = Arc::new(crate::share_store::ShareStore::new(db_pool.clone()));
+    let session_share_store = Arc::new(crate::share_store::ShareStore::new(moltis_db::Db::from(
+        db_pool.clone(),
+    )));
     let session_state_store = Arc::new(moltis_sessions::state_store::SessionStateStore::new(
         db_pool.clone(),
     ));
 
     let agent_persona_store = Arc::new(crate::agent_persona::AgentPersonaStore::new(
-        db_pool.clone(),
+        moltis_db::Db::from(db_pool.clone()),
     ));
     if let Err(e) = agent_persona_store.ensure_main_workspace_seeded() {
         tracing::warn!(error = %e, "failed to seed main agent workspace");
@@ -672,7 +674,7 @@ pub async fn prepare_gateway_core_with_profile(
 
     #[cfg(feature = "voice")]
     let voice_persona_store = Arc::new(crate::voice_persona::VoicePersonaStore::new(
-        db_pool.clone(),
+        moltis_db::Db::from(db_pool.clone()),
     ));
     #[cfg(feature = "voice")]
     match voice_persona_store.seed_defaults().await {

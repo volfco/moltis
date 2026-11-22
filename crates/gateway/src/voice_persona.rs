@@ -4,6 +4,7 @@
 //! instructions) that is injected deterministically into TTS synthesis calls.
 
 use {
+    moltis_db::{Db, execute, fetch_all, fetch_optional, scalar, tx_execute},
     moltis_voice::{
         FallbackPolicy, SynthesizeRequest, TtsProviderId, VoicePersona, VoicePersonaPrompt,
         VoicePersonaProviderBinding,
@@ -22,6 +23,8 @@ pub enum VoicePersonaError {
     #[error(transparent)]
     Db(#[from] sqlx::Error),
     #[error(transparent)]
+    DbError(#[from] moltis_db::DbError),
+    #[error(transparent)]
     Json(#[from] serde_json::Error),
 }
 
@@ -32,9 +35,9 @@ impl From<VoicePersonaError> for moltis_protocol::ErrorShape {
             VoicePersonaError::NotFound(_) | VoicePersonaError::InvalidRequest(_) => {
                 Self::new(error_codes::INVALID_REQUEST, err.to_string())
             },
-            VoicePersonaError::Db(_) | VoicePersonaError::Json(_) => {
-                Self::new(error_codes::UNAVAILABLE, err.to_string())
-            },
+            VoicePersonaError::Db(_)
+            | VoicePersonaError::DbError(_)
+            | VoicePersonaError::Json(_) => Self::new(error_codes::UNAVAILABLE, err.to_string()),
         }
     }
 }
@@ -158,22 +161,23 @@ impl PersonaRow {
     }
 }
 
-/// SQLite-backed voice persona store.
+/// Database-backed voice persona store (SQLite or PostgreSQL).
 pub struct VoicePersonaStore {
-    pool: sqlx::SqlitePool,
+    db: Db,
 }
 
 impl VoicePersonaStore {
-    pub fn new(pool: sqlx::SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(db: Db) -> Self {
+        Self { db }
     }
 
     /// List all voice personas.
     pub async fn list(&self) -> Result<Vec<VoicePersonaResponse>> {
-        let rows: Vec<PersonaRow> =
-            sqlx::query_as("SELECT * FROM voice_personas ORDER BY created_at ASC")
-                .fetch_all(&self.pool)
-                .await?;
+        let rows: Vec<PersonaRow> = fetch_all!(
+            &self.db,
+            PersonaRow,
+            "SELECT * FROM voice_personas ORDER BY created_at ASC"
+        )?;
 
         rows.into_iter()
             .map(|r| r.into_response().map_err(VoicePersonaError::Json))
@@ -182,10 +186,12 @@ impl VoicePersonaStore {
 
     /// Get a single voice persona by ID.
     pub async fn get(&self, id: &str) -> Result<Option<VoicePersonaResponse>> {
-        let row: Option<PersonaRow> = sqlx::query_as("SELECT * FROM voice_personas WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
+        let row = fetch_optional!(
+            &self.db,
+            PersonaRow,
+            "SELECT * FROM voice_personas WHERE id = ?",
+            id
+        )?;
 
         row.map(|r| r.into_response().map_err(VoicePersonaError::Json))
             .transpose()
@@ -200,25 +206,24 @@ impl VoicePersonaStore {
         let fallback = params.fallback_policy.unwrap_or_default();
         let now = now_ms();
 
-        sqlx::query(
+        execute!(
+            &self.db,
             r"INSERT INTO voice_personas (id, label, description, provider, fallback_policy, prompt_json, bindings_json, is_active, created_at, updated_at)
               VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
-        )
-        .bind(&params.id)
-        .bind(&params.label)
-        .bind(&params.description)
-        .bind(&params.provider)
-        .bind(if fallback.is_empty() {
-            "preserve-persona"
-        } else {
-            &fallback
-        })
-        .bind(&prompt_json)
-        .bind(&bindings_json)
-        .bind(now)
-        .bind(now)
-        .execute(&self.pool)
-        .await?;
+            &params.id,
+            &params.label,
+            &params.description,
+            &params.provider,
+            if fallback.is_empty() {
+                "preserve-persona"
+            } else {
+                &fallback
+            },
+            &prompt_json,
+            &bindings_json,
+            now,
+            now,
+        )?;
 
         self.get(&params.id)
             .await?
@@ -259,19 +264,18 @@ impl VoicePersonaStore {
         };
         let now = now_ms();
 
-        sqlx::query(
+        execute!(
+            &self.db,
             "UPDATE voice_personas SET label = ?, description = ?, provider = ?, fallback_policy = ?, prompt_json = ?, bindings_json = ?, updated_at = ? WHERE id = ?",
-        )
-        .bind(&label)
-        .bind(&description)
-        .bind(&provider)
-        .bind(&fallback_policy)
-        .bind(&prompt_json)
-        .bind(&bindings_json)
-        .bind(now)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+            &label,
+            &description,
+            &provider,
+            &fallback_policy,
+            &prompt_json,
+            &bindings_json,
+            now,
+            id,
+        )?;
 
         self.get(id)
             .await?
@@ -280,12 +284,9 @@ impl VoicePersonaStore {
 
     /// Delete a voice persona.
     pub async fn delete(&self, id: &str) -> Result<()> {
-        let result = sqlx::query("DELETE FROM voice_personas WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        let affected = execute!(&self.db, "DELETE FROM voice_personas WHERE id = ?", id)?;
 
-        if result.rows_affected() == 0 {
+        if affected == 0 {
             return Err(VoicePersonaError::NotFound(format!(
                 "persona '{id}' not found"
             )));
@@ -295,10 +296,11 @@ impl VoicePersonaStore {
 
     /// Get the currently active voice persona, if any.
     pub async fn get_active(&self) -> Result<Option<VoicePersonaResponse>> {
-        let row: Option<PersonaRow> =
-            sqlx::query_as("SELECT * FROM voice_personas WHERE is_active = 1 LIMIT 1")
-                .fetch_optional(&self.pool)
-                .await?;
+        let row = fetch_optional!(
+            &self.db,
+            PersonaRow,
+            "SELECT * FROM voice_personas WHERE is_active = 1 LIMIT 1",
+        )?;
 
         row.map(|r| r.into_response().map_err(VoicePersonaError::Json))
             .transpose()
@@ -306,22 +308,20 @@ impl VoicePersonaStore {
 
     /// Set the active voice persona. Pass `None` to deactivate all.
     pub async fn set_active(&self, id: Option<&str>) -> Result<Option<VoicePersonaResponse>> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.db.begin().await?;
 
         // Clear all active flags.
-        sqlx::query("UPDATE voice_personas SET is_active = 0")
-            .execute(&mut *tx)
-            .await?;
+        tx_execute!(&mut tx, "UPDATE voice_personas SET is_active = 0")?;
 
         if let Some(id) = id {
-            let updated =
-                sqlx::query("UPDATE voice_personas SET is_active = 1, updated_at = ? WHERE id = ?")
-                    .bind(now_ms())
-                    .bind(id)
-                    .execute(&mut *tx)
-                    .await?;
+            let updated = tx_execute!(
+                &mut tx,
+                "UPDATE voice_personas SET is_active = 1, updated_at = ? WHERE id = ?",
+                now_ms(),
+                id,
+            )?;
 
-            if updated.rows_affected() == 0 {
+            if updated == 0 {
                 return Err(VoicePersonaError::NotFound(format!(
                     "persona '{id}' not found"
                 )));
@@ -343,11 +343,12 @@ impl VoicePersonaStore {
     pub async fn seed_defaults(&self) -> Result<usize> {
         let mut seeded = 0usize;
         for def in DEFAULT_PERSONAS {
-            let exists =
-                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM voice_personas WHERE id = ?")
-                    .bind(def.id)
-                    .fetch_one(&self.pool)
-                    .await?;
+            let exists = scalar!(
+                &self.db,
+                i64,
+                "SELECT COUNT(*) FROM voice_personas WHERE id = ?",
+                def.id,
+            )?;
 
             if exists > 0 {
                 continue;
@@ -365,20 +366,20 @@ impl VoicePersonaStore {
             let bindings_json = serde_json::to_string(&def.bindings())?;
             let now = now_ms();
 
-            sqlx::query(
-                r"INSERT OR IGNORE INTO voice_personas (id, label, description, provider, fallback_policy, prompt_json, bindings_json, is_active, created_at, updated_at)
-                  VALUES (?, ?, ?, ?, 'preserve-persona', ?, ?, 0, ?, ?)",
-            )
-            .bind(def.id)
-            .bind(def.label)
-            .bind(def.description)
-            .bind(def.provider)
-            .bind(&prompt_json)
-            .bind(&bindings_json)
-            .bind(now)
-            .bind(now)
-            .execute(&self.pool)
-            .await?;
+            execute!(
+                &self.db,
+                r"INSERT INTO voice_personas (id, label, description, provider, fallback_policy, prompt_json, bindings_json, is_active, created_at, updated_at)
+                  VALUES (?, ?, ?, ?, 'preserve-persona', ?, ?, 0, ?, ?)
+                  ON CONFLICT DO NOTHING",
+                def.id,
+                def.label,
+                def.description,
+                def.provider,
+                &prompt_json,
+                &bindings_json,
+                now,
+                now,
+            )?;
 
             seeded += 1;
         }
@@ -735,39 +736,17 @@ mod tests {
         assert_eq!(request.model.as_deref(), Some("tts-1"));
     }
 
-    async fn test_pool() -> sqlx::SqlitePool {
+    async fn test_db() -> Db {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
-        sqlx::query(
-            r"CREATE TABLE IF NOT EXISTS voice_personas (
-                id              TEXT PRIMARY KEY,
-                label           TEXT NOT NULL,
-                description     TEXT,
-                provider        TEXT,
-                fallback_policy TEXT NOT NULL DEFAULT 'preserve-persona',
-                prompt_json     TEXT NOT NULL DEFAULT '{}',
-                bindings_json   TEXT NOT NULL DEFAULT '[]',
-                is_active       INTEGER NOT NULL DEFAULT 0,
-                created_at      INTEGER NOT NULL,
-                updated_at      INTEGER NOT NULL
-            )",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            r"CREATE UNIQUE INDEX IF NOT EXISTS uix_voice_personas_active
-              ON voice_personas (is_active) WHERE is_active = 1",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        pool
+        let db = Db::from(pool);
+        crate::run_migrations(&db).await.unwrap();
+        db
     }
 
     #[tokio::test]
     async fn test_crud_lifecycle() {
-        let pool = test_pool().await;
-        let store = VoicePersonaStore::new(pool);
+        let db = test_db().await;
+        let store = VoicePersonaStore::new(db);
 
         // Create
         let resp = store
@@ -828,8 +807,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_active() {
-        let pool = test_pool().await;
-        let store = VoicePersonaStore::new(pool);
+        let db = test_db().await;
+        let store = VoicePersonaStore::new(db);
 
         store
             .create(CreateVoicePersonaParams {
@@ -877,22 +856,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_active_nonexistent() {
-        let pool = test_pool().await;
-        let store = VoicePersonaStore::new(pool);
+        let db = test_db().await;
+        let store = VoicePersonaStore::new(db);
         assert!(store.set_active(Some("nope")).await.is_err());
     }
 
     #[tokio::test]
     async fn test_delete_nonexistent() {
-        let pool = test_pool().await;
-        let store = VoicePersonaStore::new(pool);
+        let db = test_db().await;
+        let store = VoicePersonaStore::new(db);
         assert!(store.delete("nope").await.is_err());
     }
 
     #[tokio::test]
     async fn test_create_rejects_invalid_id() {
-        let pool = test_pool().await;
-        let store = VoicePersonaStore::new(pool);
+        let db = test_db().await;
+        let store = VoicePersonaStore::new(db);
         let result = store
             .create(CreateVoicePersonaParams {
                 id: "INVALID".into(),
@@ -909,8 +888,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_seed_defaults() {
-        let pool = test_pool().await;
-        let store = VoicePersonaStore::new(pool);
+        let db = test_db().await;
+        let store = VoicePersonaStore::new(db);
 
         // First seed — should create all defaults.
         let seeded = store.seed_defaults().await.unwrap();
@@ -931,8 +910,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_seed_defaults_skips_existing() {
-        let pool = test_pool().await;
-        let store = VoicePersonaStore::new(pool);
+        let db = test_db().await;
+        let store = VoicePersonaStore::new(db);
 
         // Create one persona manually with the same ID as a default.
         store

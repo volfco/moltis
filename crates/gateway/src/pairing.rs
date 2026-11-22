@@ -6,9 +6,9 @@
 use std::time::Duration;
 
 use {
+    moltis_db::{Db, Dialect, execute, fetch_all, fetch_optional},
     serde::{Deserialize, Serialize},
     sha2::{Digest, Sha256},
-    sqlx::SqlitePool,
     time::OffsetDateTime,
 };
 
@@ -127,17 +127,17 @@ pub enum PinPublicKeyResult {
 
 // ── Pairing store ───────────────────────────────────────────────────────────
 
-/// SQLite-backed pairing store. Persists pair requests, paired devices, and
-/// device tokens across gateway restarts.
+/// Database-backed pairing store (SQLite or PostgreSQL). Persists pair
+/// requests, paired devices, and device tokens across gateway restarts.
 pub struct PairingStore {
-    pool: SqlitePool,
+    db: Db,
     pair_ttl: Duration,
 }
 
 impl PairingStore {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(db: Db) -> Self {
         Self {
-            pool,
+            db,
             pair_ttl: Duration::from_secs(300), // 5 min
         }
     }
@@ -157,20 +157,19 @@ impl PairingStore {
         let created_str = format_datetime(now);
         let expires_str = format_datetime(expires_at);
 
-        sqlx::query(
+        execute!(
+            &self.db,
             "INSERT INTO pair_requests (id, device_id, display_name, platform, public_key, nonce, status, created_at, expires_at)
              VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
-        )
-        .bind(&id)
-        .bind(device_id)
-        .bind(display_name)
-        .bind(platform)
-        .bind(public_key)
-        .bind(&nonce)
-        .bind(&created_str)
-        .bind(&expires_str)
-        .execute(&self.pool)
-        .await?;
+            &id,
+            device_id,
+            display_name,
+            platform,
+            public_key,
+            &nonce,
+            &created_str,
+            &expires_str,
+        )?;
 
         Ok(PairRequest {
             id,
@@ -191,15 +190,20 @@ impl PairingStore {
         self.list_pending_at(&now).await
     }
 
-    async fn list_pending_at(&self, now: &str) -> Result<Vec<PairRequest>> {
-        let rows: Vec<(String, String, Option<String>, String, Option<String>, String, String, String)> = sqlx::query_as(
-            "SELECT id, device_id, display_name, platform, public_key, nonce, created_at, expires_at
-             FROM pair_requests
-             WHERE status = 'pending' AND julianday(expires_at) > julianday(?)",
-        )
-        .bind(now)
-        .fetch_all(&self.pool)
-        .await?;
+    /// pub(crate) so the PostgreSQL smoke tests can pin the expiry-dialect
+    /// semantics with a fixed `now` (mirrors the SQLite test of the same name).
+    pub(crate) async fn list_pending_at(&self, now: &str) -> Result<Vec<PairRequest>> {
+        let rows = fetch_all!(
+            &self.db,
+            (String, String, Option<String>, String, Option<String>, String, String, String),
+            format!(
+                "SELECT id, device_id, display_name, platform, public_key, nonce, created_at, expires_at
+                 FROM pair_requests
+                 WHERE status = 'pending' AND {}",
+                pending_expiry_sql(self.db.dialect()),
+            ),
+            now,
+        )?;
 
         Ok(rows
             .into_iter()
@@ -233,20 +237,20 @@ impl PairingStore {
     /// Approve a pending pair request. Issues a device token.
     pub async fn approve(&self, pair_id: &str) -> Result<DeviceToken> {
         // Load and validate the request.
-        let row: Option<(
-            String,
-            Option<String>,
-            String,
-            Option<String>,
-            String,
-            String,
-        )> = sqlx::query_as(
+        let row = fetch_optional!(
+            &self.db,
+            (
+                String,
+                Option<String>,
+                String,
+                Option<String>,
+                String,
+                String
+            ),
             "SELECT device_id, display_name, platform, public_key, status, expires_at
                  FROM pair_requests WHERE id = ?",
-        )
-        .bind(pair_id)
-        .fetch_optional(&self.pool)
-        .await?;
+            pair_id,
+        )?;
 
         let (device_id, display_name, platform, public_key, status, expires_at) =
             row.ok_or(Error::PairRequestNotFound)?;
@@ -258,21 +262,24 @@ impl PairingStore {
 
         // Check expiry.
         if is_expired(&expires_at) {
-            sqlx::query("UPDATE pair_requests SET status = 'expired' WHERE id = ?")
-                .bind(pair_id)
-                .execute(&self.pool)
-                .await?;
+            execute!(
+                &self.db,
+                "UPDATE pair_requests SET status = 'expired' WHERE id = ?",
+                pair_id,
+            )?;
             return Err(Error::PairRequestExpired);
         }
 
         // Mark request as approved.
-        sqlx::query("UPDATE pair_requests SET status = 'approved' WHERE id = ?")
-            .bind(pair_id)
-            .execute(&self.pool)
-            .await?;
+        execute!(
+            &self.db,
+            "UPDATE pair_requests SET status = 'approved' WHERE id = ?",
+            pair_id,
+        )?;
 
         // Upsert the paired device.
-        sqlx::query(
+        execute!(
+            &self.db,
             "INSERT INTO paired_devices (device_id, display_name, platform, public_key, status)
              VALUES (?, ?, ?, ?, 'active')
              ON CONFLICT(device_id) DO UPDATE SET
@@ -281,13 +288,11 @@ impl PairingStore {
                 public_key = excluded.public_key,
                 status = 'active',
                 revoked_at = NULL",
-        )
-        .bind(&device_id)
-        .bind(&display_name)
-        .bind(&platform)
-        .bind(&public_key)
-        .execute(&self.pool)
-        .await?;
+            &device_id,
+            &display_name,
+            &platform,
+            &public_key,
+        )?;
 
         // Issue a device token.
         let raw_token = format!("mdt_{}", generate_token());
@@ -301,16 +306,15 @@ impl PairingStore {
         let scopes_json = serde_json::to_string(&scopes).unwrap_or_default();
         let issued_at_ms = current_epoch_ms();
 
-        sqlx::query(
-            "INSERT INTO device_tokens (token_hash, token_prefix, device_id, scopes, issued_at)
-             VALUES (?, ?, ?, ?, datetime('now'))",
-        )
-        .bind(&token_hash)
-        .bind(token_prefix)
-        .bind(&device_id)
-        .bind(&scopes_json)
-        .execute(&self.pool)
-        .await?;
+        execute!(
+            &self.db,
+            "INSERT INTO device_tokens (token_hash, token_prefix, device_id, scopes)
+             VALUES (?, ?, ?, ?)",
+            &token_hash,
+            token_prefix,
+            &device_id,
+            &scopes_json,
+        )?;
 
         Ok(DeviceToken {
             token: raw_token,
@@ -323,34 +327,36 @@ impl PairingStore {
 
     /// Reject a pending pair request.
     pub async fn reject(&self, pair_id: &str) -> Result<()> {
-        let row: Option<(String, String)> =
-            sqlx::query_as("SELECT status, expires_at FROM pair_requests WHERE id = ?")
-                .bind(pair_id)
-                .fetch_optional(&self.pool)
-                .await?;
+        let row = fetch_optional!(
+            &self.db,
+            (String, String),
+            "SELECT status, expires_at FROM pair_requests WHERE id = ?",
+            pair_id,
+        )?;
 
         let (status, _) = row.ok_or(Error::PairRequestNotFound)?;
         if PairStatus::from_str(&status) != PairStatus::Pending {
             return Err(Error::PairRequestNotPending(PairStatus::from_str(&status)));
         }
 
-        sqlx::query("UPDATE pair_requests SET status = 'rejected' WHERE id = ?")
-            .bind(pair_id)
-            .execute(&self.pool)
-            .await?;
+        execute!(
+            &self.db,
+            "UPDATE pair_requests SET status = 'rejected' WHERE id = ?",
+            pair_id,
+        )?;
 
         Ok(())
     }
 
     /// List all approved (non-revoked) devices.
     pub async fn list_devices(&self) -> Result<Vec<PairedDevice>> {
-        let rows: Vec<(String, Option<String>, String, Option<String>, String)> = sqlx::query_as(
+        let rows = fetch_all!(
+            &self.db,
+            (String, Option<String>, String, Option<String>, String),
             "SELECT device_id, display_name, platform, public_key, created_at
              FROM paired_devices WHERE status = 'active'
              ORDER BY created_at DESC",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        )?;
 
         Ok(rows
             .into_iter()
@@ -368,14 +374,14 @@ impl PairingStore {
 
     /// List device tokens for a specific device (active only).
     pub async fn list_device_tokens(&self, device_id: &str) -> Result<Vec<DeviceTokenEntry>> {
-        let rows: Vec<(String, String, String)> = sqlx::query_as(
+        let rows = fetch_all!(
+            &self.db,
+            (String, String, String),
             "SELECT token_prefix, scopes, issued_at FROM device_tokens
              WHERE device_id = ? AND revoked = 0
              ORDER BY issued_at DESC",
-        )
-        .bind(device_id)
-        .fetch_all(&self.pool)
-        .await?;
+            device_id,
+        )?;
 
         Ok(rows
             .into_iter()
@@ -394,23 +400,24 @@ impl PairingStore {
     /// Rotate a device token: revoke all existing tokens, issue new.
     pub async fn rotate_token(&self, device_id: &str) -> Result<DeviceToken> {
         // Verify device exists and is active.
-        let exists: Option<(String,)> =
-            sqlx::query_as("SELECT status FROM paired_devices WHERE device_id = ?")
-                .bind(device_id)
-                .fetch_optional(&self.pool)
-                .await?;
+        let exists = fetch_optional!(
+            &self.db,
+            (String,),
+            "SELECT status FROM paired_devices WHERE device_id = ?",
+            device_id,
+        )?;
 
         if exists.is_none() {
             return Err(Error::DeviceNotFound);
         }
 
         // Load current scopes from any active token.
-        let scopes_row: Option<(String,)> = sqlx::query_as(
+        let scopes_row = fetch_optional!(
+            &self.db,
+            (String,),
             "SELECT scopes FROM device_tokens WHERE device_id = ? AND revoked = 0 LIMIT 1",
-        )
-        .bind(device_id)
-        .fetch_optional(&self.pool)
-        .await?;
+            device_id,
+        )?;
 
         let scopes = scopes_row
             .and_then(|(s,)| serde_json::from_str::<Vec<String>>(&s).ok())
@@ -423,10 +430,11 @@ impl PairingStore {
             });
 
         // Revoke all existing tokens.
-        sqlx::query("UPDATE device_tokens SET revoked = 1 WHERE device_id = ? AND revoked = 0")
-            .bind(device_id)
-            .execute(&self.pool)
-            .await?;
+        execute!(
+            &self.db,
+            "UPDATE device_tokens SET revoked = 1 WHERE device_id = ? AND revoked = 0",
+            device_id,
+        )?;
 
         // Issue new token.
         let raw_token = format!("mdt_{}", generate_token());
@@ -435,16 +443,15 @@ impl PairingStore {
         let scopes_json = serde_json::to_string(&scopes).unwrap_or_default();
         let issued_at_ms = current_epoch_ms();
 
-        sqlx::query(
-            "INSERT INTO device_tokens (token_hash, token_prefix, device_id, scopes, issued_at)
-             VALUES (?, ?, ?, ?, datetime('now'))",
-        )
-        .bind(&token_hash)
-        .bind(token_prefix)
-        .bind(device_id)
-        .bind(&scopes_json)
-        .execute(&self.pool)
-        .await?;
+        execute!(
+            &self.db,
+            "INSERT INTO device_tokens (token_hash, token_prefix, device_id, scopes)
+             VALUES (?, ?, ?, ?)",
+            &token_hash,
+            token_prefix,
+            device_id,
+            &scopes_json,
+        )?;
 
         Ok(DeviceToken {
             token: raw_token,
@@ -457,27 +464,31 @@ impl PairingStore {
 
     /// Revoke all tokens for a device and mark device as revoked.
     pub async fn revoke_token(&self, device_id: &str) -> Result<()> {
-        let exists: Option<(String,)> =
-            sqlx::query_as("SELECT status FROM paired_devices WHERE device_id = ?")
-                .bind(device_id)
-                .fetch_optional(&self.pool)
-                .await?;
+        let exists = fetch_optional!(
+            &self.db,
+            (String,),
+            "SELECT status FROM paired_devices WHERE device_id = ?",
+            device_id,
+        )?;
 
         if exists.is_none() {
             return Err(Error::DeviceNotFound);
         }
 
-        sqlx::query("UPDATE device_tokens SET revoked = 1 WHERE device_id = ?")
-            .bind(device_id)
-            .execute(&self.pool)
-            .await?;
+        execute!(
+            &self.db,
+            "UPDATE device_tokens SET revoked = 1 WHERE device_id = ?",
+            device_id,
+        )?;
 
-        sqlx::query(
-            "UPDATE paired_devices SET status = 'revoked', revoked_at = datetime('now') WHERE device_id = ?",
-        )
-        .bind(device_id)
-        .execute(&self.pool)
-        .await?;
+        execute!(
+            &self.db,
+            format!(
+                "UPDATE paired_devices SET status = 'revoked', revoked_at = {} WHERE device_id = ?",
+                self.db.dialect().now_expr(),
+            ),
+            device_id,
+        )?;
 
         Ok(())
     }
@@ -489,23 +500,23 @@ impl PairingStore {
     ) -> Result<Option<DeviceTokenVerification>> {
         let hash = sha256_hex(raw_token);
 
-        let row: Option<(String, String)> = sqlx::query_as(
+        let row = fetch_optional!(
+            &self.db,
+            (String, String),
             "SELECT device_id, scopes FROM device_tokens
              WHERE token_hash = ? AND revoked = 0",
-        )
-        .bind(&hash)
-        .fetch_optional(&self.pool)
-        .await?;
+            &hash,
+        )?;
 
         match row {
             Some((device_id, scopes_json)) => {
                 // Also verify the device is still active.
-                let device_active: Option<(String,)> = sqlx::query_as(
+                let device_active = fetch_optional!(
+                    &self.db,
+                    (String,),
                     "SELECT status FROM paired_devices WHERE device_id = ? AND status = 'active'",
-                )
-                .bind(&device_id)
-                .fetch_optional(&self.pool)
-                .await?;
+                    &device_id,
+                )?;
 
                 if device_active.is_none() {
                     return Ok(None);
@@ -527,15 +538,14 @@ impl PairingStore {
         let device_id = uuid::Uuid::new_v4().to_string();
 
         // Insert as an active paired device.
-        sqlx::query(
+        execute!(
+            &self.db,
             "INSERT INTO paired_devices (device_id, display_name, platform, public_key, status)
              VALUES (?, ?, ?, NULL, 'active')",
-        )
-        .bind(&device_id)
-        .bind(display_name)
-        .bind(platform)
-        .execute(&self.pool)
-        .await?;
+            &device_id,
+            display_name,
+            platform,
+        )?;
 
         // Issue a device token.
         let raw_token = format!("mdt_{}", generate_token());
@@ -549,16 +559,15 @@ impl PairingStore {
         let scopes_json = serde_json::to_string(&scopes).unwrap_or_default();
         let issued_at_ms = current_epoch_ms();
 
-        sqlx::query(
-            "INSERT INTO device_tokens (token_hash, token_prefix, device_id, scopes, issued_at)
-             VALUES (?, ?, ?, ?, datetime('now'))",
-        )
-        .bind(&token_hash)
-        .bind(token_prefix)
-        .bind(&device_id)
-        .bind(&scopes_json)
-        .execute(&self.pool)
-        .await?;
+        execute!(
+            &self.db,
+            "INSERT INTO device_tokens (token_hash, token_prefix, device_id, scopes)
+             VALUES (?, ?, ?, ?)",
+            &token_hash,
+            token_prefix,
+            &device_id,
+            &scopes_json,
+        )?;
 
         Ok(DeviceToken {
             token: raw_token,
@@ -577,14 +586,14 @@ impl PairingStore {
         &self,
         public_key: &str,
     ) -> Result<Option<PairedDevice>> {
-        let row: Option<(String, Option<String>, String, Option<String>, String)> = sqlx::query_as(
+        let row = fetch_optional!(
+            &self.db,
+            (String, Option<String>, String, Option<String>, String),
             "SELECT device_id, display_name, platform, public_key, created_at
                  FROM paired_devices
                  WHERE public_key = ? AND status = 'active'",
-        )
-        .bind(public_key)
-        .fetch_optional(&self.pool)
-        .await?;
+            public_key,
+        )?;
 
         Ok(row.map(
             |(device_id, display_name, platform, public_key, created_at)| PairedDevice {
@@ -599,12 +608,12 @@ impl PairingStore {
 
     /// Check whether a public key has been revoked (not just absent).
     pub async fn is_public_key_revoked(&self, public_key: &str) -> Result<bool> {
-        let row: Option<(String,)> = sqlx::query_as(
+        let row = fetch_optional!(
+            &self.db,
+            (String,),
             "SELECT status FROM paired_devices WHERE public_key = ? AND status = 'revoked'",
-        )
-        .bind(public_key)
-        .fetch_optional(&self.pool)
-        .await?;
+            public_key,
+        )?;
         Ok(row.is_some())
     }
 
@@ -617,11 +626,12 @@ impl PairingStore {
         device_id: &str,
         public_key: &str,
     ) -> Result<PinPublicKeyResult> {
-        let row: Option<(Option<String>, String)> =
-            sqlx::query_as("SELECT public_key, status FROM paired_devices WHERE device_id = ?")
-                .bind(device_id)
-                .fetch_optional(&self.pool)
-                .await?;
+        let row = fetch_optional!(
+            &self.db,
+            (Option<String>, String),
+            "SELECT public_key, status FROM paired_devices WHERE device_id = ?",
+            device_id,
+        )?;
 
         match row {
             None => Ok(PinPublicKeyResult::DeviceNotFound),
@@ -636,24 +646,23 @@ impl PairingStore {
                 }
             },
             Some((None, status)) if status == "active" => {
-                let result = sqlx::query(
+                let affected = execute!(
+                    &self.db,
                     "UPDATE paired_devices SET public_key = ?
                      WHERE device_id = ? AND status = 'active' AND public_key IS NULL",
-                )
-                .bind(public_key)
-                .bind(device_id)
-                .execute(&self.pool)
-                .await?;
+                    public_key,
+                    device_id,
+                )?;
 
-                if result.rows_affected() > 0 {
+                if affected > 0 {
                     Ok(PinPublicKeyResult::Pinned)
                 } else {
-                    let refreshed: Option<(Option<String>, String)> = sqlx::query_as(
+                    let refreshed = fetch_optional!(
+                        &self.db,
+                        (Option<String>, String),
                         "SELECT public_key, status FROM paired_devices WHERE device_id = ?",
-                    )
-                    .bind(device_id)
-                    .fetch_optional(&self.pool)
-                    .await?;
+                        device_id,
+                    )?;
                     match refreshed {
                         Some((Some(stored_key), status))
                             if status == "active" && stored_key == public_key =>
@@ -684,11 +693,12 @@ impl PairingStore {
         device_id: &str,
         presented_key: &str,
     ) -> Result<KeyPinningResult> {
-        let row: Option<(Option<String>, String)> =
-            sqlx::query_as("SELECT public_key, status FROM paired_devices WHERE device_id = ?")
-                .bind(device_id)
-                .fetch_optional(&self.pool)
-                .await?;
+        let row = fetch_optional!(
+            &self.db,
+            (Option<String>, String),
+            "SELECT public_key, status FROM paired_devices WHERE device_id = ?",
+            device_id,
+        )?;
 
         match row {
             Some((Some(stored_key), status)) if status == "active" => {
@@ -709,11 +719,12 @@ impl PairingStore {
 
     /// Get the current status of a pair request by ID.
     pub async fn get_pair_status(&self, pair_id: &str) -> Result<Option<PairStatus>> {
-        let row: Option<(String,)> =
-            sqlx::query_as("SELECT status FROM pair_requests WHERE id = ?")
-                .bind(pair_id)
-                .fetch_optional(&self.pool)
-                .await?;
+        let row = fetch_optional!(
+            &self.db,
+            (String,),
+            "SELECT status FROM pair_requests WHERE id = ?",
+            pair_id,
+        )?;
         Ok(row.map(|(s,)| PairStatus::from_str(&s)))
     }
 
@@ -723,15 +734,19 @@ impl PairingStore {
         self.evict_expired_at(&now).await
     }
 
-    async fn evict_expired_at(&self, now: &str) -> Result<u64> {
-        let result = sqlx::query(
-            "UPDATE pair_requests SET status = 'expired'
-             WHERE status = 'pending' AND julianday(expires_at) <= julianday(?)",
-        )
-        .bind(now)
-        .execute(&self.pool)
-        .await?;
-        Ok(result.rows_affected())
+    /// pub(crate) for the PostgreSQL expiry-semantics smoke test, like
+    /// [`PairingStore::list_pending_at`].
+    pub(crate) async fn evict_expired_at(&self, now: &str) -> Result<u64> {
+        let affected = execute!(
+            &self.db,
+            format!(
+                "UPDATE pair_requests SET status = 'expired'
+                 WHERE status = 'pending' AND {}",
+                expired_expiry_sql(self.db.dialect()),
+            ),
+            now,
+        )?;
+        Ok(affected)
     }
 }
 
@@ -1014,18 +1029,45 @@ pub fn public_key_fingerprint(public_key_b64: &str) -> std::result::Result<Strin
     ))
 }
 
+/// SQL predicate for still-pending pair requests; `expired_expiry_sql` is the
+/// inverse. `expires_at` is a TEXT timestamp (RFC3339 or `YYYY-MM-DD HH:MM:SS`,
+/// always UTC): SQLite parses both with julianday, PostgreSQL compares wall
+/// times so naive and `Z`-suffixed values stay comparable. Values that parse as
+/// neither make the predicate NULL — the row stays pending, never expires,
+/// matching julianday's NULL semantics.
+fn pending_expiry_sql(dialect: Dialect) -> &'static str {
+    match dialect {
+        Dialect::Sqlite => "julianday(expires_at) > julianday(?)",
+        Dialect::Postgres => {
+            "CASE WHEN pg_input_is_valid(expires_at, 'timestamp') \
+             THEN expires_at::timestamp END > ?::timestamp"
+        },
+    }
+}
+
+/// Inverse of [`pending_expiry_sql`] for eviction.
+fn expired_expiry_sql(dialect: Dialect) -> &'static str {
+    match dialect {
+        Dialect::Sqlite => "julianday(expires_at) <= julianday(?)",
+        Dialect::Postgres => {
+            "CASE WHEN pg_input_is_valid(expires_at, 'timestamp') \
+             THEN expires_at::timestamp END <= ?::timestamp"
+        },
+    }
+}
+
 fn is_expired(expires_at: &str) -> bool {
     let Ok(expires) =
         OffsetDateTime::parse(expires_at, &time::format_description::well_known::Rfc3339)
     else {
-        // If we can't parse, try SQLite datetime format.
-        return is_expired_sqlite(expires_at);
+        // If we can't parse, try the database datetime format.
+        return is_expired_db_timestamp(expires_at);
     };
     OffsetDateTime::now_utc() > expires
 }
 
-fn is_expired_sqlite(expires_at: &str) -> bool {
-    // SQLite datetime format: "YYYY-MM-DD HH:MM:SS"
+fn is_expired_db_timestamp(expires_at: &str) -> bool {
+    // Database datetime format: "YYYY-MM-DD HH:MM:SS"
     // Simple string comparison works because the format is lexicographically ordered.
     let now = OffsetDateTime::now_utc();
     let now_str = format!(
@@ -1048,16 +1090,17 @@ mod tests {
 
     use super::*;
 
-    async fn test_pool() -> SqlitePool {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        crate::run_migrations(&pool).await.unwrap();
-        pool
+    async fn test_db() -> Db {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let db = Db::from(pool);
+        crate::run_migrations(&db).await.unwrap();
+        db
     }
 
     #[tokio::test]
     async fn pairing_lifecycle() {
-        let pool = test_pool().await;
-        let store = PairingStore::new(pool);
+        let db = test_db().await;
+        let store = PairingStore::new(db);
 
         // Request pairing.
         let req = store
@@ -1118,8 +1161,8 @@ mod tests {
 
     #[tokio::test]
     async fn reject_pair_request() {
-        let pool = test_pool().await;
-        let store = PairingStore::new(pool);
+        let db = test_db().await;
+        let store = PairingStore::new(db);
 
         let req = store
             .request_pair("dev-2", None, "android", None)
@@ -1137,9 +1180,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sqlite_expiry_comparison_handles_fractional_and_legacy_timestamps() {
-        let pool = test_pool().await;
-        let store = PairingStore::new(pool.clone());
+    async fn expiry_comparison_handles_fractional_and_legacy_timestamps() {
+        let db = test_db().await;
+        let store = PairingStore::new(db.clone());
         let expiries = [
             ("exact-second", "2030-01-01T00:00:00Z"),
             ("fractional", "2030-01-01T00:00:00.900Z"),
@@ -1152,12 +1195,13 @@ mod tests {
                 .request_pair(device_id, None, "test", None)
                 .await
                 .unwrap();
-            sqlx::query("UPDATE pair_requests SET expires_at = ? WHERE id = ?")
-                .bind(expires_at)
-                .bind(&request.id)
-                .execute(&pool)
-                .await
-                .unwrap();
+            moltis_db::execute!(
+                &db,
+                "UPDATE pair_requests SET expires_at = ? WHERE id = ?",
+                expires_at,
+                &request.id,
+            )
+            .unwrap();
             requests.push(request);
         }
 
@@ -1183,8 +1227,8 @@ mod tests {
 
     #[tokio::test]
     async fn approve_nonexistent_request() {
-        let pool = test_pool().await;
-        let store = PairingStore::new(pool);
+        let db = test_db().await;
+        let store = PairingStore::new(db);
 
         let result = store.approve("nonexistent").await;
         assert!(matches!(result, Err(Error::PairRequestNotFound)));
@@ -1192,8 +1236,8 @@ mod tests {
 
     #[tokio::test]
     async fn verify_invalid_token() {
-        let pool = test_pool().await;
-        let store = PairingStore::new(pool);
+        let db = test_db().await;
+        let store = PairingStore::new(db);
 
         let result = store.verify_device_token("invalid_token").await.unwrap();
         assert!(result.is_none());
@@ -1201,8 +1245,8 @@ mod tests {
 
     #[tokio::test]
     async fn create_device_token_directly() {
-        let pool = test_pool().await;
-        let store = PairingStore::new(pool);
+        let db = test_db().await;
+        let store = PairingStore::new(db);
 
         // Create a device token without the pairing handshake.
         let token = store
@@ -1233,8 +1277,8 @@ mod tests {
 
     #[tokio::test]
     async fn rotate_nonexistent_device() {
-        let pool = test_pool().await;
-        let store = PairingStore::new(pool);
+        let db = test_db().await;
+        let store = PairingStore::new(db);
 
         let result = store.rotate_token("nonexistent").await;
         assert!(matches!(result, Err(Error::DeviceNotFound)));
@@ -1255,8 +1299,8 @@ mod tests {
 
     #[tokio::test]
     async fn find_device_by_public_key_lifecycle() {
-        let pool = test_pool().await;
-        let store = PairingStore::new(pool);
+        let db = test_db().await;
+        let store = PairingStore::new(db);
         let (pk_b64, _) = make_test_keypair();
 
         // Not found before pairing.
@@ -1343,8 +1387,8 @@ mod tests {
 
     #[tokio::test]
     async fn key_pinning_enforcement() {
-        let pool = test_pool().await;
-        let store = PairingStore::new(pool);
+        let db = test_db().await;
+        let store = PairingStore::new(db);
         let (pk_b64, _) = make_test_keypair();
         let (other_pk_b64, _) = make_test_keypair();
 
@@ -1382,8 +1426,8 @@ mod tests {
 
     #[tokio::test]
     async fn pin_public_key_reports_actual_outcome() {
-        let pool = test_pool().await;
-        let store = PairingStore::new(pool);
+        let db = test_db().await;
+        let store = PairingStore::new(db);
         let (pk_b64, _) = make_test_keypair();
         let (other_pk_b64, _) = make_test_keypair();
 
@@ -1436,8 +1480,8 @@ mod tests {
 
     #[tokio::test]
     async fn key_pinning_reports_revoked_device() {
-        let pool = test_pool().await;
-        let store = PairingStore::new(pool);
+        let db = test_db().await;
+        let store = PairingStore::new(db);
         let (pk_b64, _) = make_test_keypair();
 
         let req = store

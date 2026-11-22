@@ -1,6 +1,7 @@
 use {
     anyhow::Result,
     base64::Engine,
+    moltis_db::{Db, execute, fetch_all, fetch_optional, scalar, tx_execute},
     rand::Rng,
     sha2::{Digest, Sha256},
 };
@@ -168,53 +169,19 @@ impl TryFrom<ShareRow> for SessionShare {
 }
 
 pub struct ShareStore {
-    pool: sqlx::SqlitePool,
+    db: Db,
 }
 
 impl ShareStore {
     #[must_use]
-    pub fn new(pool: sqlx::SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(db: Db) -> Self {
+        Self { db }
     }
 
     /// Deprecated: schema is managed by sqlx migrations. Kept for tests.
     #[doc(hidden)]
-    pub async fn init(pool: &sqlx::SqlitePool) -> Result<()> {
-        sqlx::query(
-            r#"CREATE TABLE IF NOT EXISTS session_shares (
-                id                     TEXT    PRIMARY KEY,
-                session_key            TEXT    NOT NULL,
-                visibility             TEXT    NOT NULL,
-                snapshot_json          TEXT    NOT NULL,
-                snapshot_message_count INTEGER NOT NULL,
-                token_hash             TEXT,
-                views                  INTEGER NOT NULL DEFAULT 0,
-                created_at             INTEGER NOT NULL,
-                revoked_at             INTEGER
-            )"#,
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_session_shares_session_created ON session_shares(session_key, created_at DESC)",
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_session_shares_active ON session_shares(id, revoked_at)",
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_session_shares_one_active_per_session ON session_shares(session_key) WHERE revoked_at IS NULL",
-        )
-        .execute(pool)
-        .await?;
-
-        Ok(())
+    pub async fn init(db: &Db) -> Result<()> {
+        crate::run_migrations(db).await
     }
 
     pub async fn create_or_replace(
@@ -229,32 +196,30 @@ impl ShareStore {
         let access_key = (visibility == ShareVisibility::Private).then(generate_access_key);
         let token_hash = access_key.as_deref().map(hash_token);
 
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.db.begin().await?;
 
         // Keep at most one active share per session by revoking previous links.
-        sqlx::query(
+        tx_execute!(
+            &mut tx,
             "UPDATE session_shares SET revoked_at = ? WHERE session_key = ? AND revoked_at IS NULL",
-        )
-        .bind(now)
-        .bind(session_key)
-        .execute(&mut *tx)
-        .await?;
+            now,
+            session_key,
+        )?;
 
-        sqlx::query(
+        tx_execute!(
+            &mut tx,
             r#"INSERT INTO session_shares (
                 id, session_key, visibility, snapshot_json, snapshot_message_count,
                 token_hash, views, created_at, revoked_at
             ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, NULL)"#,
-        )
-        .bind(&id)
-        .bind(session_key)
-        .bind(visibility.as_str())
-        .bind(&snapshot_json)
-        .bind(snapshot_message_count as i64)
-        .bind(&token_hash)
-        .bind(now)
-        .execute(&mut *tx)
-        .await?;
+            &id,
+            session_key,
+            visibility.as_str(),
+            &snapshot_json,
+            snapshot_message_count as i64,
+            &token_hash,
+            now,
+        )?;
 
         tx.commit().await?;
 
@@ -267,60 +232,62 @@ impl ShareStore {
     }
 
     pub async fn get_by_id(&self, id: &str) -> Result<Option<SessionShare>> {
-        let row = sqlx::query_as::<_, ShareRow>("SELECT * FROM session_shares WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
+        let row = fetch_optional!(
+            &self.db,
+            ShareRow,
+            "SELECT * FROM session_shares WHERE id = ?",
+            id,
+        )?;
 
         row.map(SessionShare::try_from).transpose()
     }
 
     pub async fn get_active_by_id(&self, id: &str) -> Result<Option<SessionShare>> {
-        let row = sqlx::query_as::<_, ShareRow>(
+        let row = fetch_optional!(
+            &self.db,
+            ShareRow,
             "SELECT * FROM session_shares WHERE id = ? AND revoked_at IS NULL",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
+            id,
+        )?;
 
         row.map(SessionShare::try_from).transpose()
     }
 
     pub async fn list_for_session(&self, session_key: &str) -> Result<Vec<SessionShare>> {
-        let rows = sqlx::query_as::<_, ShareRow>(
+        let rows = fetch_all!(
+            &self.db,
+            ShareRow,
             "SELECT * FROM session_shares WHERE session_key = ? ORDER BY created_at DESC",
-        )
-        .bind(session_key)
-        .fetch_all(&self.pool)
-        .await?;
+            session_key,
+        )?;
 
         rows.into_iter().map(SessionShare::try_from).collect()
     }
 
     pub async fn revoke(&self, id: &str) -> Result<bool> {
         let now = now_ms() as i64;
-        let result = sqlx::query(
+        let affected = execute!(
+            &self.db,
             "UPDATE session_shares SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
-        )
-        .bind(now)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
-        Ok(result.rows_affected() > 0)
+            now,
+            id,
+        )?;
+        Ok(affected > 0)
     }
 
     pub async fn increment_views(&self, id: &str) -> Result<u64> {
-        sqlx::query(
+        execute!(
+            &self.db,
             "UPDATE session_shares SET views = views + 1 WHERE id = ? AND revoked_at IS NULL",
-        )
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+            id,
+        )?;
 
-        let views = sqlx::query_scalar::<_, i64>("SELECT views FROM session_shares WHERE id = ?")
-            .bind(id)
-            .fetch_one(&self.pool)
-            .await?;
+        let views = scalar!(
+            &self.db,
+            i64,
+            "SELECT views FROM session_shares WHERE id = ?",
+            id
+        )?;
         Ok(views.max(0) as u64)
     }
 
@@ -386,8 +353,9 @@ mod tests {
 
     async fn test_store() -> ShareStore {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
-        ShareStore::init(&pool).await.unwrap();
-        ShareStore::new(pool)
+        let db = Db::from(pool);
+        ShareStore::init(&db).await.unwrap();
+        ShareStore::new(db)
     }
 
     #[tokio::test]

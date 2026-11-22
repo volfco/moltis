@@ -6,23 +6,29 @@ use {
         Error as ChannelError, Result as ChannelResult,
         trace_link::{TraceLink, TraceLinkStore},
     },
-    sqlx::SqlitePool,
+    moltis_db::{Db, execute, fetch_optional},
 };
 
-fn db_error(context: &'static str, source: sqlx::Error) -> ChannelError {
-    ChannelError::external(context, source)
+fn db_error(
+    context: &'static str,
+    source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+) -> ChannelError {
+    ChannelError::External {
+        context: context.into(),
+        source: source.into(),
+    }
 }
 
-/// SQLite-backed [`TraceLinkStore`].
-pub struct SqliteTraceLinkStore {
-    pool: SqlitePool,
+/// Database-backed [`TraceLinkStore`] (SQLite or PostgreSQL).
+pub struct DbTraceLinkStore {
+    db: Db,
 }
 
-impl SqliteTraceLinkStore {
-    /// Build a store over `pool`.
+impl DbTraceLinkStore {
+    /// Build a store over `db`.
     #[must_use]
-    pub const fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub const fn new(db: Db) -> Self {
+        Self { db }
     }
 
     /// Create the schema directly.
@@ -30,42 +36,21 @@ impl SqliteTraceLinkStore {
     /// **Deprecated**: schema is managed by sqlx migrations. Retained for tests
     /// on in-memory databases, matching the other channel stores.
     #[doc(hidden)]
-    pub async fn init(pool: &SqlitePool) -> ChannelResult<()> {
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS trace_links (
-                channel_type TEXT    NOT NULL,
-                account_id   TEXT    NOT NULL,
-                chat_id      TEXT    NOT NULL,
-                message_id   TEXT    NOT NULL,
-                trace_id     TEXT    NOT NULL,
-                session_key  TEXT,
-                created_at   INTEGER NOT NULL,
-                PRIMARY KEY (channel_type, account_id, chat_id, message_id)
-            )",
-        )
-        .execute(pool)
-        .await
-        .map_err(|e| db_error("init trace_links table", e))?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_trace_links_created
-             ON trace_links (created_at)",
-        )
-        .execute(pool)
-        .await
-        .map_err(|e| db_error("init trace_links index", e))?;
-
-        Ok(())
+    pub async fn init(db: &Db) -> ChannelResult<()> {
+        crate::run_migrations(db)
+            .await
+            .map_err(|e| db_error("init trace_links schema", e))
     }
 }
 
 #[async_trait]
-impl TraceLinkStore for SqliteTraceLinkStore {
+impl TraceLinkStore for DbTraceLinkStore {
     async fn link(&self, link: TraceLink) -> ChannelResult<()> {
         // Replace rather than ignore: an edited or resent reply keeps the same
         // message id but belongs to the newer turn, and a reaction on it should
         // score that turn.
-        sqlx::query(
+        execute!(
+            &self.db,
             "INSERT INTO trace_links
              (channel_type, account_id, chat_id, message_id, trace_id, session_key, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -73,16 +58,14 @@ impl TraceLinkStore for SqliteTraceLinkStore {
              DO UPDATE SET trace_id = excluded.trace_id,
                            session_key = excluded.session_key,
                            created_at = excluded.created_at",
+            &link.channel_type,
+            &link.account_id,
+            &link.chat_id,
+            &link.message_id,
+            &link.trace_id,
+            &link.session_key,
+            link.created_at,
         )
-        .bind(&link.channel_type)
-        .bind(&link.account_id)
-        .bind(&link.chat_id)
-        .bind(&link.message_id)
-        .bind(&link.trace_id)
-        .bind(&link.session_key)
-        .bind(link.created_at)
-        .execute(&self.pool)
-        .await
         .map_err(|e| db_error("record trace link", e))?;
         Ok(())
     }
@@ -94,17 +77,17 @@ impl TraceLinkStore for SqliteTraceLinkStore {
         chat_id: &str,
         message_id: &str,
     ) -> ChannelResult<Option<TraceLink>> {
-        let row = sqlx::query_as::<_, (String, Option<String>, i64)>(
+        let row = fetch_optional!(
+            &self.db,
+            (String, Option<String>, i64),
             "SELECT trace_id, session_key, created_at
              FROM trace_links
              WHERE channel_type = ? AND account_id = ? AND chat_id = ? AND message_id = ?",
+            channel_type,
+            account_id,
+            chat_id,
+            message_id,
         )
-        .bind(channel_type)
-        .bind(account_id)
-        .bind(chat_id)
-        .bind(message_id)
-        .fetch_optional(&self.pool)
-        .await
         .map_err(|e| db_error("look up trace link", e))?;
 
         Ok(row.map(|(trace_id, session_key, created_at)| TraceLink {
@@ -119,12 +102,13 @@ impl TraceLinkStore for SqliteTraceLinkStore {
     }
 
     async fn prune(&self, cutoff: i64) -> ChannelResult<u64> {
-        let result = sqlx::query("DELETE FROM trace_links WHERE created_at < ?")
-            .bind(cutoff)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| db_error("prune trace links", e))?;
-        Ok(result.rows_affected())
+        let affected = execute!(
+            &self.db,
+            "DELETE FROM trace_links WHERE created_at < ?",
+            cutoff,
+        )
+        .map_err(|e| db_error("prune trace links", e))?;
+        Ok(affected)
     }
 }
 
@@ -133,10 +117,11 @@ impl TraceLinkStore for SqliteTraceLinkStore {
 mod tests {
     use super::*;
 
-    async fn store() -> SqliteTraceLinkStore {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        SqliteTraceLinkStore::init(&pool).await.unwrap();
-        SqliteTraceLinkStore::new(pool)
+    async fn store() -> DbTraceLinkStore {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let db = Db::from(pool);
+        DbTraceLinkStore::init(&db).await.unwrap();
+        DbTraceLinkStore::new(db)
     }
 
     fn link(message_id: &str, trace_id: &str) -> TraceLink {

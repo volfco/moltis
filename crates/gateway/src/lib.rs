@@ -87,15 +87,25 @@ pub(crate) fn config_override_test_lock() -> std::sync::MutexGuard<'static, ()> 
         .unwrap_or_else(|error| error.into_inner())
 }
 
+#[cfg(test)]
+mod postgres_tests;
+#[cfg(test)]
+mod test_support;
+
 /// Run database migrations for the gateway crate.
 ///
 /// This creates the auth tables (auth_password, passkeys, api_keys, auth_sessions),
 /// env_variables, message_log, and channels tables. Should be called at application
 /// startup after the other crate migrations (projects, sessions, cron).
-pub async fn run_migrations(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
-    sqlx::migrate!("./migrations")
-        .set_ignore_missing(true)
-        .run(pool)
-        .await?;
+///
+/// `migrations/` holds the SQLite DDL and `migrations_pg/` the PostgreSQL
+/// equivalent; `moltis_db` runs the migrator matching the connected backend.
+pub async fn run_migrations(db: &moltis_db::Db) -> anyhow::Result<()> {
+    moltis_db::run_migrations(
+        db,
+        sqlx::migrate!("./migrations"),
+        sqlx::migrate!("./migrations_pg"),
+    )
+    .await?;
     Ok(())
 }
