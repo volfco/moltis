@@ -37,6 +37,9 @@ async fn import_legacy_jobs(target: &dyn CronStore, data_dir: &Path) -> anyhow::
     let mut imported = 0_usize;
     for job in &jobs {
         target.save_job(job).await?;
+        // Re-imports (after a partial failure) must not duplicate run
+        // history: clear this job's runs before re-appending them.
+        target.delete_runs_for_job(&job.id).await?;
         for run in source.get_runs(&job.id, usize::MAX).await? {
             target.append_run(&job.id, &run).await?;
         }
@@ -129,6 +132,38 @@ mod tests {
         assert_eq!(target.get_runs("job-1", 10).await.unwrap(), vec![run]);
         assert!(!dir.path().join("cron/jobs.json").exists());
         assert!(dir.path().join("cron/jobs.json.bak").exists());
+    }
+
+    #[tokio::test]
+    async fn import_retry_after_partial_failure_does_not_duplicate_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = moltis_cron::store_file::FileStore::new(
+            dir.path().join("cron/jobs.json"),
+            dir.path().join("cron/runs"),
+        );
+        let job = sample_job("job-1");
+        let run = sample_run("job-1");
+        source.save_job(&job).await.unwrap();
+        source.append_run("job-1", &run).await.unwrap();
+
+        let target = sql_store().await;
+        import_legacy_jobs(&target, dir.path()).await.unwrap();
+
+        // Simulate a partial failure: the rename never happened, so the next
+        // startup finds jobs.json again and re-imports the same data.
+        std::fs::rename(
+            dir.path().join("cron/jobs.json.bak"),
+            dir.path().join("cron/jobs.json"),
+        )
+        .unwrap();
+        import_legacy_jobs(&target, dir.path()).await.unwrap();
+
+        assert_eq!(target.load_jobs().await.unwrap(), vec![job.clone()]);
+        assert_eq!(
+            target.get_runs("job-1", 10).await.unwrap(),
+            vec![run],
+            "a re-import must not duplicate run history"
+        );
     }
 
     #[tokio::test]

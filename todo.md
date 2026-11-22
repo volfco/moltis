@@ -54,8 +54,11 @@ Accepted review fixes to apply consistently across all ported crates:
       check-file-size.sh — grew past the 1,500 limit during the port).
 - [ ] Clean up the inert `cron/runs/` directory left by the old JSON store
       once the `jobs.json.bak` import has aged.
-- [ ] `moltis db migrate`/`clear` do not cover webhooks/vault tables
-      (pre-existing parity gap, unchanged by the port).
+- [ ] `moltis db reset` (SQLite) leaves `code-index/index.db` behind despite
+      "Delete all database files completely" (pre-existing drift).
+- [ ] Portable export/import archives the SQLite files only; a PostgreSQL
+      deployment gets an empty DB section (pg_dump is the Postgres backup
+      story — document it, or add a pg_dump hook).
 
 ## Memory backend hardening
 

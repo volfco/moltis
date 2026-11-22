@@ -217,14 +217,14 @@ pub(crate) async fn init_memory_system(
                 },
                 Err(e) => {
                     warn!(
-                        "zvec initialization failed ({e:#}), falling back to built-in SQLite backend"
+                        "zvec initialization failed ({e:#}), falling back to the built-in memory backend"
                     );
                 },
             },
             None => warn!(
                 "memory: zvec backend requires an embedding dimension (configure memory.model or \
                  memory.embedding_dimension, or run with an embedding provider); \
-                 falling back to built-in SQLite backend"
+                 falling back to the built-in memory backend"
             ),
         }
     }
@@ -265,14 +265,14 @@ fn validate_memory_backend(backend: moltis_config::MemoryBackend) {
             #[cfg(not(feature = "zvec"))]
             warn!(
                 "memory: zvec backend requires moltis built with --features zvec, \
-                 falling back to built-in SQLite backend"
+                 falling back to the built-in memory backend"
             );
         },
         moltis_config::MemoryBackend::Qmd => {
             #[cfg(not(feature = "qmd"))]
             warn!(
                 "memory: qmd backend requires moltis built with --features qmd, \
-                 falling back to built-in SQLite backend"
+                 falling back to the built-in memory backend"
             );
         },
     }

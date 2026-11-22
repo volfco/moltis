@@ -2,6 +2,8 @@
 
 use std::ffi::c_char;
 
+use secrecy::ExposeSecret;
+
 use crate::{
     callbacks::emit_log,
     helpers::{
@@ -25,10 +27,19 @@ pub extern "C" fn moltis_get_config() -> *mut c_char {
     with_ffi_boundary(|| {
         emit_log("DEBUG", "bridge", "moltis_get_config called");
         let config = moltis_config::discover_and_load();
-        let config_value = match serde_json::to_value(&config) {
+        let mut config_value = match serde_json::to_value(&config) {
             Ok(v) => v,
             Err(e) => return encode_error("serialization_error", &e.to_string()),
         };
+        // The URL holds credentials: never hand it to the settings UI. An
+        // empty value on save preserves the stored URL (see moltis_save_config).
+        if let Some(url) = config_value
+            .get_mut("database")
+            .and_then(|db| db.get_mut("url"))
+            && url.as_str().is_some_and(|u| !u.is_empty())
+        {
+            *url = serde_json::Value::String(String::new());
+        }
         let response = GetConfigResponse {
             config: config_value,
             config_dir: config_dir_string(),
@@ -47,13 +58,25 @@ pub extern "C" fn moltis_save_config(request_json: *const c_char) -> *mut c_char
     trace_call("moltis_save_config");
 
     with_ffi_boundary(|| {
-        let config = match parse_ffi_request::<moltis_config::MoltisConfig>(
+        let mut config = match parse_ffi_request::<moltis_config::MoltisConfig>(
             "moltis_save_config",
             request_json,
         ) {
             Ok(c) => c,
             Err(e) => return e,
         };
+
+        // The settings UI never sees database.url (redacted on read), so an
+        // empty value here means "unchanged" — keep the stored credential.
+        let incoming_url = config
+            .database
+            .url
+            .as_ref()
+            .map(|u| u.expose_secret().trim().is_empty())
+            .unwrap_or(true);
+        if incoming_url && let Some(existing) = moltis_config::discover_and_load().database.url {
+            config.database.url = Some(existing);
+        }
 
         emit_log("INFO", "bridge.config", "Saving full config from settings");
         match moltis_config::save_config(&config) {
@@ -82,8 +105,6 @@ pub extern "C" fn moltis_memory_status() -> *mut c_char {
     trace_call("moltis_memory_status");
 
     with_ffi_boundary(|| {
-        use {sqlx::sqlite::SqliteConnectOptions, std::str::FromStr};
-
         let config = moltis_config::discover_and_load();
         let embedding_model = config
             .memory
@@ -92,10 +113,21 @@ pub extern "C" fn moltis_memory_status() -> *mut c_char {
             .unwrap_or_else(|| "none".to_owned());
         let has_embeddings = !config.memory.disable_rag;
 
-        let db_path = moltis_config::data_dir().join("memory.db");
-        let db_size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+        let data_dir = moltis_config::data_dir();
+        let backend_type = match config.database.backend {
+            moltis_config::DatabaseBackend::Sqlite => "sqlite".to_string(),
+            moltis_config::DatabaseBackend::Postgres => "postgres".to_string(),
+        };
+        // File size exists only for the SQLite layout; a shared server keeps
+        // its own storage accounting.
+        let db_path = data_dir.join("memory.db");
+        let db_size = if config.database.backend == moltis_config::DatabaseBackend::Sqlite {
+            std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0)
+        } else {
+            0
+        };
 
-        if !db_path.exists() {
+        if config.database.backend == moltis_config::DatabaseBackend::Sqlite && !db_path.exists() {
             let response = MemoryStatusResponse {
                 available: false,
                 total_files: 0,
@@ -104,38 +136,21 @@ pub extern "C" fn moltis_memory_status() -> *mut c_char {
                 db_size_display: format_bytes(db_size),
                 embedding_model,
                 has_embeddings,
-                backend_type: "sqlite".to_string(),
+                backend_type,
                 hnsw_percent: None,
                 error: Some("memory.db not found".to_owned()),
             };
             return encode_json(&response);
         }
 
-        let options = match SqliteConnectOptions::from_str(&format!("sqlite:{}", db_path.display()))
-        {
-            Ok(opts) => opts.create_if_missing(false).read_only(true),
-            Err(error) => {
-                let response = MemoryStatusResponse {
-                    available: false,
-                    total_files: 0,
-                    total_chunks: 0,
-                    db_size,
-                    db_size_display: format_bytes(db_size),
-                    embedding_model,
-                    has_embeddings,
-                    backend_type: "sqlite".to_string(),
-                    hnsw_percent: None,
-                    error: Some(format!("invalid sqlite path: {error}")),
-                };
-                return encode_json(&response);
-            },
-        };
-
-        let pool = match BRIDGE
+        // Engine-agnostic open: memory.db on SQLite, the shared deployment
+        // database on PostgreSQL.
+        let db = match BRIDGE
             .runtime
-            .block_on(sqlx::SqlitePool::connect_with(options))
-        {
-            Ok(pool) => pool,
+            .block_on(moltis_gateway::database::open_memory_database(
+                &config, &data_dir,
+            )) {
+            Ok(db) => db,
             Err(error) => {
                 let response = MemoryStatusResponse {
                     available: false,
@@ -145,50 +160,21 @@ pub extern "C" fn moltis_memory_status() -> *mut c_char {
                     db_size_display: format_bytes(db_size),
                     embedding_model,
                     has_embeddings,
-                    backend_type: "sqlite".to_string(),
+                    backend_type,
                     hnsw_percent: None,
-                    error: Some(format!("failed to open memory.db: {error}")),
+                    error: Some(format!("failed to open memory database: {error}")),
                 };
                 return encode_json(&response);
             },
         };
 
         let (total_files, total_chunks) = BRIDGE.runtime.block_on(async {
-            let has_files_table: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'files'",
-            )
-            .fetch_one(&pool)
-            .await
-            .unwrap_or(0);
-            let has_chunks_table: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'chunks'",
-            )
-            .fetch_one(&pool)
-            .await
-            .unwrap_or(0);
-
-            let files: i64 = if has_files_table > 0 {
-                sqlx::query_scalar("SELECT COUNT(*) FROM files")
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap_or(0)
-            } else {
-                0
-            };
-            let chunks: i64 = if has_chunks_table > 0 {
-                sqlx::query_scalar("SELECT COUNT(*) FROM chunks")
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap_or(0)
-            } else {
-                0
-            };
-
-            let files_count: usize = files.max(0).try_into().unwrap_or(0);
-            let chunk_count: usize = chunks.max(0).try_into().unwrap_or(0);
-            (files_count, chunk_count)
+            // Tables may not exist before the first sync; that counts as zero.
+            let files = moltis_db::scalar!(&db, i64, "SELECT COUNT(*) FROM files").unwrap_or(0);
+            let chunks = moltis_db::scalar!(&db, i64, "SELECT COUNT(*) FROM chunks").unwrap_or(0);
+            (files.max(0) as usize, chunks.max(0) as usize)
         });
-        BRIDGE.runtime.block_on(pool.close());
+        BRIDGE.runtime.block_on(db.close());
 
         let response = MemoryStatusResponse {
             available: true,
@@ -198,7 +184,7 @@ pub extern "C" fn moltis_memory_status() -> *mut c_char {
             db_size_display: format_bytes(db_size),
             embedding_model,
             has_embeddings,
-            backend_type: "sqlite".to_string(),
+            backend_type,
             hnsw_percent: None,
             error: None,
         };

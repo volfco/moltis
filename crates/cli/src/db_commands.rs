@@ -100,21 +100,35 @@ async fn clear_databases() -> anyhow::Result<()> {
         // Order matters due to foreign key constraints.
         // Delete from child tables first.
         let tables = [
-            // Sessions/channels (depends on projects)
-            "channel_sessions",
-            "sessions",
-            // Cron (cron_runs depends on cron_jobs)
+            // Children first: foreign keys are enforced on PostgreSQL.
+            "webhook_response_actions",
+            "webhook_deliveries",
+            "webhooks",
             "cron_runs",
             "cron_jobs",
-            // Gateway tables (no dependencies between them)
-            "auth_sessions",
+            "channel_sessions",
+            "session_state",
+            "session_shares",
+            "sessions",
             "api_keys",
             "passkeys",
+            "auth_sessions",
+            "auth_state",
+            "auth_audit_log",
             "auth_password",
+            "device_tokens",
+            "pair_requests",
+            "paired_devices",
+            "ssh_keys",
+            "ssh_targets",
             "env_variables",
             "message_log",
             "channels",
-            // Projects (other tables depend on this)
+            "trace_links",
+            "voice_personas",
+            "agents",
+            "vault_metadata",
+            // Projects last: other tables reference it.
             "projects",
         ];
 
@@ -231,6 +245,12 @@ async fn run_migrations() -> anyhow::Result<()> {
     moltis_gateway::run_migrations(&db)
         .await
         .map_err(|e| anyhow::anyhow!("gateway migrations failed: {e}"))?;
+    moltis_webhooks::run_migrations(&db)
+        .await
+        .map_err(|e| anyhow::anyhow!("webhooks migrations failed: {e}"))?;
+    moltis_vault::run_migrations(&db)
+        .await
+        .map_err(|e| anyhow::anyhow!("vault migrations failed: {e}"))?;
     println!("  - gateway migrations complete");
 
     pool.close().await;
@@ -288,11 +308,20 @@ async fn run_postgres_migrations(config: &moltis_config::MoltisConfig) -> anyhow
     moltis_gateway::run_migrations(&db)
         .await
         .map_err(|e| anyhow::anyhow!("gateway migrations failed: {e}"))?;
+    moltis_webhooks::run_migrations(&db)
+        .await
+        .map_err(|e| anyhow::anyhow!("webhooks migrations failed: {e}"))?;
+    moltis_vault::run_migrations(&db)
+        .await
+        .map_err(|e| anyhow::anyhow!("vault migrations failed: {e}"))?;
     println!("  - gateway migrations complete");
 
     moltis_memory::schema::run_migrations(&db)
         .await
         .map_err(|e| anyhow::anyhow!("memory migrations failed: {e}"))?;
+    moltis_code_index::store_db::run_migrations(&db)
+        .await
+        .map_err(|e| anyhow::anyhow!("code-index migrations failed: {e}"))?;
     println!("  - memory migrations complete");
 
     #[cfg(feature = "connectors")]
@@ -322,22 +351,41 @@ async fn clear_postgres_database(config: &moltis_config::MoltisConfig) -> anyhow
         "cron_jobs",
         // Memory (chunks depends on files)
         "embedding_cache",
+        "webhook_response_actions",
+        "webhook_deliveries",
+        "webhooks",
+        "cron_runs",
+        "cron_jobs",
+        "channel_sessions",
+        "session_state",
+        "session_shares",
+        "sessions",
         "chunks",
+        "embedding_cache",
         "files",
-        // Connectors
+        "code_chunks",
         "connector_sync_runs",
         "connector_items",
         "connector_datasets",
         "connector_accounts",
-        // Gateway tables (no dependencies between them)
-        "auth_sessions",
         "api_keys",
         "passkeys",
+        "auth_sessions",
+        "auth_state",
+        "auth_audit_log",
         "auth_password",
+        "device_tokens",
+        "pair_requests",
+        "paired_devices",
+        "ssh_keys",
+        "ssh_targets",
         "env_variables",
         "message_log",
         "channels",
-        // Projects (other tables depend on this)
+        "trace_links",
+        "voice_personas",
+        "agents",
+        "vault_metadata",
         "projects",
     ];
 

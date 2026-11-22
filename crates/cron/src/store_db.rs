@@ -147,6 +147,11 @@ impl CronStore for DbStore {
         Ok(())
     }
 
+    async fn delete_runs_for_job(&self, job_id: &str) -> Result<()> {
+        execute!(&self.db, "DELETE FROM cron_runs WHERE job_id = ?", job_id)?;
+        Ok(())
+    }
+
     async fn get_runs(&self, job_id: &str, limit: usize) -> Result<Vec<CronRunRecord>> {
         let rows = fetch_all!(
             &self.db,
@@ -157,7 +162,9 @@ impl CronStore for DbStore {
              ORDER BY started_at_ms DESC
              LIMIT ?",
             job_id,
-            limit as i64,
+            // `usize::MAX as i64` would be -1 ("unlimited" on SQLite but a
+            // hard error on PostgreSQL); saturate instead.
+            i64::try_from(limit).unwrap_or(i64::MAX),
         )?;
 
         let mut runs = runs_to_records(rows)?;

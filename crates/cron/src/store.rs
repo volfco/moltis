@@ -17,6 +17,12 @@ pub trait CronStore: Send + Sync {
     async fn append_run(&self, job_id: &str, run: &CronRunRecord) -> Result<()>;
     async fn get_runs(&self, job_id: &str, limit: usize) -> Result<Vec<CronRunRecord>>;
 
+    /// Delete all run records for one job. Used by the one-time `jobs.json`
+    /// import so a retry after a partial failure does not duplicate history.
+    async fn delete_runs_for_job(&self, _job_id: &str) -> Result<()> {
+        Ok(())
+    }
+
     /// Delete all run records older than `before_ms` (epoch millis).
     /// Returns the number of deleted rows.
     async fn prune_runs_before(&self, _before_ms: u64) -> Result<u64> {

@@ -81,7 +81,15 @@ impl CredentialStore {
     pub async fn reset_from_db_path(db_path: &std::path::Path) -> Result<()> {
         let db_url = format!("sqlite:{}", db_path.display());
         let pool = sqlx::SqlitePool::connect(&db_url).await?;
-        let store = Self::new(Db::from(pool)).await?;
+        Self::reset_from_db(Db::from(pool)).await
+    }
+
+    /// Reset all auth on an already-connected database and close it.
+    ///
+    /// Engine-agnostic: the caller opens the deployment database (SQLite or
+    /// PostgreSQL) with `moltis_gateway::database::open_database`.
+    pub async fn reset_from_db(db: Db) -> Result<()> {
+        let store = Self::new(db).await?;
         store.reset_all().await
     }
 

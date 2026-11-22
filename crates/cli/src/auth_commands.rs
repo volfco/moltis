@@ -230,14 +230,21 @@ fn reset_identity() -> Result<()> {
 }
 
 async fn reset_password() -> Result<()> {
+    let config = moltis_config::discover_and_load();
     let data_dir = moltis_config::data_dir();
-    let db_path = data_dir.join("moltis.db");
-    if !db_path.exists() {
-        println!("No database found at {}", db_path.display());
-        return Ok(());
+    if config.database.backend == moltis_config::DatabaseBackend::Sqlite {
+        let db_path = data_dir.join("moltis.db");
+        if !db_path.exists() {
+            println!("No database found at {}", db_path.display());
+            return Ok(());
+        }
     }
 
-    moltis_gateway::auth::CredentialStore::reset_from_db_path(&db_path).await?;
+    // Open whichever database this deployment actually uses — on PostgreSQL
+    // the old path-based open would silently target a stale (or missing)
+    // moltis.db and report success without touching the live credentials.
+    let db = moltis_gateway::database::open_database(&config, &data_dir).await?;
+    moltis_gateway::auth::CredentialStore::reset_from_db(db).await?;
     for line in reset_password_success_lines() {
         println!("{line}");
     }
@@ -252,13 +259,16 @@ fn reset_password_success_lines() -> [&'static str; 2] {
 }
 
 async fn create_api_key(label: &str, scopes_str: Option<String>) -> Result<()> {
+    let config = moltis_config::discover_and_load();
     let data_dir = moltis_config::data_dir();
-    let db_path = data_dir.join("moltis.db");
-    if !db_path.exists() {
-        anyhow::bail!(
-            "No database found at {}. Start the gateway first to initialize it.",
-            db_path.display()
-        );
+    if config.database.backend == moltis_config::DatabaseBackend::Sqlite {
+        let db_path = data_dir.join("moltis.db");
+        if !db_path.exists() {
+            anyhow::bail!(
+                "No database found at {}. Start the gateway first to initialize it.",
+                db_path.display()
+            );
+        }
     }
 
     // Parse and validate scopes
@@ -277,13 +287,9 @@ async fn create_api_key(label: &str, scopes_str: Option<String>) -> Result<()> {
         None
     };
 
-    // Connect to database and create the key
-    let db_url = format!("sqlite:{}", db_path.display());
-    let pool = sqlx::SqlitePool::connect(&db_url).await?;
-    let config = moltis_config::discover_and_load();
-    let store =
-        moltis_gateway::auth::CredentialStore::with_config(moltis_db::Db::from(pool), &config.auth)
-            .await?;
+    // Connect to whichever database this deployment uses and create the key.
+    let db = moltis_gateway::database::open_database(&config, &data_dir).await?;
+    let store = moltis_gateway::auth::CredentialStore::with_config(db, &config.auth).await?;
 
     let (id, raw_key) = store.create_api_key(label, scopes.as_deref()).await?;
 

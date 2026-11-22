@@ -82,6 +82,7 @@ moltis-common           = { workspace = true }
 moltis-config           = { workspace = true }
 moltis-connectors       = { optional = true, workspace = true }
 moltis-cron             = { workspace = true }
+moltis-code-index       = { workspace = true }
 moltis-db               = { workspace = true }
 moltis-gateway          = { workspace = true }
 moltis-hermes-import    = { optional = true, workspace = true }
@@ -104,6 +105,8 @@ moltis-service-traits   = { optional = true, workspace = true }
 moltis-sessions         = { workspace = true }
 moltis-skills           = { workspace = true }
 moltis-tools            = { workspace = true }
+moltis-vault            = { workspace = true }
+moltis-webhooks         = { workspace = true }
 moltis-web              = { optional = true, workspace = true }
 open                    = { workspace = true }
 rand                    = { workspace = true }

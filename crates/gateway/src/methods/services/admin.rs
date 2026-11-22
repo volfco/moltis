@@ -887,9 +887,9 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                 let memory = &config.memory;
                 let chat = &config.chat;
 
-                // Report the *configured* backend, so a choice that only takes
-                // effect after a restart (for example switching to postgres)
-                // is still visible in the settings form. The backend the
+                // Report the *configured* backend, so a choice that only
+                // takes effect after a restart is still visible in the
+                // settings form. The backend the
                 // process is actually serving is reported separately as
                 // `active_backend`.
                 let active_backend = ctx
