@@ -43,6 +43,7 @@ mod hooks_commands;
 #[cfg(feature = "openclaw-import")]
 mod import_commands;
 mod memory_commands;
+mod memory_reindex;
 #[cfg(feature = "netbird")]
 mod netbird_commands;
 mod node_commands;
@@ -207,7 +208,7 @@ enum Commands {
         #[command(subcommand)]
         action: db_commands::DbAction,
     },
-    /// Memory search and status.
+    /// Search, inspect, and re-index memory.
     Memory {
         #[command(subcommand)]
         action: memory_commands::MemoryAction,

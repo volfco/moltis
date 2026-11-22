@@ -62,9 +62,18 @@ pub enum MemoryAction {
     },
     /// Show memory system status (files, chunks, database size).
     Status,
-    /// Re-index chunks from one zvec collection to another with re-embedding.
-    #[cfg(feature = "zvec")]
+    /// Re-embed every chunk after an embedding provider or dimension change.
     Reindex {
+        /// Re-embed even when the recorded embedding identity already matches.
+        #[arg(long, default_value_t = false)]
+        force: bool,
+        /// Rejected: collection migration moved to `migrate-collection`.
+        #[arg(long)]
+        to: Option<String>,
+    },
+    /// Migrate chunks from one zvec collection to another with re-embedding.
+    #[cfg(feature = "zvec")]
+    MigrateCollection {
         /// Source zvec collection path (default: active collection from config).
         #[arg(long)]
         from: Option<String>,
@@ -90,15 +99,18 @@ pub async fn handle_memory(action: MemoryAction) -> anyhow::Result<()> {
     match action {
         MemoryAction::Search { query, limit, json } => search_memory(&query, limit, json).await,
         MemoryAction::Status => show_status().await,
+        MemoryAction::Reindex { force, to } => {
+            crate::memory_reindex::reindex_memory(force, to).await
+        },
         #[cfg(feature = "zvec")]
-        MemoryAction::Reindex {
+        MemoryAction::MigrateCollection {
             from,
             to,
             model,
             target_dim,
             dry_run,
             yes,
-        } => handle_reindex(from, to, model, target_dim, dry_run, yes).await,
+        } => handle_migrate_collection(from, to, model, target_dim, dry_run, yes).await,
     }
 }
 
@@ -116,7 +128,7 @@ fn memory_db_path() -> std::path::PathBuf {
 /// backend the gateway actually writes to (SQLite for `Builtin`, zvec for
 /// `Zvec`) instead of always opening `memory.db` — which is empty/absent when
 /// zvec is active.
-enum ActiveStore {
+pub(crate) enum ActiveStore {
     Open {
         store: Box<dyn moltis_memory::store::MemoryStore>,
         /// Filesystem path (SQLite/zvec) or redacted host/database (PostgreSQL).
@@ -131,21 +143,26 @@ enum ActiveStore {
 async fn open_active_store() -> anyhow::Result<ActiveStore> {
     let config = moltis_config::discover_and_load();
     let data_dir = moltis_config::data_dir();
-    open_store_for_backend(&config, &data_dir).await
+    open_store_for_backend(&config, &data_dir, false).await
 }
 
 /// Backend-dispatching core of [`open_active_store`], factored out so tests can
 /// drive it with an explicit config + data dir (without relying on the global
 /// config file).
+///
+/// `writable` opens the SQLite database read-write; read commands keep it
+/// read-only so a running gateway's database is never locked by `memory
+/// status`/`memory search`.
 #[allow(unused_variables)]
-async fn open_store_for_backend(
+pub(crate) async fn open_store_for_backend(
     config: &moltis_config::MoltisConfig,
     data_dir: &std::path::Path,
+    writable: bool,
 ) -> anyhow::Result<ActiveStore> {
     match config.memory.backend {
         #[cfg(feature = "zvec")]
         moltis_config::MemoryBackend::Zvec => open_zvec_store(&config.memory, data_dir).await,
-        _ => open_builtin_store(config, data_dir).await,
+        _ => open_builtin_store(config, data_dir, writable).await,
     }
 }
 
@@ -154,15 +171,19 @@ async fn open_store_for_backend(
 async fn open_builtin_store(
     config: &moltis_config::MoltisConfig,
     data_dir: &std::path::Path,
+    writable: bool,
 ) -> anyhow::Result<ActiveStore> {
     match config.database.backend {
-        moltis_config::DatabaseBackend::Sqlite => open_sqlite_store(data_dir).await,
+        moltis_config::DatabaseBackend::Sqlite => open_sqlite_store(data_dir, writable).await,
         moltis_config::DatabaseBackend::Postgres => open_postgres_store(config).await,
     }
 }
 
 /// Open the built-in SQLite backend at `<data_dir>/memory.db`.
-async fn open_sqlite_store(data_dir: &std::path::Path) -> anyhow::Result<ActiveStore> {
+async fn open_sqlite_store(
+    data_dir: &std::path::Path,
+    writable: bool,
+) -> anyhow::Result<ActiveStore> {
     let db_path = data_dir.join("memory.db");
     if !db_path.exists() {
         return Ok(ActiveStore::NotFound {
@@ -172,7 +193,12 @@ async fn open_sqlite_store(data_dir: &std::path::Path) -> anyhow::Result<ActiveS
             ),
         });
     }
-    let db_url = format!("sqlite:{}?mode=ro", db_path.display());
+    let mode = if writable {
+        "rw"
+    } else {
+        "ro"
+    };
+    let db_url = format!("sqlite:{}?mode={mode}", db_path.display());
     let pool = sqlx::SqlitePool::connect(&db_url).await?;
     let store: Box<dyn moltis_memory::store::MemoryStore> = Box::new(
         moltis_memory::store_db::DbMemoryStore::from_sqlite_pool(pool),
@@ -476,7 +502,7 @@ async fn show_status() -> anyhow::Result<()> {
     // Try to open the active store for detailed counts. If the gateway is
     // running and holds the zvec lock, fall back to a limited status from
     // config + filesystem metadata.
-    match open_store_for_backend(&config, &data_dir).await {
+    match open_store_for_backend(&config, &data_dir, false).await {
         Ok(ActiveStore::Open { store, location }) => {
             let mem_config = moltis_memory::config::MemoryConfig {
                 db_path: location.clone(),
@@ -605,7 +631,7 @@ fn format_bytes(bytes: u64) -> String {
 }
 
 #[cfg(feature = "zvec")]
-async fn handle_reindex(
+async fn handle_migrate_collection(
     from: Option<String>,
     to: String,
     model: Option<String>,
@@ -1044,6 +1070,57 @@ mod tests {
         assert!(status.db_size_bytes > 0);
     }
 
+    /// Minimal wrapper so `MemoryAction` can be parsed without the whole
+    /// `moltis` command tree.
+    #[derive(clap::Parser)]
+    struct ActionCli {
+        #[command(subcommand)]
+        action: MemoryAction,
+    }
+
+    fn parse_action(args: &[&str]) -> MemoryAction {
+        use clap::Parser;
+
+        ActionCli::try_parse_from(std::iter::once("memory").chain(args.iter().copied()))
+            .expect("arguments should parse")
+            .action
+    }
+
+    #[test]
+    fn test_reindex_flag_parsing() {
+        match parse_action(&["reindex"]) {
+            MemoryAction::Reindex { force, to } => {
+                assert!(!force, "--force defaults to off");
+                assert!(to.is_none(), "--to is optional");
+            },
+            _ => panic!("expected reindex"),
+        }
+
+        match parse_action(&["reindex", "--force"]) {
+            MemoryAction::Reindex { force, .. } => assert!(force),
+            _ => panic!("expected reindex --force"),
+        }
+
+        // The old collection-migration invocation still parses, so it can be
+        // refused with guidance instead of clap's "unexpected argument".
+        match parse_action(&["reindex", "--to", "target.zvec"]) {
+            MemoryAction::Reindex { to, .. } => assert_eq!(to.as_deref(), Some("target.zvec")),
+            _ => panic!("expected reindex --to"),
+        }
+    }
+
+    #[cfg(feature = "zvec")]
+    #[test]
+    fn test_migrate_collection_parsing() {
+        match parse_action(&["migrate-collection", "--to", "target.zvec"]) {
+            MemoryAction::MigrateCollection { to, from, .. } => {
+                assert_eq!(to, "target.zvec");
+                assert!(from.is_none());
+            },
+            _ => panic!("expected migrate-collection"),
+        }
+    }
+
     #[test]
     fn test_print_json_output() {
         use moltis_memory::search::SearchResult;
@@ -1182,7 +1259,10 @@ mod tests {
         async fn not_found_when_collection_missing() {
             let tmp = tempfile::TempDir::new().unwrap();
             let cfg = mem_cfg_zvec("memory.zvec", Some(768));
-            match open_store_for_backend(&cfg, tmp.path()).await.unwrap() {
+            match open_store_for_backend(&cfg, tmp.path(), false)
+                .await
+                .unwrap()
+            {
                 ActiveStore::NotFound { message } => {
                     assert!(message.contains("not found"), "{message}");
                 },
@@ -1197,7 +1277,10 @@ mod tests {
             // Builtin backend must keep using the SQLite path.
             let tmp = tempfile::TempDir::new().unwrap();
             let cfg = moltis_config::MoltisConfig::default(); // memory.backend = Builtin
-            match open_store_for_backend(&cfg, tmp.path()).await.unwrap() {
+            match open_store_for_backend(&cfg, tmp.path(), false)
+                .await
+                .unwrap()
+            {
                 ActiveStore::NotFound { message } => {
                     assert!(message.contains("Memory database not found"), "{message}");
                 },
@@ -1248,7 +1331,10 @@ mod tests {
             }
 
             let cfg = mem_cfg_zvec("memory.zvec", Some(768));
-            match open_store_for_backend(&cfg, tmp.path()).await.unwrap() {
+            match open_store_for_backend(&cfg, tmp.path(), false)
+                .await
+                .unwrap()
+            {
                 ActiveStore::Open { store, location } => {
                     assert_eq!(location, format!("{}_768", stem.display()));
                     // Diagnostic: confirm the chunk persisted across reopen.
