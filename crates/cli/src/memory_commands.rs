@@ -131,7 +131,7 @@ enum ActiveStore {
 async fn open_active_store() -> anyhow::Result<ActiveStore> {
     let config = moltis_config::discover_and_load();
     let data_dir = moltis_config::data_dir();
-    open_store_for_backend(&config.memory, &data_dir).await
+    open_store_for_backend(&config, &data_dir).await
 }
 
 /// Backend-dispatching core of [`open_active_store`], factored out so tests can
@@ -139,14 +139,25 @@ async fn open_active_store() -> anyhow::Result<ActiveStore> {
 /// config file).
 #[allow(unused_variables)]
 async fn open_store_for_backend(
-    mem_cfg: &moltis_config::schema::MemoryEmbeddingConfig,
+    config: &moltis_config::MoltisConfig,
     data_dir: &std::path::Path,
 ) -> anyhow::Result<ActiveStore> {
-    match mem_cfg.backend {
+    match config.memory.backend {
         #[cfg(feature = "zvec")]
-        moltis_config::MemoryBackend::Zvec => open_zvec_store(mem_cfg, data_dir).await,
-        moltis_config::MemoryBackend::Postgres => open_postgres_store(mem_cfg).await,
-        _ => open_sqlite_store(data_dir).await,
+        moltis_config::MemoryBackend::Zvec => open_zvec_store(&config.memory, data_dir).await,
+        _ => open_builtin_store(config, data_dir).await,
+    }
+}
+
+/// Open the built-in store over the engine chosen by `[database]`: SQLite
+/// keeps `<data_dir>/memory.db`, PostgreSQL shares the deployment database.
+async fn open_builtin_store(
+    config: &moltis_config::MoltisConfig,
+    data_dir: &std::path::Path,
+) -> anyhow::Result<ActiveStore> {
+    match config.database.backend {
+        moltis_config::DatabaseBackend::Sqlite => open_sqlite_store(data_dir).await,
+        moltis_config::DatabaseBackend::Postgres => open_postgres_store(config).await,
     }
 }
 
@@ -172,27 +183,12 @@ async fn open_sqlite_store(data_dir: &std::path::Path) -> anyhow::Result<ActiveS
     })
 }
 
-/// Open the PostgreSQL backend from `memory.database_url`.
+/// Open the shared PostgreSQL deployment database for the built-in store.
 ///
 /// Migrations are idempotent, so this also works before the gateway has ever
 /// run against the database.
-async fn open_postgres_store(
-    mem_cfg: &moltis_config::schema::MemoryEmbeddingConfig,
-) -> anyhow::Result<ActiveStore> {
-    use secrecy::ExposeSecret;
-
-    let url = mem_cfg
-        .database_url
-        .as_ref()
-        .map(|secret| secret.expose_secret().clone())
-        .filter(|url| !url.trim().is_empty())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "memory.database_url is required for backend = \"postgres\" \
-                 (e.g. postgres://user:pass@localhost/moltis)"
-            )
-        })?;
-
+async fn open_postgres_store(config: &moltis_config::MoltisConfig) -> anyhow::Result<ActiveStore> {
+    let url = moltis_gateway::database::postgres_url(config)?;
     let db = moltis_db::Db::connect(&moltis_db::DbOptions::postgres(url.clone(), 2)).await?;
     moltis_memory::schema::run_migrations(&db).await?;
     Ok(ActiveStore::Open {
@@ -477,7 +473,7 @@ async fn show_status() -> anyhow::Result<()> {
     // Try to open the active store for detailed counts. If the gateway is
     // running and holds the zvec lock, fall back to a limited status from
     // config + filesystem metadata.
-    match open_store_for_backend(&config.memory, &data_dir).await {
+    match open_store_for_backend(&config, &data_dir).await {
         Ok(ActiveStore::Open { store, location }) => {
             let mem_config = moltis_memory::config::MemoryConfig {
                 db_path: location.clone(),
@@ -504,8 +500,10 @@ async fn show_status() -> anyhow::Result<()> {
             let embedding_model = format_embedding_model(&config);
             let backend_name = match config.memory.backend {
                 moltis_config::MemoryBackend::Zvec => "zvec",
-                moltis_config::MemoryBackend::Postgres => "postgres",
-                _ => "sqlite",
+                _ => match config.database.backend {
+                    moltis_config::DatabaseBackend::Postgres => "postgres",
+                    moltis_config::DatabaseBackend::Sqlite => "sqlite",
+                },
             };
 
             #[cfg(feature = "zvec")]
@@ -1165,11 +1163,14 @@ mod tests {
             moltis_memory::store::MemoryStore as _,
         };
 
-        fn mem_cfg_zvec(db_name: &str, dim: Option<u32>) -> MemoryEmbeddingConfig {
-            MemoryEmbeddingConfig {
-                backend: moltis_config::MemoryBackend::Zvec,
-                db_path: Some(db_name.to_string()),
-                embedding_dimension: dim,
+        fn mem_cfg_zvec(db_name: &str, dim: Option<u32>) -> moltis_config::MoltisConfig {
+            moltis_config::MoltisConfig {
+                memory: MemoryEmbeddingConfig {
+                    backend: moltis_config::MemoryBackend::Zvec,
+                    db_path: Some(db_name.to_string()),
+                    embedding_dimension: dim,
+                    ..Default::default()
+                },
                 ..Default::default()
             }
         }
@@ -1192,7 +1193,7 @@ mod tests {
         async fn sqlite_not_found_for_builtin_backend() {
             // Builtin backend must keep using the SQLite path.
             let tmp = tempfile::TempDir::new().unwrap();
-            let cfg = MemoryEmbeddingConfig::default(); // backend = Builtin
+            let cfg = moltis_config::MoltisConfig::default(); // memory.backend = Builtin
             match open_store_for_backend(&cfg, tmp.path()).await.unwrap() {
                 ActiveStore::NotFound { message } => {
                     assert!(message.contains("Memory database not found"), "{message}");

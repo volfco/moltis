@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use {
     secrecy::ExposeSecret,
-    tracing::{error, info, warn},
+    tracing::{info, warn},
 };
 
 use super::helpers::{ensure_ollama_model, env_value_with_overrides};
@@ -20,7 +20,7 @@ pub(crate) async fn init_memory_system(
     data_dir: &FsPath,
     effective_providers: &moltis_config::schema::ProvidersConfig,
     runtime_env_overrides: &HashMap<String, String>,
-    db_pool_max_connections: u32,
+    db: &moltis_db::Db,
     start_background_tasks: bool,
 ) -> Option<moltis_memory::runtime::DynMemoryRuntime> {
     // Build embedding provider(s) for the fallback chain.
@@ -229,93 +229,29 @@ pub(crate) async fn init_memory_system(
         }
     }
 
-    if mem_cfg.backend == moltis_config::MemoryBackend::Postgres {
-        match try_init_postgres(mem_cfg, db_pool_max_connections).await {
-            Ok(store) => {
-                return build_memory_runtime_from_store(
-                    mem_cfg,
-                    data_dir,
-                    embedder,
-                    store,
-                    start_background_tasks,
-                )
-                .await;
-            },
+    // The built-in memory store runs on the deployment engine chosen by
+    // `[database]`: PostgreSQL shares the one database, SQLite keeps its own
+    // memory.db file. In PostgreSQL mode the deployment migrations (including
+    // the memory schema) already ran at startup and hard-failed on error.
+    let memory_db = if db.is_postgres() {
+        db.clone()
+    } else {
+        match crate::database::open_memory_database(config, data_dir).await {
+            Ok(db) => db,
             Err(e) => {
-                // Never fall back to SQLite here: a deployment runs on one
-                // database engine. Falling back would silently write memory to
-                // a database the operator did not choose.
-                error!(
-                    "memory: postgres backend unavailable ({e:#}); memory is disabled. \
-                     Fix the connection or switch memory.backend back to \"builtin\"."
-                );
+                tracing::warn!("memory: failed to open memory.db: {e:#}");
                 return None;
             },
         }
-    }
-
-    let memory_db_path = data_dir.join("memory.db");
-    let memory_pool_result = {
-        use {
-            sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous},
-            std::str::FromStr,
-        };
-        let options =
-            match SqliteConnectOptions::from_str(&format!("sqlite:{}", memory_db_path.display())) {
-                Ok(options) => options,
-                Err(error) => {
-                    tracing::warn!(
-                        path = %memory_db_path.display(),
-                        error = %error,
-                        "memory: invalid memory database path"
-                    );
-                    return None;
-                },
-            }
-            .create_if_missing(true)
-            .journal_mode(SqliteJournalMode::Wal)
-            .synchronous(SqliteSynchronous::Normal)
-            .busy_timeout(std::time::Duration::from_secs(5));
-        sqlx::pool::PoolOptions::new()
-            .max_connections(db_pool_max_connections)
-            .connect_with(options)
-            .await
     };
-    match memory_pool_result {
-        Ok(memory_pool) => {
-            let memory_db = moltis_db::Db::from(memory_pool.clone());
-            if let Err(e) = moltis_memory::schema::run_migrations(&memory_db).await {
-                tracing::warn!("memory migration failed: {e}");
-                None
-            } else {
-                build_memory_runtime(
-                    mem_cfg,
-                    data_dir,
-                    embedder,
-                    memory_pool,
-                    start_background_tasks,
-                )
-                .await
-            }
-        },
-        Err(e) => {
-            tracing::warn!("memory: failed to open memory.db: {e}");
-            None
-        },
+    if !memory_db.is_postgres()
+        && let Err(e) = moltis_memory::schema::run_migrations(&memory_db).await
+    {
+        tracing::warn!("memory migration failed: {e}");
+        return None;
     }
-}
-
-/// Build the memory runtime, start initial sync, file watchers, and periodic syncs.
-async fn build_memory_runtime(
-    mem_cfg: &moltis_config::schema::MemoryEmbeddingConfig,
-    data_dir: &FsPath,
-    embedder: Option<Box<dyn moltis_memory::embeddings::EmbeddingProvider>>,
-    memory_pool: sqlx::SqlitePool,
-    start_background_tasks: bool,
-) -> Option<moltis_memory::runtime::DynMemoryRuntime> {
-    let store: Box<dyn moltis_memory::store::MemoryStore> = Box::new(
-        moltis_memory::store_db::DbMemoryStore::from_sqlite_pool(memory_pool),
-    );
+    let store: Box<dyn moltis_memory::store::MemoryStore> =
+        Box::new(moltis_memory::store_db::DbMemoryStore::new(memory_db));
     build_memory_runtime_from_store(mem_cfg, data_dir, embedder, store, start_background_tasks)
         .await
 }
@@ -325,8 +261,6 @@ async fn build_memory_runtime(
 fn validate_memory_backend(backend: moltis_config::MemoryBackend) {
     match backend {
         moltis_config::MemoryBackend::Builtin => {},
-        // PostgreSQL is always compiled in (sqlx's driver is pure Rust).
-        moltis_config::MemoryBackend::Postgres => {},
         moltis_config::MemoryBackend::Zvec => {
             #[cfg(not(feature = "zvec"))]
             warn!(
@@ -430,46 +364,8 @@ async fn try_init_zvec(
     Ok(Box::new(store))
 }
 
-/// Initialize the PostgreSQL + pgvector memory backend.
-///
-/// Fails when no URL is configured or the server is unreachable; the caller
-/// logs the error and falls back to SQLite.
-async fn try_init_postgres(
-    cfg: &moltis_config::schema::MemoryEmbeddingConfig,
-    db_pool_max_connections: u32,
-) -> anyhow::Result<Box<dyn moltis_memory::store::MemoryStore>> {
-    let url = cfg
-        .database_url
-        .as_ref()
-        .map(|secret| secret.expose_secret().clone())
-        .filter(|url| !url.trim().is_empty())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "memory.database_url is required for the postgres backend \
-                 (e.g. postgres://user:pass@localhost/moltis)"
-            )
-        })?;
-
-    let db = moltis_db::Db::connect(&moltis_db::DbOptions::postgres(
-        url,
-        db_pool_max_connections,
-    ))
-    .await
-    .map_err(|e| anyhow::anyhow!("cannot connect to PostgreSQL: {e}"))?;
-
-    moltis_memory::schema::run_migrations(&db)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "memory migrations failed (is the pgvector `vector` extension available?): {e}"
-            )
-        })?;
-
-    info!("using postgres (pgvector) memory backend");
-    Ok(Box::new(moltis_memory::store_db::DbMemoryStore::new(db)))
-}
-
-/// Build the memory runtime from a pre-created store (used by SQLite, zvec and postgres backends).
+/// Build the memory runtime from a pre-created store (used by the built-in,
+/// zvec and qmd backends).
 async fn build_memory_runtime_from_store(
     mem_cfg: &moltis_config::schema::MemoryEmbeddingConfig,
     data_dir: &FsPath,
@@ -530,11 +426,9 @@ async fn build_memory_runtime_from_store(
         moltis_memory::manager::MemoryManager::keyword_only(memory_runtime_config, store)
     });
     let manager: moltis_memory::runtime::DynMemoryRuntime = match mem_cfg.backend {
-        // The Postgres backend is the built-in manager over a pgvector store,
-        // so it reuses the builtin runtime.
-        moltis_config::MemoryBackend::Builtin | moltis_config::MemoryBackend::Postgres => {
-            builtin_manager.clone()
-        },
+        // The built-in store runs over the `[database]` engine, so the
+        // built-in manager is the runtime for it.
+        moltis_config::MemoryBackend::Builtin => builtin_manager.clone(),
         moltis_config::MemoryBackend::Qmd => {
             #[cfg(feature = "qmd")]
             {

@@ -334,7 +334,6 @@ fn parse_memory_backend(value: &str) -> Result<moltis_config::MemoryBackend, Err
     match value {
         "builtin" => Ok(moltis_config::MemoryBackend::Builtin),
         "qmd" => Ok(moltis_config::MemoryBackend::Qmd),
-        "postgres" => Ok(moltis_config::MemoryBackend::Postgres),
         #[cfg(feature = "zvec")]
         "zvec" => Ok(moltis_config::MemoryBackend::Zvec),
         _ => Err(invalid_memory_config_value("backend", value)),
@@ -345,7 +344,6 @@ fn configured_memory_backend_name(backend: moltis_config::MemoryBackend) -> &'st
     match backend {
         moltis_config::MemoryBackend::Builtin => "builtin",
         moltis_config::MemoryBackend::Qmd => "qmd",
-        moltis_config::MemoryBackend::Postgres => "postgres",
         #[cfg(feature = "zvec")]
         moltis_config::MemoryBackend::Zvec => "zvec",
         #[cfg(not(feature = "zvec"))]
@@ -354,13 +352,14 @@ fn configured_memory_backend_name(backend: moltis_config::MemoryBackend) -> &'st
 }
 
 /// Map the backend a running store reports to the value `memory.config.update`
-/// accepts ("sqlite" is the built-in backend's runtime name).
+/// accepts ("sqlite" and "postgres" are the built-in backend's runtime names
+/// on either `[database]` engine).
 fn active_memory_backend_name(active_backend: &str) -> &'static str {
     match active_backend {
         "sqlite" => "builtin",
         "qmd" => "qmd",
         "zvec" => "zvec",
-        "postgres" => "postgres",
+        "postgres" => "builtin",
         _ => "builtin",
     }
 }
@@ -814,24 +813,17 @@ mod tests {
             configured_memory_backend_name(moltis_config::MemoryBackend::Qmd),
             "qmd"
         );
-        assert_eq!(
-            configured_memory_backend_name(moltis_config::MemoryBackend::Postgres),
-            "postgres"
-        );
 
         // Runtime names are translated to the editable names.
         assert_eq!(active_memory_backend_name("sqlite"), "builtin");
         assert_eq!(active_memory_backend_name("qmd"), "qmd");
-        assert_eq!(active_memory_backend_name("postgres"), "postgres");
+        assert_eq!(active_memory_backend_name("postgres"), "builtin");
         assert_eq!(active_memory_backend_name("zvec"), "zvec");
         assert_eq!(active_memory_backend_name("unknown-backend"), "builtin");
 
         assert!(
-            matches!(
-                parse_memory_backend("postgres"),
-                Ok(moltis_config::MemoryBackend::Postgres)
-            ),
-            "postgres must be an accepted memory backend"
+            parse_memory_backend("postgres").is_err(),
+            "the [database] engine must not be an accepted memory backend"
         );
         assert!(
             parse_memory_backend("sqlite").is_err(),
