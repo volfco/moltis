@@ -2,6 +2,23 @@
 
 Short entries recording *why* the code is the way it is. Newest first.
 
+## 2026-11-22 — Memory sync takes a Postgres session advisory lock
+
+**Scope:** minor. `crates/memory` (`sync_lock.rs`, `manager.rs`, `store.rs`).
+
+**Decision:** a full sync pass runs under `pg_try_advisory_lock`
+(`MEMORY_SYNC_LOCK_KEY`, ASCII `mem_sync`). Not acquired => the pass skips
+with an info log and a `moltis_memory_sync_lock_skips_total` count; SQLite
+gets an uncontended no-op guard. The guard pins the lock's `PoolConnection`
+for its lifetime, unlocks on that same connection on `release`, and marks it
+`close_on_drop` as the panic/cancellation fallback.
+
+**Why:** sync rewrites chunks and must not interleave across instances. The
+lock is session-scoped, so acquiring on an arbitrary pooled connection would
+leak the lock to later borrowers; pinning one connection makes release
+deterministic on Ok and Err alike, and a closed session releases its locks
+server-side. Reusable later for the reindex entry point.
+
 ## 2026-11-22 — One `[database]` engine switch, no fallback
 
 **Scope:** major. `crates/config`, gateway startup, CLI, swift-bridge.

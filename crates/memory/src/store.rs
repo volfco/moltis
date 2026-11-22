@@ -5,6 +5,7 @@ use crate::{
     error::Result,
     schema::{ChunkRow, FileRow},
     search::SearchResult,
+    sync_lock::SyncLockGuard,
 };
 
 /// Strategy for merging vector and keyword search results.
@@ -110,5 +111,14 @@ pub trait MemoryStore: Send + Sync {
     /// Returns 0 for in-memory stores or when the files are unavailable.
     fn disk_size_bytes(&self) -> u64 {
         0
+    }
+
+    /// Try to acquire the cross-instance sync lock for a full sync pass.
+    ///
+    /// `None` means another instance currently holds the lock and the caller
+    /// must skip the sync. Stores without a shared database default to an
+    /// uncontended guard.
+    async fn try_acquire_sync_lock(&self) -> Result<Option<SyncLockGuard>> {
+        Ok(Some(SyncLockGuard::Uncontended))
     }
 }

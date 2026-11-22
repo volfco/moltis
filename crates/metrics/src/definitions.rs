@@ -189,6 +189,8 @@ pub mod memory {
     pub const SILENT_TURN_DURATION_SECONDS: &str = "moltis_memory_silent_turn_duration_seconds";
     /// Files written by silent memory turns
     pub const SILENT_TURN_FILES_WRITTEN: &str = "moltis_memory_silent_turn_files_written";
+    /// Sync passes skipped because another instance held the sync lock
+    pub const SYNC_LOCK_SKIPS_TOTAL: &str = "moltis_memory_sync_lock_skips_total";
 }
 
 /// Plugin metrics

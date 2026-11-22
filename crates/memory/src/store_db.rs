@@ -22,6 +22,7 @@ use crate::{
     schema::{ChunkRow, FileRow},
     search::{self, SearchResult},
     store::{CacheEntry, MemoryStore, MergeStrategy},
+    sync_lock::SyncLockGuard,
 };
 
 /// `MemoryStore` backed by SQLite or PostgreSQL.
@@ -898,6 +899,10 @@ impl MemoryStore for DbMemoryStore {
         let mut final_results: Vec<SearchResult> = merged.into_iter().take(limit).collect();
         search::fill_missing_text(self, &mut final_results).await?;
         Ok(final_results)
+    }
+
+    async fn try_acquire_sync_lock(&self) -> crate::error::Result<Option<SyncLockGuard>> {
+        SyncLockGuard::try_acquire(&self.db).await
     }
 
     fn store_type(&self) -> &'static str {

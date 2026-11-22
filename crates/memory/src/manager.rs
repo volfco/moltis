@@ -132,9 +132,31 @@ impl MemoryManager {
     }
 
     /// Synchronize: walk configured directories, detect changed files, re-chunk and re-embed.
+    #[tracing::instrument(skip(self))]
     pub async fn sync(&self) -> Result<SyncReport> {
         // Serialize against concurrent sync_path/remove_path.
         let _sync_permit = self.acquire_sync_lock().await?;
+        // Cross-instance guard (Postgres only): skip cleanly when another
+        // instance is already syncing this database.
+        let Some(guard) = self.store.try_acquire_sync_lock().await? else {
+            info!("memory sync already running elsewhere; skipping");
+            #[cfg(feature = "metrics")]
+            moltis_metrics::counter!(moltis_metrics::memory::SYNC_LOCK_SKIPS_TOTAL).increment(1);
+            return Ok(SyncReport {
+                skipped: true,
+                ..Default::default()
+            });
+        };
+        let result = self.sync_pass().await;
+        // Deterministic release on success and error alike; the guard's Drop
+        // closes the lock connection as a fallback so the lock cannot outlive
+        // this sync run.
+        guard.release().await;
+        result
+    }
+
+    /// One full sync pass. Callers must hold the sync permits and sync lock.
+    async fn sync_pass(&self) -> Result<SyncReport> {
         let mut report = SyncReport::default();
 
         let mut discovered_paths = Vec::new();
@@ -549,6 +571,8 @@ impl MemoryWriter for MemoryManager {
 /// Sync report.
 #[derive(Debug, Default)]
 pub struct SyncReport {
+    /// True when the pass was skipped: another instance held the sync lock.
+    pub skipped: bool,
     pub files_updated: usize,
     pub files_unchanged: usize,
     pub files_removed: usize,
