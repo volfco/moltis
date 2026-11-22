@@ -585,6 +585,12 @@ async fn pairing_state_approve_enforces_expiry_boundary() {
 
 /// One connection so concurrent queries interleave on a shared in-memory
 /// database instead of fanning out across pool connections.
+///
+/// The concurrency tests rely on sqlx's single-connection FIFO statement
+/// queueing to hit the check-then-consume interleavings (both pre-checks land
+/// before either transition) — no production test seams exist. Each of these
+/// tests was mutation-verified: it fails against the unguarded statement
+/// shape and passes with the guard.
 async fn race_db() -> Db {
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
@@ -650,6 +656,7 @@ async fn rejected_request_cannot_be_approved_or_replayed() {
 
 #[tokio::test]
 async fn concurrent_approve_issues_exactly_one_token() {
+    // Scheduling reliance documented on race_db (FIFO statement queueing).
     let db = race_db().await;
     let store = PairingStore::new(db.clone());
 
@@ -667,6 +674,7 @@ async fn concurrent_approve_issues_exactly_one_token() {
 
 #[tokio::test]
 async fn concurrent_approve_and_reject_have_one_winner() {
+    // Scheduling reliance documented on race_db (FIFO statement queueing).
     let db = race_db().await;
     let store = PairingStore::new(db.clone());
 
