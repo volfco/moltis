@@ -9,6 +9,7 @@
 //! | Concern | SQLite | PostgreSQL |
 //! |---------|--------|------------|
 //! | Embedding column | BLOB of little-endian f32 | `vector` (pgvector) |
+//! | Embedding column type | fixed by the BLOB layout | `vector(N)` + HNSW once `memory_meta` knows the dimension |
 //! | Vector search | load all rows, cosine in Rust | `ORDER BY embedding <=> $1` |
 //! | Keyword search | FTS5 `MATCH` | `tsvector` + `websearch_to_tsquery` |
 //! | Cache eviction | `rowid IN (…)` | primary-key tuple `IN (…)` |
@@ -401,7 +402,7 @@ const META_DIMENSIONS: &str = "embedding_dims";
 const CHUNKS_EMBEDDING_INDEX: &str = "chunks_embedding_hnsw";
 
 /// Render `chunks.embedding`'s SQL type, e.g. `vector(1536)` or `vector`.
-async fn embedding_column_type(db: &Db) -> crate::error::Result<String> {
+pub(crate) async fn embedding_column_type(db: &Db) -> crate::error::Result<String> {
     Ok(fetch_one!(
         db,
         (String,),
