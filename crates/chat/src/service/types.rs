@@ -31,7 +31,7 @@ use {
     moltis_sessions::{
         PersistedMessage,
         message::{PersistedFunction, PersistedToolCall},
-        metadata::SqliteSessionMetadata,
+        metadata::DbSessionMetadata,
         state_store::SessionStateStore,
         store::SessionStore,
     },
@@ -344,7 +344,7 @@ pub struct LiveChatService {
     pub(in crate::service) session_tool_overlays:
         Arc<RwLock<HashMap<String, Arc<RwLock<ToolRegistry>>>>>,
     pub(in crate::service) session_store: Arc<SessionStore>,
-    pub(in crate::service) session_metadata: Arc<SqliteSessionMetadata>,
+    pub(in crate::service) session_metadata: Arc<DbSessionMetadata>,
     pub(in crate::service) session_state_store: Option<Arc<SessionStateStore>>,
     pub(in crate::service) hook_registry: Option<Arc<moltis_common::hooks::HookRegistry>>,
     /// Per-session semaphore ensuring only one agent run executes per session at a time.
@@ -411,7 +411,7 @@ impl LiveChatService {
         model_store: Arc<RwLock<DisabledModelsStore>>,
         state: Arc<dyn ChatRuntime>,
         session_store: Arc<SessionStore>,
-        session_metadata: Arc<SqliteSessionMetadata>,
+        session_metadata: Arc<DbSessionMetadata>,
     ) -> Self {
         Self {
             providers,

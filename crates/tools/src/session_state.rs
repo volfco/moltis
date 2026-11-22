@@ -149,7 +149,7 @@ mod tests {
     }
 
     fn make_tool(pool: sqlx::SqlitePool) -> SessionStateTool {
-        SessionStateTool::new(Arc::new(SessionStateStore::new(pool)))
+        SessionStateTool::new(Arc::new(SessionStateStore::new(moltis_db::Db::from(pool))))
     }
 
     #[tokio::test]

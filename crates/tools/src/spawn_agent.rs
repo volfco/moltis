@@ -29,7 +29,7 @@ use {
         schema::{AgentPreset, AgentsConfig},
     },
     moltis_providers::ProviderRegistry,
-    moltis_sessions::{metadata::SqliteSessionMetadata, store::SessionStore},
+    moltis_sessions::{metadata::DbSessionMetadata, store::SessionStore},
 };
 
 use crate::sessions_communicate::{
@@ -63,7 +63,7 @@ pub type OnSpawnEvent = Arc<dyn Fn(RunnerEvent) + Send + Sync>;
 /// Dependencies for building policy-aware session tools in sub-agents.
 #[derive(Clone)]
 pub struct SessionDeps {
-    pub session_metadata: Arc<SqliteSessionMetadata>,
+    pub session_metadata: Arc<DbSessionMetadata>,
     pub session_store: Arc<SessionStore>,
     pub send_to_session: SendToSessionFn,
 }

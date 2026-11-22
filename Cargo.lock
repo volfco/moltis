@@ -8616,6 +8616,7 @@ dependencies = [
 name = "moltis-secret-store"
 version = "0.1.0"
 dependencies = [
+ "moltis-db",
  "moltis-vault",
  "serde",
  "serde_json",
@@ -8899,6 +8900,7 @@ dependencies = [
  "moltis-common",
  "moltis-config",
  "moltis-cron",
+ "moltis-db",
  "moltis-media",
  "moltis-metrics",
  "moltis-network-filter",

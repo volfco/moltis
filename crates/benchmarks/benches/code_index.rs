@@ -42,7 +42,7 @@ fn tokio_rt() -> &'static tokio::runtime::Runtime {
 // ── Shared search index (built once) ────────────────────────────────────────────
 
 struct SearchFixture {
-    store: moltis_code_index::store_sqlite::SqliteCodeIndexStore,
+    store: moltis_code_index::store_db::DbCodeIndexStore,
     // Leak the tempdir so the DB file persists for the benchmark lifetime.
     _db_dir: tempfile::TempDir,
 }
@@ -55,7 +55,16 @@ fn search_fixture() -> &'static SearchFixture {
         rt.block_on(async {
             let db_dir = tempfile::tempdir().unwrap();
             let db_path = db_dir.path().join("bench_code_index.db");
-            let store = moltis_code_index::store_sqlite::SqliteCodeIndexStore::new(&db_path)
+            // The store no longer creates its database file: the caller
+            // constructs the backend and passes it in.
+            if let Some(parent) = db_path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            let db =
+                moltis_db::Db::connect(&moltis_db::DbOptions::sqlite(db_path.to_string_lossy(), 4))
+                    .await
+                    .unwrap();
+            let store = moltis_code_index::store_db::DbCodeIndexStore::new(db)
                 .await
                 .unwrap();
 

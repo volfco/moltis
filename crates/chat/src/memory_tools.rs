@@ -23,7 +23,7 @@ use {
     moltis_config::{AgentMemoryWriteMode, MemoryStyle, ToolMode},
     moltis_memory::writer::remove_exact_text,
     moltis_providers::ProviderRegistry,
-    moltis_sessions::metadata::SqliteSessionMetadata,
+    moltis_sessions::metadata::DbSessionMetadata,
 };
 
 use crate::types::{
@@ -1069,14 +1069,14 @@ impl AgentTool for AgentScopedMemoryForgetTool {
 pub struct MemoryForgetTool {
     manager: moltis_memory::runtime::DynMemoryRuntime,
     providers: Arc<RwLock<ProviderRegistry>>,
-    session_metadata: Arc<SqliteSessionMetadata>,
+    session_metadata: Arc<DbSessionMetadata>,
 }
 
 impl MemoryForgetTool {
     pub fn new(
         manager: moltis_memory::runtime::DynMemoryRuntime,
         providers: Arc<RwLock<ProviderRegistry>>,
-        session_metadata: Arc<SqliteSessionMetadata>,
+        session_metadata: Arc<DbSessionMetadata>,
     ) -> Self {
         Self {
             manager,

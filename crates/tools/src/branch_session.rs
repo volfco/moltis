@@ -5,7 +5,7 @@ use std::sync::Arc;
 use {
     async_trait::async_trait,
     moltis_agents::tool_registry::AgentTool,
-    moltis_sessions::{metadata::SqliteSessionMetadata, store::SessionStore},
+    moltis_sessions::{metadata::DbSessionMetadata, store::SessionStore},
     serde_json::{Value, json},
 };
 
@@ -14,11 +14,11 @@ use crate::error::Error;
 /// Agent tool that forks the current session at a given message index.
 pub struct BranchSessionTool {
     store: Arc<SessionStore>,
-    metadata: Arc<SqliteSessionMetadata>,
+    metadata: Arc<DbSessionMetadata>,
 }
 
 impl BranchSessionTool {
-    pub fn new(store: Arc<SessionStore>, metadata: Arc<SqliteSessionMetadata>) -> Self {
+    pub fn new(store: Arc<SessionStore>, metadata: Arc<DbSessionMetadata>) -> Self {
         Self { store, metadata }
     }
 }
@@ -147,11 +147,7 @@ mod tests {
         .to_value()
     }
 
-    async fn setup() -> (
-        Arc<SessionStore>,
-        Arc<SqliteSessionMetadata>,
-        tempfile::TempDir,
-    ) {
+    async fn setup() -> (Arc<SessionStore>, Arc<DbSessionMetadata>, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
 
@@ -160,7 +156,9 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        SqliteSessionMetadata::init(&pool).await.unwrap();
+        DbSessionMetadata::init(&moltis_db::Db::from(pool.clone()))
+            .await
+            .unwrap();
         // Add the branch columns.
         sqlx::query("ALTER TABLE sessions ADD COLUMN parent_session_key TEXT")
             .execute(&pool)
@@ -171,7 +169,7 @@ mod tests {
             .await
             .ok();
 
-        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+        let metadata = Arc::new(DbSessionMetadata::new(moltis_db::Db::from(pool)));
         (store, metadata, tmp)
     }
 

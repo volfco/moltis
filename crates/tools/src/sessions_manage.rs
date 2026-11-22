@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use {async_trait::async_trait, futures::future::BoxFuture, serde_json::Value};
 
-use {moltis_agents::tool_registry::AgentTool, moltis_sessions::metadata::SqliteSessionMetadata};
+use {moltis_agents::tool_registry::AgentTool, moltis_sessions::metadata::DbSessionMetadata};
 
 use crate::{
     Error,
@@ -42,12 +42,12 @@ pub type DeleteSessionFn =
 
 /// Tool for creating sessions.
 pub struct SessionsCreateTool {
-    metadata: Arc<SqliteSessionMetadata>,
+    metadata: Arc<DbSessionMetadata>,
     create_fn: CreateSessionFn,
 }
 
 impl SessionsCreateTool {
-    pub fn new(metadata: Arc<SqliteSessionMetadata>, create_fn: CreateSessionFn) -> Self {
+    pub fn new(metadata: Arc<DbSessionMetadata>, create_fn: CreateSessionFn) -> Self {
         Self {
             metadata,
             create_fn,
@@ -57,12 +57,12 @@ impl SessionsCreateTool {
 
 /// Tool for deleting sessions.
 pub struct SessionsDeleteTool {
-    metadata: Arc<SqliteSessionMetadata>,
+    metadata: Arc<DbSessionMetadata>,
     delete_fn: DeleteSessionFn,
 }
 
 impl SessionsDeleteTool {
-    pub fn new(metadata: Arc<SqliteSessionMetadata>, delete_fn: DeleteSessionFn) -> Self {
+    pub fn new(metadata: Arc<DbSessionMetadata>, delete_fn: DeleteSessionFn) -> Self {
         Self {
             metadata,
             delete_fn,
@@ -205,13 +205,15 @@ mod tests {
         sqlx::query("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY)")
             .execute(&pool)
             .await?;
-        SqliteSessionMetadata::init(&pool).await?;
+        DbSessionMetadata::init(&moltis_db::Db::from(pool.clone())).await?;
         Ok(pool)
     }
 
     #[tokio::test]
     async fn sessions_create_generates_key_when_missing() -> TestResult<()> {
-        let metadata = Arc::new(SqliteSessionMetadata::new(test_pool().await?));
+        let metadata = Arc::new(DbSessionMetadata::new(moltis_db::Db::from(
+            test_pool().await?,
+        )));
         let called = Arc::new(AtomicBool::new(false));
         let called_ref = Arc::clone(&called);
 
@@ -245,7 +247,9 @@ mod tests {
 
     #[tokio::test]
     async fn sessions_create_marks_existing_session_as_not_created() -> TestResult<()> {
-        let metadata = Arc::new(SqliteSessionMetadata::new(test_pool().await?));
+        let metadata = Arc::new(DbSessionMetadata::new(moltis_db::Db::from(
+            test_pool().await?,
+        )));
         metadata
             .upsert("session:existing", Some("Existing".to_string()))
             .await?;
@@ -272,7 +276,9 @@ mod tests {
 
     #[tokio::test]
     async fn sessions_delete_deletes_existing_session() -> TestResult<()> {
-        let metadata = Arc::new(SqliteSessionMetadata::new(test_pool().await?));
+        let metadata = Arc::new(DbSessionMetadata::new(moltis_db::Db::from(
+            test_pool().await?,
+        )));
         metadata
             .upsert("session:to-delete", Some("Delete me".to_string()))
             .await?;
@@ -304,7 +310,9 @@ mod tests {
 
     #[tokio::test]
     async fn sessions_delete_rejects_missing_session() -> TestResult<()> {
-        let metadata = Arc::new(SqliteSessionMetadata::new(test_pool().await?));
+        let metadata = Arc::new(DbSessionMetadata::new(moltis_db::Db::from(
+            test_pool().await?,
+        )));
         let delete_fn: DeleteSessionFn =
             Arc::new(move |_req| Box::pin(async move { Ok(serde_json::json!({ "ok": true })) }));
 
@@ -324,7 +332,9 @@ mod tests {
 
     #[tokio::test]
     async fn sessions_delete_allows_main_session() -> TestResult<()> {
-        let metadata = Arc::new(SqliteSessionMetadata::new(test_pool().await?));
+        let metadata = Arc::new(DbSessionMetadata::new(moltis_db::Db::from(
+            test_pool().await?,
+        )));
         metadata.upsert("main", Some("Main".to_string())).await?;
 
         let deleted = Arc::new(AtomicBool::new(false));

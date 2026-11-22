@@ -17,6 +17,7 @@ default = []
 vault   = ["dep:moltis-vault"]
 
 [dev-dependencies]
+moltis-db = { workspace = true }
 sqlx  = { workspace = true }
 tokio = { workspace = true }
 

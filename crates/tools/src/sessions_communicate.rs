@@ -12,7 +12,7 @@ use {async_trait::async_trait, futures::future::BoxFuture, serde_json::Value};
 
 use {
     moltis_agents::tool_registry::AgentTool,
-    moltis_sessions::{metadata::SqliteSessionMetadata, store::SessionStore},
+    moltis_sessions::{metadata::DbSessionMetadata, store::SessionStore},
 };
 
 use crate::{
@@ -77,12 +77,12 @@ impl From<&moltis_config::SessionAccessPolicyConfig> for SessionAccessPolicy {
 
 /// Tool for listing known sessions.
 pub struct SessionsListTool {
-    metadata: Arc<SqliteSessionMetadata>,
+    metadata: Arc<DbSessionMetadata>,
     policy: Option<SessionAccessPolicy>,
 }
 
 impl SessionsListTool {
-    pub fn new(metadata: Arc<SqliteSessionMetadata>) -> Self {
+    pub fn new(metadata: Arc<DbSessionMetadata>) -> Self {
         Self {
             metadata,
             policy: None,
@@ -99,12 +99,12 @@ impl SessionsListTool {
 /// Tool for reading history from a target session.
 pub struct SessionsHistoryTool {
     store: Arc<SessionStore>,
-    metadata: Arc<SqliteSessionMetadata>,
+    metadata: Arc<DbSessionMetadata>,
     policy: Option<SessionAccessPolicy>,
 }
 
 impl SessionsHistoryTool {
-    pub fn new(store: Arc<SessionStore>, metadata: Arc<SqliteSessionMetadata>) -> Self {
+    pub fn new(store: Arc<SessionStore>, metadata: Arc<DbSessionMetadata>) -> Self {
         Self {
             store,
             metadata,
@@ -122,12 +122,12 @@ impl SessionsHistoryTool {
 /// Tool for searching across session history.
 pub struct SessionsSearchTool {
     store: Arc<SessionStore>,
-    metadata: Arc<SqliteSessionMetadata>,
+    metadata: Arc<DbSessionMetadata>,
     policy: Option<SessionAccessPolicy>,
 }
 
 impl SessionsSearchTool {
-    pub fn new(store: Arc<SessionStore>, metadata: Arc<SqliteSessionMetadata>) -> Self {
+    pub fn new(store: Arc<SessionStore>, metadata: Arc<DbSessionMetadata>) -> Self {
         Self {
             store,
             metadata,
@@ -144,13 +144,13 @@ impl SessionsSearchTool {
 
 /// Tool for sending a message to another session.
 pub struct SessionsSendTool {
-    metadata: Arc<SqliteSessionMetadata>,
+    metadata: Arc<DbSessionMetadata>,
     send_fn: SendToSessionFn,
     policy: Option<SessionAccessPolicy>,
 }
 
 impl SessionsSendTool {
-    pub fn new(metadata: Arc<SqliteSessionMetadata>, send_fn: SendToSessionFn) -> Self {
+    pub fn new(metadata: Arc<DbSessionMetadata>, send_fn: SendToSessionFn) -> Self {
         Self {
             metadata,
             send_fn,
@@ -522,13 +522,15 @@ mod tests {
         sqlx::query("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY)")
             .execute(&pool)
             .await?;
-        SqliteSessionMetadata::init(&pool).await?;
+        DbSessionMetadata::init(&moltis_db::Db::from(pool.clone())).await?;
         Ok(pool)
     }
 
     #[tokio::test]
     async fn sessions_list_filters_and_limits() -> TestResult<()> {
-        let metadata = Arc::new(SqliteSessionMetadata::new(test_pool().await?));
+        let metadata = Arc::new(DbSessionMetadata::new(moltis_db::Db::from(
+            test_pool().await?,
+        )));
         metadata.upsert("main", Some("Main".to_string())).await?;
         metadata
             .upsert("session:alpha", Some("Alpha".to_string()))
@@ -557,7 +559,9 @@ mod tests {
 
     #[tokio::test]
     async fn sessions_history_reads_paginated_messages() -> TestResult<()> {
-        let metadata = Arc::new(SqliteSessionMetadata::new(test_pool().await?));
+        let metadata = Arc::new(DbSessionMetadata::new(moltis_db::Db::from(
+            test_pool().await?,
+        )));
         metadata
             .upsert("session:history", Some("History".to_string()))
             .await?;
@@ -614,7 +618,9 @@ mod tests {
 
     #[tokio::test]
     async fn sessions_history_rejects_missing_session() -> TestResult<()> {
-        let metadata = Arc::new(SqliteSessionMetadata::new(test_pool().await?));
+        let metadata = Arc::new(DbSessionMetadata::new(moltis_db::Db::from(
+            test_pool().await?,
+        )));
         let tmp = tempfile::tempdir()?;
         let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()));
         let tool = SessionsHistoryTool::new(store, metadata);
@@ -633,7 +639,9 @@ mod tests {
 
     #[tokio::test]
     async fn sessions_search_finds_matches_and_excludes_current_by_default() -> TestResult<()> {
-        let metadata = Arc::new(SqliteSessionMetadata::new(test_pool().await?));
+        let metadata = Arc::new(DbSessionMetadata::new(moltis_db::Db::from(
+            test_pool().await?,
+        )));
         metadata
             .upsert("session:current", Some("Current".to_string()))
             .await?;
@@ -681,7 +689,9 @@ mod tests {
 
     #[tokio::test]
     async fn sessions_search_can_include_current_session() -> TestResult<()> {
-        let metadata = Arc::new(SqliteSessionMetadata::new(test_pool().await?));
+        let metadata = Arc::new(DbSessionMetadata::new(moltis_db::Db::from(
+            test_pool().await?,
+        )));
         metadata
             .upsert("session:current", Some("Current".to_string()))
             .await?;
@@ -714,7 +724,9 @@ mod tests {
 
     #[tokio::test]
     async fn sessions_send_calls_callback_and_wraps_context() -> TestResult<()> {
-        let metadata = Arc::new(SqliteSessionMetadata::new(test_pool().await?));
+        let metadata = Arc::new(DbSessionMetadata::new(moltis_db::Db::from(
+            test_pool().await?,
+        )));
         metadata
             .upsert("session:target", Some("Target".to_string()))
             .await?;
@@ -755,7 +767,9 @@ mod tests {
 
     #[tokio::test]
     async fn sessions_send_rejects_missing_target() -> TestResult<()> {
-        let metadata = Arc::new(SqliteSessionMetadata::new(test_pool().await?));
+        let metadata = Arc::new(DbSessionMetadata::new(moltis_db::Db::from(
+            test_pool().await?,
+        )));
         let send_fn: SendToSessionFn = Arc::new(move |_req| {
             Box::pin(async move {
                 Ok(serde_json::json!({
@@ -780,7 +794,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_filtered_by_key_prefix() -> TestResult<()> {
-        let metadata = Arc::new(SqliteSessionMetadata::new(test_pool().await?));
+        let metadata = Arc::new(DbSessionMetadata::new(moltis_db::Db::from(
+            test_pool().await?,
+        )));
         metadata
             .upsert("agent:scout:1", Some("Scout 1".into()))
             .await?;
@@ -804,7 +820,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_filtered_by_key_prefix() -> TestResult<()> {
-        let metadata = Arc::new(SqliteSessionMetadata::new(test_pool().await?));
+        let metadata = Arc::new(DbSessionMetadata::new(moltis_db::Db::from(
+            test_pool().await?,
+        )));
         metadata
             .upsert("agent:scout:1", Some("Scout 1".into()))
             .await?;
@@ -841,7 +859,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_denied_when_can_send_false() -> TestResult<()> {
-        let metadata = Arc::new(SqliteSessionMetadata::new(test_pool().await?));
+        let metadata = Arc::new(DbSessionMetadata::new(moltis_db::Db::from(
+            test_pool().await?,
+        )));
         metadata
             .upsert("session:target", Some("Target".into()))
             .await?;
@@ -868,7 +888,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_policy_allows_all() -> TestResult<()> {
-        let metadata = Arc::new(SqliteSessionMetadata::new(test_pool().await?));
+        let metadata = Arc::new(DbSessionMetadata::new(moltis_db::Db::from(
+            test_pool().await?,
+        )));
         metadata
             .upsert("agent:scout:1", Some("Scout 1".into()))
             .await?;

@@ -217,9 +217,12 @@ mod tests {
         .await
         .unwrap();
 
-        let vault = moltis_vault::Vault::with_cipher(pool, moltis_vault::XChaCha20Poly1305Cipher)
-            .await
-            .unwrap();
+        let vault = moltis_vault::Vault::with_cipher(
+            moltis_db::Db::from(pool),
+            moltis_vault::XChaCha20Poly1305Cipher,
+        )
+        .await
+        .unwrap();
         let password = generated_secret_value();
         vault.initialize(&password).await.unwrap();
         vault
