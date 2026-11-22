@@ -7577,6 +7577,7 @@ dependencies = [
  "metrics 0.24.3",
  "moltis-agents",
  "moltis-config",
+ "moltis-db",
  "moltis-memory",
  "moltis-qmd",
  "moltis-splitter",

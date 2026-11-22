@@ -861,7 +861,7 @@ fn peek_lines(content: &str, start: usize, max_lines: usize) -> String {
 #[cfg(all(test, feature = "builtin"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use {super::*, crate::store_sqlite::SqliteCodeIndexStore, async_trait::async_trait};
+    use {super::*, crate::store_db::DbCodeIndexStore, async_trait::async_trait};
 
     /// Mock embedder producing deterministic vectors from text content.
     struct MockEmbedder {
@@ -972,10 +972,12 @@ mod tests {
         dir
     }
 
-    async fn make_store() -> SqliteCodeIndexStore {
+    async fn make_store() -> DbCodeIndexStore {
         // Use in-memory SQLite to avoid temp-file lifetime issues
-        let pool = sqlx::SqlitePool::connect(":memory:").await.unwrap();
-        SqliteCodeIndexStore::from_pool(pool).await.unwrap()
+        let db = moltis_db::Db::connect(&moltis_db::DbOptions::sqlite(":memory:", 1))
+            .await
+            .unwrap();
+        DbCodeIndexStore::new(db).await.unwrap()
     }
 
     async fn setup_index() -> (CodeIndex, tempfile::TempDir, tempfile::TempDir) {
