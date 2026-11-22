@@ -6,7 +6,7 @@ use {
             maybe_deliver_cron_output, restore_saved_local_llm_models,
             validate_proxy_tls_configuration,
         },
-        init_channels, init_code_index, init_memory,
+        init_channels, init_code_index, init_cron, init_memory,
         prepared::{CoreStartupProfile, PreparedGatewayCore},
         workspace::{
             seed_default_workspace_markdown_files, sync_persona_into_preset,
@@ -433,38 +433,16 @@ pub async fn prepare_gateway_core_with_profile(
     log_startup_config_storage_diagnostics();
 
     log_persistence::spawn_startup_log_persistence(log_buffer.as_ref(), &data_dir);
-    let db_path = data_dir.join("moltis.db");
-    let db_pool: sqlx::SqlitePool = {
-        use {
-            sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous},
-            std::str::FromStr,
-        };
-        let db_exists = db_path.exists();
-        let mut options = SqliteConnectOptions::from_str(&format!("sqlite:{}", db_path.display()))
-            .expect("invalid database path")
-            .create_if_missing(true)
-            .foreign_keys(true)
-            .synchronous(SqliteSynchronous::Normal)
-            .busy_timeout(std::time::Duration::from_secs(5));
-        if !db_exists {
-            options = options.journal_mode(SqliteJournalMode::Wal);
-        }
-
-        let started = std::time::Instant::now();
-        let pool = sqlx::pool::PoolOptions::new()
-            .max_connections(config.server.db_pool_max_connections)
-            .connect_with(options)
-            .await
-            .expect("failed to open moltis.db");
-        debug!(
-            path = %db_path.display(),
-            db_exists,
-            elapsed_ms = started.elapsed().as_millis(),
-            "startup sqlite pool connected"
-        );
-        pool
-    };
-    let db = moltis_db::Db::from(db_pool);
+    // One deployment-wide database engine ([database]); a PostgreSQL failure
+    // exits here — a deployment never falls back to another engine.
+    let db_started = std::time::Instant::now();
+    let db = crate::database::open_database(&config, &data_dir)
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to open the deployment database: {error}"))?;
+    debug!(
+        elapsed_ms = db_started.elapsed().as_millis(),
+        "startup database connected"
+    );
 
     // Run database migrations from each crate in dependency order.
     moltis_projects::run_migrations(&db)
@@ -487,6 +465,23 @@ pub async fn prepare_gateway_core_with_profile(
     moltis_vault::run_migrations(&db)
         .await
         .expect("failed to run vault migrations");
+
+    // In PostgreSQL mode every store shares the one database, so every
+    // remaining schema (memory, code-index, connectors) must migrate here:
+    // a failed migration is a startup error, not a degraded feature. On
+    // SQLite those stores keep their own files and migrate on open.
+    if db.is_postgres() {
+        moltis_memory::schema::run_migrations(&db)
+            .await
+            .expect("failed to run memory migrations");
+        moltis_code_index::store_db::run_migrations(&db)
+            .await
+            .expect("failed to run code-index migrations");
+        #[cfg(feature = "connectors")]
+        moltis_connectors::run_migrations(&db)
+            .await
+            .expect("failed to run connectors migrations");
+    }
 
     moltis_skills::migration::migrate_plugins_to_skills(&data_dir).await;
     startup_mem_probe.checkpoint("sqlite.migrations.complete");
@@ -692,15 +687,10 @@ pub async fn prepare_gateway_core_with_profile(
         &project_store,
     )));
 
-    // Initialize cron service.
+    // Initialize cron service on the deployment database (with a one-time
+    // import of legacy JSON-file jobs).
     let cron_store: Arc<dyn moltis_cron::store::CronStore> =
-        match moltis_cron::store_file::FileStore::default_path() {
-            Ok(fs) => Arc::new(fs),
-            Err(e) => {
-                tracing::warn!("cron file store unavailable ({e}), using in-memory");
-                Arc::new(moltis_cron::store_memory::InMemoryStore::new())
-            },
-        };
+        init_cron::init_cron_store(db.clone(), &data_dir).await;
 
     let sys_state = Arc::clone(&deferred_state);
     let on_system_event: moltis_cron::service::SystemEventFn = Arc::new(move |text| {
@@ -1333,7 +1323,7 @@ pub async fn prepare_gateway_core_with_profile(
     startup_mem_probe.checkpoint("memory_manager.initialized");
 
     // ── Code index initialization ──────────────────────────────────────
-    let code_index = init_code_index::init_code_index(&data_dir, &config).await;
+    let code_index = init_code_index::init_code_index(&data_dir, &config, &db).await;
     startup_mem_probe.checkpoint("code_index.initialized");
 
     post_state::complete_startup(post_state::PostStateInputs {

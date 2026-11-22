@@ -29,6 +29,7 @@ use tracing::info;
 pub(crate) async fn init_code_index(
     data_dir: &std::path::Path,
     config: &moltis_config::MoltisConfig,
+    db: &moltis_db::Db,
 ) -> Arc<moltis_code_index::CodeIndex> {
     // Build CodeIndexConfig from TOML, then overlay data_dir.
     let mut code_index_config = moltis_code_index::CodeIndexConfig::from(&config.code_index);
@@ -81,10 +82,19 @@ pub(crate) async fn init_code_index(
             .as_deref()
             .unwrap_or(default_index_root.as_path());
         let db_path = index_root.join("index.db");
-        let opened = open_builtin_store(&db_path).await;
+        // PostgreSQL shares the deployment database; SQLite keeps today's
+        // per-index index.db file.
+        let opened: anyhow::Result<moltis_code_index::store_db::DbCodeIndexStore> =
+            if db.is_postgres() {
+                moltis_code_index::store_db::DbCodeIndexStore::new(db.clone())
+                    .await
+                    .map_err(anyhow::Error::new)
+            } else {
+                open_builtin_store(&db_path).await
+            };
         match opened {
             Ok(store) => {
-                info!(path = %db_path.display(), "code-index: builtin SQLite backend initialized");
+                info!(path = %db_path.display(), "code-index: builtin backend initialized");
                 return Arc::new(moltis_code_index::CodeIndex::new_builtin(
                     code_index_config,
                     Box::new(store),

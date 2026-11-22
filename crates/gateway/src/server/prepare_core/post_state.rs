@@ -238,6 +238,7 @@ pub(super) async fn complete_startup(
         crate::connectors::ConnectorManager::open(
             &data_dir,
             config.server.db_pool_max_connections,
+            &db,
             #[cfg(feature = "vault")]
             vault.clone(),
         )

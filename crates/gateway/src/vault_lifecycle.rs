@@ -218,7 +218,7 @@ pub async fn disable_vault_and_decrypt_all(
         webhooks: decrypt_webhooks(vault, db).await?,
         provider_keys: decrypt_provider_keys(vault).await?,
         #[cfg(feature = "connectors")]
-        connectors: decrypt_connector_credentials(vault, connector_manager).await?,
+        connectors: decrypt_connector_credentials(vault, db, connector_manager).await?,
     };
 
     moltis_config::update_config(|config| {
@@ -234,6 +234,7 @@ pub async fn disable_vault_and_decrypt_all(
 #[cfg(feature = "connectors")]
 async fn decrypt_connector_credentials(
     vault: &moltis_vault::Vault,
+    db: &moltis_db::Db,
     connector_manager: Option<&crate::connectors::ConnectorManager>,
 ) -> anyhow::Result<usize> {
     if let Some(manager) = connector_manager {
@@ -243,12 +244,13 @@ async fn decrypt_connector_credentials(
             .map_err(anyhow::Error::new)
             .context("failed to decrypt connector credentials");
     }
-    // connectors.db lives in the data dir. The old discovery ran
+    // The connector store lives in the data dir on SQLite and in the shared
+    // deployment database on PostgreSQL. The old discovery ran
     // PRAGMA database_list to derive that directory from the main SQLite
     // file's path — SQLite-only SQL, and meaningless for a PostgreSQL
     // gateway database. moltis_config::data_dir() is the same location.
     let data_dir = moltis_config::data_dir();
-    crate::connectors::ConnectorManager::decrypt_all_credentials_at(&data_dir, vault)
+    crate::connectors::ConnectorManager::decrypt_all_credentials_at(&data_dir, db, vault)
         .await
         .map_err(anyhow::Error::new)
         .context("failed to decrypt connector credentials")
@@ -855,6 +857,7 @@ mod tests {
             let manager = crate::connectors::ConnectorManager::open(
                 config_dir.path(),
                 1,
+                &moltis_db::Db::from(pool.clone()),
                 Some(Arc::clone(&vault)),
             )
             .await
