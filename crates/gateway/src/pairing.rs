@@ -190,7 +190,9 @@ impl PairingStore {
         self.list_pending_at(&now).await
     }
 
-    async fn list_pending_at(&self, now: &str) -> Result<Vec<PairRequest>> {
+    /// pub(crate) so the PostgreSQL smoke tests can pin the expiry-dialect
+    /// semantics with a fixed `now` (mirrors the SQLite test of the same name).
+    pub(crate) async fn list_pending_at(&self, now: &str) -> Result<Vec<PairRequest>> {
         let rows = fetch_all!(
             &self.db,
             (String, String, Option<String>, String, Option<String>, String, String, String),
@@ -732,7 +734,9 @@ impl PairingStore {
         self.evict_expired_at(&now).await
     }
 
-    async fn evict_expired_at(&self, now: &str) -> Result<u64> {
+    /// pub(crate) for the PostgreSQL expiry-semantics smoke test, like
+    /// [`PairingStore::list_pending_at`].
+    pub(crate) async fn evict_expired_at(&self, now: &str) -> Result<u64> {
         let affected = execute!(
             &self.db,
             format!(

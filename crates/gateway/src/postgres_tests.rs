@@ -1,8 +1,10 @@
 //! PostgreSQL schema and CRUD smoke tests for the gateway stores.
 //!
-//! These do not mirror the SQLite test suite (out of scope): they prove that
-//! `migrations_pg/` creates the gateway schema and that the ported stores do
-//! round-trips against a real PostgreSQL server. Every test locks
+//! These do not mirror the SQLite test suite (a full mirror is out of scope):
+//! they prove that `migrations_pg/` creates the gateway schema and that the
+//! ported stores do round-trips against a real PostgreSQL server — plus one
+//! deliberate mirror of the pinned pairing expiry-semantics test, because the
+//! expiry dialect match is the riskiest decision in the port. Every test locks
 //! [`test_support::pg_lock`] and resets the schema first, so the tests may
 //! share one database.
 
@@ -204,4 +206,67 @@ async fn postgres_message_log_round_trips_entries_and_senders() {
     assert!(u1.last_access_granted);
     let u2 = senders.iter().find(|s| s.peer_id == "u2").expect("u2");
     assert!(!u2.last_access_granted);
+}
+
+/// Mirror of the SQLite test
+/// `expiry_comparison_handles_fractional_and_legacy_timestamps`. The pinned
+/// outcomes guard the riskiest dialect decision in the port: the Postgres
+/// expiry predicate
+/// `CASE WHEN pg_input_is_valid(expires_at,'timestamp') THEN expires_at::timestamp END …`
+/// must match SQLite's `julianday` comparison for fractional RFC3339, legacy
+/// naive, and malformed text (the last stays pending and is never evicted).
+#[tokio::test]
+async fn postgres_expiry_comparison_handles_fractional_and_legacy_timestamps() {
+    let (db, _guard) = pg_db!();
+    let store = crate::pairing::PairingStore::new(db.clone());
+
+    let expiries = [
+        ("exact-second", "2030-01-01T00:00:00Z"),
+        ("fractional", "2030-01-01T00:00:00.900Z"),
+        ("legacy", "2030-01-01 00:00:01"),
+        ("malformed", "not-a-datetime"),
+    ];
+    let mut requests = Vec::new();
+    for (device_id, expires_at) in expiries {
+        let request = store
+            .request_pair(device_id, None, "test", None)
+            .await
+            .expect("request_pair");
+        moltis_db::execute!(
+            &db,
+            "UPDATE pair_requests SET expires_at = ? WHERE id = ?",
+            expires_at,
+            &request.id,
+        )
+        .expect("overwrite expires_at");
+        requests.push(request);
+    }
+
+    let now = "2030-01-01T00:00:00.500Z";
+    let pending = store.list_pending_at(now).await.expect("list_pending_at");
+    let mut pending_devices: Vec<_> = pending
+        .iter()
+        .map(|request| request.device_id.as_str())
+        .collect();
+    pending_devices.sort_unstable();
+    assert_eq!(pending_devices, ["fractional", "legacy"]);
+
+    assert_eq!(
+        store.evict_expired_at(now).await.expect("evict_expired_at"),
+        1
+    );
+    assert_eq!(
+        store
+            .get_pair_status(&requests[0].id)
+            .await
+            .expect("status of exact-second"),
+        Some(crate::pairing::PairStatus::Expired)
+    );
+    assert_eq!(
+        store
+            .get_pair_status(&requests[3].id)
+            .await
+            .expect("status of malformed"),
+        Some(crate::pairing::PairStatus::Pending)
+    );
 }
