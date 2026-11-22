@@ -54,11 +54,11 @@ impl TryFrom<ChannelRow> for StoredChannel {
 }
 
 /// Database-backed channel store (SQLite or PostgreSQL).
-pub struct SqliteChannelStore {
+pub struct DbChannelStore {
     db: Db,
 }
 
-impl SqliteChannelStore {
+impl DbChannelStore {
     pub fn new(db: Db) -> Self {
         Self { db }
     }
@@ -230,7 +230,7 @@ impl ChannelStore for VaultChannelStore {
 }
 
 #[async_trait]
-impl ChannelStore for SqliteChannelStore {
+impl ChannelStore for DbChannelStore {
     async fn list(&self) -> ChannelResult<Vec<StoredChannel>> {
         let rows = fetch_all!(
             &self.db,
@@ -299,9 +299,7 @@ mod tests {
 
     async fn test_pool() -> sqlx::SqlitePool {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
-        SqliteChannelStore::init(&Db::from(pool.clone()))
-            .await
-            .unwrap();
+        DbChannelStore::init(&Db::from(pool.clone())).await.unwrap();
         pool
     }
 
@@ -338,7 +336,7 @@ mod tests {
     #[tokio::test]
     async fn test_upsert_and_get() {
         let pool = test_pool().await;
-        let store = SqliteChannelStore::new(Db::from(pool));
+        let store = DbChannelStore::new(Db::from(pool));
 
         let ch = StoredChannel {
             account_id: "bot1".into(),
@@ -357,7 +355,7 @@ mod tests {
     #[tokio::test]
     async fn test_upsert_updates_existing() {
         let pool = test_pool().await;
-        let store = SqliteChannelStore::new(Db::from(pool));
+        let store = DbChannelStore::new(Db::from(pool));
         let t = now();
 
         store
@@ -392,7 +390,7 @@ mod tests {
     #[tokio::test]
     async fn test_delete() {
         let pool = test_pool().await;
-        let store = SqliteChannelStore::new(Db::from(pool));
+        let store = DbChannelStore::new(Db::from(pool));
 
         store
             .upsert(StoredChannel {
@@ -412,7 +410,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_order() {
         let pool = test_pool().await;
-        let store = SqliteChannelStore::new(Db::from(pool));
+        let store = DbChannelStore::new(Db::from(pool));
 
         store
             .upsert(StoredChannel {
@@ -445,7 +443,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_nonexistent() {
         let pool = test_pool().await;
-        let store = SqliteChannelStore::new(Db::from(pool));
+        let store = DbChannelStore::new(Db::from(pool));
         assert!(store.get("telegram", "nope").await.unwrap().is_none());
     }
 
@@ -456,8 +454,7 @@ mod tests {
         crate::vault_lifecycle::set_vault_encryption_runtime_enabled(true);
         let pool = test_pool().await;
         let vault = test_vault(pool.clone()).await;
-        let inner: Arc<dyn ChannelStore> =
-            Arc::new(SqliteChannelStore::new(Db::from(pool.clone())));
+        let inner: Arc<dyn ChannelStore> = Arc::new(DbChannelStore::new(Db::from(pool.clone())));
         let store = VaultChannelStore::new(inner, Some(vault));
         let timestamp = now();
 
@@ -505,8 +502,7 @@ mod tests {
         )
         .unwrap();
         let vault = Arc::new(moltis_vault::Vault::new(pool.clone()).await.unwrap());
-        let inner: Arc<dyn ChannelStore> =
-            Arc::new(SqliteChannelStore::new(Db::from(pool.clone())));
+        let inner: Arc<dyn ChannelStore> = Arc::new(DbChannelStore::new(Db::from(pool.clone())));
         let store = VaultChannelStore::new(inner, Some(vault));
         let timestamp = now();
 
@@ -538,7 +534,7 @@ mod tests {
         let pool = test_pool().await;
         let vault = test_vault(pool.clone()).await;
         vault.seal().await;
-        let inner: Arc<dyn ChannelStore> = Arc::new(SqliteChannelStore::new(Db::from(pool)));
+        let inner: Arc<dyn ChannelStore> = Arc::new(DbChannelStore::new(Db::from(pool)));
         let store = VaultChannelStore::new(inner, Some(vault));
         let timestamp = now();
 

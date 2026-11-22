@@ -20,11 +20,11 @@ fn db_error(
 }
 
 /// Database-backed [`TraceLinkStore`] (SQLite or PostgreSQL).
-pub struct SqliteTraceLinkStore {
+pub struct DbTraceLinkStore {
     db: Db,
 }
 
-impl SqliteTraceLinkStore {
+impl DbTraceLinkStore {
     /// Build a store over `db`.
     #[must_use]
     pub const fn new(db: Db) -> Self {
@@ -44,7 +44,7 @@ impl SqliteTraceLinkStore {
 }
 
 #[async_trait]
-impl TraceLinkStore for SqliteTraceLinkStore {
+impl TraceLinkStore for DbTraceLinkStore {
     async fn link(&self, link: TraceLink) -> ChannelResult<()> {
         // Replace rather than ignore: an edited or resent reply keeps the same
         // message id but belongs to the newer turn, and a reaction on it should
@@ -117,11 +117,11 @@ impl TraceLinkStore for SqliteTraceLinkStore {
 mod tests {
     use super::*;
 
-    async fn store() -> SqliteTraceLinkStore {
+    async fn store() -> DbTraceLinkStore {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
         let db = Db::from(pool);
-        SqliteTraceLinkStore::init(&db).await.unwrap();
-        SqliteTraceLinkStore::new(db)
+        DbTraceLinkStore::init(&db).await.unwrap();
+        DbTraceLinkStore::new(db)
     }
 
     fn link(message_id: &str, trace_id: &str) -> TraceLink {

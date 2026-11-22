@@ -98,10 +98,7 @@ impl GatewayOnboardingService {
     }
 
     #[cfg(feature = "openclaw-import")]
-    async fn sync_imported_sessions_to_sqlite(
-        &self,
-        data_dir: &std::path::Path,
-    ) -> Result<(), String> {
+    async fn sync_imported_sessions_to_db(&self, data_dir: &std::path::Path) -> Result<(), String> {
         let metadata_path = data_dir.join("sessions").join("metadata.json");
         if !metadata_path.is_file() {
             return Ok(());
@@ -358,7 +355,7 @@ impl OnboardingService for GatewayOnboardingService {
         }
 
         if selection.sessions
-            && let Err(e) = self.sync_imported_sessions_to_sqlite(&data_dir).await
+            && let Err(e) = self.sync_imported_sessions_to_db(&data_dir).await
         {
             tracing::warn!(error = %e, "openclaw import: failed to sync sessions to sqlite metadata");
         }
@@ -779,7 +776,7 @@ mod tests {
         );
 
         service
-            .sync_imported_sessions_to_sqlite(data_dir)
+            .sync_imported_sessions_to_db(data_dir)
             .await
             .expect("sync should succeed");
 

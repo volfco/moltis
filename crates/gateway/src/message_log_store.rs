@@ -18,11 +18,11 @@ fn channel_db_error(
 }
 
 /// Database-backed message log (SQLite or PostgreSQL).
-pub struct SqliteMessageLog {
+pub struct DbMessageLog {
     db: Db,
 }
 
-impl SqliteMessageLog {
+impl DbMessageLog {
     pub fn new(db: Db) -> Self {
         Self { db }
     }
@@ -40,7 +40,7 @@ impl SqliteMessageLog {
 }
 
 #[async_trait]
-impl MessageLog for SqliteMessageLog {
+impl MessageLog for DbMessageLog {
     async fn log(&self, entry: MessageLogEntry) -> ChannelResult<()> {
         execute!(
             &self.db,
@@ -157,7 +157,7 @@ mod tests {
     async fn test_db() -> Db {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
         let db = Db::from(pool);
-        SqliteMessageLog::init(&db).await.unwrap();
+        DbMessageLog::init(&db).await.unwrap();
         db
     }
 
@@ -180,7 +180,7 @@ mod tests {
     #[tokio::test]
     async fn log_and_list() {
         let db = test_db().await;
-        let store = SqliteMessageLog::new(db);
+        let store = DbMessageLog::new(db);
 
         store
             .log(sample_entry("bot1", "user1", true))
@@ -205,7 +205,7 @@ mod tests {
     #[tokio::test]
     async fn list_respects_limit() {
         let db = test_db().await;
-        let store = SqliteMessageLog::new(db);
+        let store = DbMessageLog::new(db);
 
         for i in 0..5 {
             let mut e = sample_entry("bot1", "user1", true);
@@ -222,7 +222,7 @@ mod tests {
     #[tokio::test]
     async fn unique_senders_groups() {
         let db = test_db().await;
-        let store = SqliteMessageLog::new(db);
+        let store = DbMessageLog::new(db);
 
         store
             .log(sample_entry("bot1", "user1", true))
@@ -246,7 +246,7 @@ mod tests {
     #[tokio::test]
     async fn unique_senders_includes_denied_matrix_senders() {
         let db = test_db().await;
-        let store = SqliteMessageLog::new(db);
+        let store = DbMessageLog::new(db);
 
         let entry = MessageLogEntry {
             id: 0,
