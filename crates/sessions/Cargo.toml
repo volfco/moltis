@@ -12,6 +12,7 @@ fd-lock         = { workspace = true }
 hex             = { workspace = true }
 libc            = { workspace = true }
 moltis-common   = { workspace = true }
+moltis-db       = { workspace = true }
 moltis-metrics  = { optional = true, workspace = true }
 moltis-protocol = { workspace = true }
 serde           = { workspace = true }

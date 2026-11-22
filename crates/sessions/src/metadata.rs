@@ -6,7 +6,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use serde::{Deserialize, Serialize};
+use {
+    moltis_db::{Db, execute, fetch_all, fetch_optional},
+    serde::{Deserialize, Serialize},
+};
 
 use crate::Result;
 
@@ -314,11 +317,11 @@ impl SessionMetadata {
     }
 }
 
-// ── SQLite-backed session metadata ──────────────────────────────────
+// ── Database-backed session metadata ────────────────────────────────
 
-/// SQLite-backed session metadata store.
-pub struct SqliteSessionMetadata {
-    pool: sqlx::SqlitePool,
+/// Database-backed session metadata store (SQLite or PostgreSQL).
+pub struct DbSessionMetadata {
+    db: Db,
     event_bus: Option<crate::session_events::SessionEventBus>,
 }
 
@@ -330,18 +333,18 @@ struct SessionRow {
     model: Option<String>,
     created_at: i64,
     updated_at: i64,
-    message_count: i32,
-    last_seen_message_count: i32,
+    message_count: i64,
+    last_seen_message_count: i64,
     project_id: Option<String>,
-    archived: i32,
+    archived: i64,
     worktree_branch: Option<String>,
-    sandbox_enabled: Option<i32>,
+    sandbox_enabled: Option<i64>,
     sandbox_image: Option<String>,
     sandbox_backend: Option<String>,
     channel_binding: Option<String>,
     parent_session_key: Option<String>,
-    fork_point: Option<i32>,
-    mcp_disabled: Option<i32>,
+    fork_point: Option<i64>,
+    mcp_disabled: Option<i64>,
     preview: Option<String>,
     agent_id: Option<String>,
     mode_id: Option<String>,
@@ -386,21 +389,18 @@ impl From<SessionRow> for SessionEntry {
     }
 }
 
-impl SqliteSessionMetadata {
-    pub fn new(pool: sqlx::SqlitePool) -> Self {
+impl DbSessionMetadata {
+    pub fn new(db: Db) -> Self {
         Self {
-            pool,
+            db,
             event_bus: None,
         }
     }
 
     /// Create with an event bus that auto-publishes on mutations.
-    pub fn with_event_bus(
-        pool: sqlx::SqlitePool,
-        bus: crate::session_events::SessionEventBus,
-    ) -> Self {
+    pub fn with_event_bus(db: Db, bus: crate::session_events::SessionEventBus) -> Self {
         Self {
-            pool,
+            db,
             event_bus: Some(bus),
         }
     }
@@ -417,72 +417,22 @@ impl SqliteSessionMetadata {
         }
     }
 
-    /// Initialize the sessions table schema.
+    /// Initialize the sessions schema by running the crate migrations.
     ///
-    /// **Deprecated**: Schema is now managed by sqlx migrations in the gateway crate.
-    /// This method is retained for tests that use in-memory databases.
+    /// **Deprecated**: Schema is managed by sqlx migrations. This method is
+    /// retained for tests that use in-memory databases.
     #[doc(hidden)]
-    pub async fn init(pool: &sqlx::SqlitePool) -> Result<()> {
-        sqlx::query(
-            r#"CREATE TABLE IF NOT EXISTS sessions (
-                key             TEXT    PRIMARY KEY,
-                id              TEXT    NOT NULL,
-                label           TEXT,
-                model           TEXT,
-                created_at      INTEGER NOT NULL,
-                updated_at      INTEGER NOT NULL,
-                message_count   INTEGER NOT NULL DEFAULT 0,
-                last_seen_message_count INTEGER NOT NULL DEFAULT 0,
-                project_id      TEXT    REFERENCES projects(id) ON DELETE SET NULL,
-                archived        INTEGER NOT NULL DEFAULT 0,
-                worktree_branch TEXT,
-                sandbox_enabled     INTEGER,
-                sandbox_image       TEXT,
-                sandbox_backend     TEXT,
-                channel_binding     TEXT,
-                parent_session_key  TEXT,
-                fork_point          INTEGER,
-                mcp_disabled        INTEGER,
-                preview             TEXT,
-                agent_id            TEXT,
-                mode_id             TEXT,
-                node_id             TEXT,
-                external_agent_kind TEXT,
-                external_session_id TEXT,
-                version             INTEGER NOT NULL DEFAULT 0
-            )"#,
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_sessions_created_at ON sessions(created_at)")
-            .execute(pool)
-            .await
-            .ok();
-
-        sqlx::query(
-            r#"CREATE TABLE IF NOT EXISTS channel_sessions (
-                channel_type TEXT    NOT NULL,
-                account_id   TEXT    NOT NULL,
-                chat_id      TEXT    NOT NULL,
-                thread_id    TEXT    NOT NULL DEFAULT '',
-                session_key  TEXT    NOT NULL,
-                updated_at   INTEGER NOT NULL,
-                PRIMARY KEY (channel_type, account_id, chat_id, thread_id)
-            )"#,
-        )
-        .execute(pool)
-        .await?;
-
-        Ok(())
+    pub async fn init(db: &Db) -> Result<()> {
+        crate::run_migrations(db).await
     }
 
     pub async fn get(&self, key: &str) -> Option<SessionEntry> {
-        match sqlx::query_as::<_, SessionRow>("SELECT * FROM sessions WHERE key = ?")
-            .bind(key)
-            .fetch_optional(&self.pool)
-            .await
-        {
+        match fetch_optional!(
+            &self.db,
+            SessionRow,
+            "SELECT * FROM sessions WHERE key = ?",
+            key
+        ) {
             Ok(row) => row.map(Into::into),
             Err(e) => {
                 tracing::error!("sessions.get failed: {e}");
@@ -499,20 +449,19 @@ impl SqliteSessionMetadata {
     ) -> std::result::Result<SessionEntry, sqlx::Error> {
         let now = now_ms() as i64;
         let id = uuid::Uuid::new_v4().to_string();
-        sqlx::query(
+        execute!(
+            &self.db,
             r#"INSERT INTO sessions (key, id, label, created_at, updated_at, version)
                VALUES (?, ?, ?, ?, ?, 0)
                ON CONFLICT(key) DO UPDATE SET
                  label = COALESCE(excluded.label, sessions.label),
                  version = sessions.version + 1"#,
-        )
-        .bind(key)
-        .bind(&id)
-        .bind(&label)
-        .bind(now)
-        .bind(now)
-        .execute(&self.pool)
-        .await?;
+            key,
+            &id,
+            &label,
+            now,
+            now
+        )?;
         let entry = self
             .get(key)
             .await
@@ -532,14 +481,13 @@ impl SqliteSessionMetadata {
 
     pub async fn set_model(&self, key: &str, model: Option<String>) {
         let now = now_ms() as i64;
-        sqlx::query(
+        execute!(
+            &self.db,
             "UPDATE sessions SET model = ?, updated_at = ?, version = version + 1 WHERE key = ?",
+            &model,
+            now,
+            key
         )
-        .bind(&model)
-        .bind(now)
-        .bind(key)
-        .execute(&self.pool)
-        .await
         .ok();
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
@@ -554,15 +502,15 @@ impl SqliteSessionMetadata {
     ) {
         let now = now_ms() as i64;
         let kind = kind.map(|kind| kind.as_str().to_string());
-        sqlx::query(
+        execute!(
+            &self.db,
             "UPDATE sessions SET external_agent_kind = ?, external_session_id = ?, updated_at = ?, version = version + 1 WHERE key = ?",
+            &kind,
+            &external_session_id,
+            now,
+            key
         )
-        .bind(&kind)
-        .bind(&external_session_id)
-        .bind(now)
-        .bind(key)
-        .execute(&self.pool)
-        .await
+
         .ok();
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
@@ -571,15 +519,15 @@ impl SqliteSessionMetadata {
 
     pub async fn touch(&self, key: &str, message_count: u32) {
         let now = now_ms() as i64;
-        sqlx::query(
+        execute!(
+            &self.db,
             "UPDATE sessions SET message_count = ?, updated_at = ?, version = version + 1 WHERE key = ?",
+            message_count as i64,
+            now,
+            key
         )
-        .bind(message_count as i32)
-        .bind(now)
-        .bind(key)
-            .execute(&self.pool)
-            .await
-            .ok();
+
+        .ok();
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
         });
@@ -594,27 +542,28 @@ impl SqliteSessionMetadata {
         message_count: u32,
         last_seen_message_count: u32,
     ) {
-        sqlx::query(
+        execute!(
+            &self.db,
             "UPDATE sessions SET created_at = ?, updated_at = ?, message_count = ?, last_seen_message_count = ?, version = version + 1 WHERE key = ?",
+            created_at as i64,
+            updated_at as i64,
+            message_count as i64,
+            last_seen_message_count as i64,
+            key
         )
-        .bind(created_at as i64)
-        .bind(updated_at as i64)
-        .bind(message_count as i32)
-        .bind(last_seen_message_count as i32)
-        .bind(key)
-        .execute(&self.pool)
-        .await
+
         .ok();
     }
 
     /// Store a short preview of the first user message for sidebar display.
     pub async fn set_preview(&self, key: &str, preview: Option<&str>) {
-        sqlx::query("UPDATE sessions SET preview = ?, version = version + 1 WHERE key = ?")
-            .bind(preview)
-            .bind(key)
-            .execute(&self.pool)
-            .await
-            .ok();
+        execute!(
+            &self.db,
+            "UPDATE sessions SET preview = ?, version = version + 1 WHERE key = ?",
+            preview,
+            key
+        )
+        .ok();
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
         });
@@ -623,13 +572,13 @@ impl SqliteSessionMetadata {
     /// Mark a session as "seen" by setting `last_seen_message_count` to the
     /// current `message_count`.
     pub async fn mark_seen(&self, key: &str) {
-        sqlx::query(
+        execute!(
+            &self.db,
             "UPDATE sessions SET last_seen_message_count = message_count, version = version + 1 WHERE key = ?",
+            key
         )
-        .bind(key)
-            .execute(&self.pool)
-            .await
-            .ok();
+
+        .ok();
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
         });
@@ -637,15 +586,15 @@ impl SqliteSessionMetadata {
 
     pub async fn set_project_id(&self, key: &str, project_id: Option<String>) {
         let now = now_ms() as i64;
-        sqlx::query(
+        execute!(
+            &self.db,
             "UPDATE sessions SET project_id = ?, updated_at = ?, version = version + 1 WHERE key = ?",
+            &project_id,
+            now,
+            key
         )
-        .bind(&project_id)
-        .bind(now)
-        .bind(key)
-            .execute(&self.pool)
-            .await
-            .ok();
+
+        .ok();
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
         });
@@ -653,19 +602,18 @@ impl SqliteSessionMetadata {
 
     pub async fn set_archived(&self, key: &str, archived: bool) {
         let now = now_ms() as i64;
-        let val = if archived {
+        let val: i64 = if archived {
             1
         } else {
             0
         };
-        sqlx::query(
+        execute!(
+            &self.db,
             "UPDATE sessions SET archived = ?, updated_at = ?, version = version + 1 WHERE key = ?",
+            val,
+            now,
+            key
         )
-        .bind(val)
-        .bind(now)
-        .bind(key)
-        .execute(&self.pool)
-        .await
         .ok();
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
@@ -674,15 +622,15 @@ impl SqliteSessionMetadata {
 
     pub async fn set_sandbox_image(&self, key: &str, image: Option<String>) {
         let now = now_ms() as i64;
-        sqlx::query(
+        execute!(
+            &self.db,
             "UPDATE sessions SET sandbox_image = ?, updated_at = ?, version = version + 1 WHERE key = ?",
+            &image,
+            now,
+            key
         )
-        .bind(&image)
-        .bind(now)
-        .bind(key)
-            .execute(&self.pool)
-            .await
-            .ok();
+
+        .ok();
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
         });
@@ -690,16 +638,16 @@ impl SqliteSessionMetadata {
 
     pub async fn set_sandbox_enabled(&self, key: &str, enabled: Option<bool>) {
         let now = now_ms() as i64;
-        let val = enabled.map(|b| b as i32);
-        sqlx::query(
+        let val = enabled.map(i64::from);
+        execute!(
+            &self.db,
             "UPDATE sessions SET sandbox_enabled = ?, updated_at = ?, version = version + 1 WHERE key = ?",
+            val,
+            now,
+            key
         )
-        .bind(val)
-        .bind(now)
-        .bind(key)
-            .execute(&self.pool)
-            .await
-            .ok();
+
+        .ok();
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
         });
@@ -707,15 +655,15 @@ impl SqliteSessionMetadata {
 
     pub async fn set_sandbox_backend(&self, key: &str, backend: Option<String>) {
         let now = now_ms() as i64;
-        sqlx::query(
+        execute!(
+            &self.db,
             "UPDATE sessions SET sandbox_backend = ?, updated_at = ?, version = version + 1 WHERE key = ?",
+            &backend,
+            now,
+            key
         )
-        .bind(&backend)
-        .bind(now)
-        .bind(key)
-            .execute(&self.pool)
-            .await
-            .ok();
+
+        .ok();
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
         });
@@ -723,15 +671,15 @@ impl SqliteSessionMetadata {
 
     pub async fn set_worktree_branch(&self, key: &str, branch: Option<String>) {
         let now = now_ms() as i64;
-        sqlx::query(
+        execute!(
+            &self.db,
             "UPDATE sessions SET worktree_branch = ?, updated_at = ?, version = version + 1 WHERE key = ?",
+            &branch,
+            now,
+            key
         )
-        .bind(&branch)
-        .bind(now)
-        .bind(key)
-            .execute(&self.pool)
-            .await
-            .ok();
+
+        .ok();
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
         });
@@ -739,16 +687,16 @@ impl SqliteSessionMetadata {
 
     pub async fn set_mcp_disabled(&self, key: &str, disabled: Option<bool>) {
         let now = now_ms() as i64;
-        let val = disabled.map(|b| b as i32);
-        sqlx::query(
+        let val = disabled.map(i64::from);
+        execute!(
+            &self.db,
             "UPDATE sessions SET mcp_disabled = ?, updated_at = ?, version = version + 1 WHERE key = ?",
+            val,
+            now,
+            key
         )
-        .bind(val)
-        .bind(now)
-        .bind(key)
-            .execute(&self.pool)
-            .await
-            .ok();
+
+        .ok();
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
         });
@@ -756,15 +704,15 @@ impl SqliteSessionMetadata {
 
     pub async fn set_channel_binding(&self, key: &str, binding: Option<String>) {
         let now = now_ms() as i64;
-        sqlx::query(
+        execute!(
+            &self.db,
             "UPDATE sessions SET channel_binding = ?, updated_at = ?, version = version + 1 WHERE key = ?",
+            &binding,
+            now,
+            key
         )
-        .bind(&binding)
-        .bind(now)
-        .bind(key)
-            .execute(&self.pool)
-            .await
-            .ok();
+
+        .ok();
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
         });
@@ -773,14 +721,13 @@ impl SqliteSessionMetadata {
     /// Assign (or unassign) a session to an agent persona.
     pub async fn set_agent_id(&self, key: &str, agent_id: Option<&str>) -> Result<()> {
         let now = now_ms() as i64;
-        sqlx::query(
+        execute!(
+            &self.db,
             "UPDATE sessions SET agent_id = ?, updated_at = ?, version = version + 1 WHERE key = ?",
-        )
-        .bind(agent_id)
-        .bind(now)
-        .bind(key)
-        .execute(&self.pool)
-        .await?;
+            agent_id,
+            now,
+            key
+        )?;
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
         });
@@ -790,14 +737,13 @@ impl SqliteSessionMetadata {
     /// Assign (or clear) a session mode.
     pub async fn set_mode_id(&self, key: &str, mode_id: Option<&str>) -> Result<()> {
         let now = now_ms() as i64;
-        sqlx::query(
+        execute!(
+            &self.db,
             "UPDATE sessions SET mode_id = ?, updated_at = ?, version = version + 1 WHERE key = ?",
-        )
-        .bind(mode_id)
-        .bind(now)
-        .bind(key)
-        .execute(&self.pool)
-        .await?;
+            mode_id,
+            now,
+            key
+        )?;
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
         });
@@ -807,14 +753,13 @@ impl SqliteSessionMetadata {
     /// Assign (or unassign) a session to a remote node.
     pub async fn set_node_id(&self, key: &str, node_id: Option<&str>) -> Result<()> {
         let now = now_ms() as i64;
-        sqlx::query(
+        execute!(
+            &self.db,
             "UPDATE sessions SET node_id = ?, updated_at = ?, version = version + 1 WHERE key = ?",
-        )
-        .bind(node_id)
-        .bind(now)
-        .bind(key)
-        .execute(&self.pool)
-        .await?;
+            node_id,
+            now,
+            key
+        )?;
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
         });
@@ -823,37 +768,38 @@ impl SqliteSessionMetadata {
 
     /// List all sessions belonging to a given agent.
     pub async fn list_by_agent_id(&self, agent_id: &str) -> Result<Vec<SessionEntry>> {
-        let rows = sqlx::query_as::<_, SessionRow>(
+        let rows = fetch_all!(
+            &self.db,
+            SessionRow,
             "SELECT * FROM sessions WHERE agent_id = ? ORDER BY created_at ASC",
-        )
-        .bind(agent_id)
-        .fetch_all(&self.pool)
-        .await?;
+            agent_id
+        )?;
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
     /// Delete all sessions belonging to a given agent (cascade).
     pub async fn delete_by_agent_id(&self, agent_id: &str) -> Result<u64> {
-        let result = sqlx::query("DELETE FROM sessions WHERE agent_id = ?")
-            .bind(agent_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(result.rows_affected())
+        let count = execute!(
+            &self.db,
+            "DELETE FROM sessions WHERE agent_id = ?",
+            agent_id
+        )?;
+        Ok(count)
     }
 
     /// Set the parent session key and fork point for a branched session.
     pub async fn set_parent(&self, key: &str, parent_key: Option<String>, fork_point: Option<u32>) {
         let now = now_ms() as i64;
-        let fp = fork_point.map(|v| v as i32);
-        sqlx::query(
+        let fp = fork_point.map(i64::from);
+        execute!(
+            &self.db,
             "UPDATE sessions SET parent_session_key = ?, fork_point = ?, updated_at = ?, version = version + 1 WHERE key = ?",
+            &parent_key,
+            fp,
+            now,
+            key
         )
-        .bind(&parent_key)
-        .bind(fp)
-        .bind(now)
-        .bind(key)
-        .execute(&self.pool)
-        .await
+
         .ok();
         self.emit(crate::session_events::SessionEvent::Patched {
             session_key: key.to_string(),
@@ -862,12 +808,12 @@ impl SqliteSessionMetadata {
 
     /// List all sessions that are children of the given parent key.
     pub async fn list_children(&self, parent_key: &str) -> Vec<SessionEntry> {
-        sqlx::query_as::<_, SessionRow>(
+        fetch_all!(
+            &self.db,
+            SessionRow,
             "SELECT * FROM sessions WHERE parent_session_key = ? ORDER BY created_at ASC",
+            parent_key
         )
-        .bind(parent_key)
-        .fetch_all(&self.pool)
-        .await
         .unwrap_or_default()
         .into_iter()
         .map(Into::into)
@@ -876,11 +822,7 @@ impl SqliteSessionMetadata {
 
     pub async fn remove(&self, key: &str) -> Option<SessionEntry> {
         let entry = self.get(key).await;
-        sqlx::query("DELETE FROM sessions WHERE key = ?")
-            .bind(key)
-            .execute(&self.pool)
-            .await
-            .ok();
+        execute!(&self.db, "DELETE FROM sessions WHERE key = ?", key).ok();
         if entry.is_some() {
             self.emit(crate::session_events::SessionEvent::Deleted {
                 session_key: key.to_string(),
@@ -890,11 +832,12 @@ impl SqliteSessionMetadata {
     }
 
     pub async fn list(&self) -> Vec<SessionEntry> {
-        sqlx::query_as::<_, SessionRow>(
+        fetch_all!(
+            &self.db,
+            SessionRow,
             "SELECT * FROM sessions ORDER BY CASE WHEN key = 'main' THEN 0 ELSE 1 END ASC, updated_at DESC, created_at DESC, key ASC",
         )
-            .fetch_all(&self.pool)
-            .await
+
             .unwrap_or_default()
             .into_iter()
             .map(Into::into)
@@ -910,17 +853,19 @@ impl SqliteSessionMetadata {
         thread_id: Option<&str>,
     ) -> Option<String> {
         let tid = thread_id.unwrap_or("");
-        sqlx::query_scalar::<_, String>(
+        fetch_optional!(
+            &self.db,
+            (String,),
             "SELECT session_key FROM channel_sessions WHERE channel_type = ? AND account_id = ? AND chat_id = ? AND thread_id = ?",
+            channel_type,
+            account_id,
+            chat_id,
+            tid
         )
-        .bind(channel_type)
-        .bind(account_id)
-        .bind(chat_id)
-        .bind(tid)
-        .fetch_optional(&self.pool)
-        .await
+
         .ok()
         .flatten()
+        .map(|(session_key,)| session_key)
     }
 
     /// Set (upsert) the active session key for a channel chat.
@@ -934,32 +879,33 @@ impl SqliteSessionMetadata {
     ) {
         let now = now_ms() as i64;
         let tid = thread_id.unwrap_or("");
-        sqlx::query(
+        execute!(
+            &self.db,
             r#"INSERT INTO channel_sessions (channel_type, account_id, chat_id, thread_id, session_key, updated_at)
                VALUES (?, ?, ?, ?, ?, ?)
                ON CONFLICT(channel_type, account_id, chat_id, thread_id) DO UPDATE SET
                  session_key = excluded.session_key,
                  updated_at = excluded.updated_at"#,
+            channel_type,
+            account_id,
+            chat_id,
+            tid,
+            session_key,
+            now
         )
-        .bind(channel_type)
-        .bind(account_id)
-        .bind(chat_id)
-        .bind(tid)
-        .bind(session_key)
-        .bind(now)
-        .execute(&self.pool)
-        .await
+
         .ok();
     }
 
     /// Clear any explicit channel chat mappings that currently point at the
     /// given session key.
     pub async fn clear_active_session_mappings(&self, session_key: &str) {
-        sqlx::query("DELETE FROM channel_sessions WHERE session_key = ?")
-            .bind(session_key)
-            .execute(&self.pool)
-            .await
-            .ok();
+        execute!(
+            &self.db,
+            "DELETE FROM channel_sessions WHERE session_key = ?",
+            session_key
+        )
+        .ok();
     }
 
     /// List all sessions that have been bound to a given channel chat
@@ -974,12 +920,15 @@ impl SqliteSessionMetadata {
         let binding_pattern = format!(
             r#"%"channel_type":"{channel_type}"%"account_id":"{account_id}"%"chat_id":"{chat_id}"%"#,
         );
-        sqlx::query_as::<_, SessionRow>(
-            "SELECT * FROM sessions WHERE channel_binding LIKE ? ORDER BY created_at ASC",
+        // LOWER on both sides keeps SQLite's case-insensitive LIKE semantics on
+        // PostgreSQL, where LIKE is case-sensitive by default.
+        fetch_all!(
+            &self.db,
+            SessionRow,
+            "SELECT * FROM sessions WHERE LOWER(channel_binding) LIKE LOWER(?) ORDER BY created_at ASC",
+            &binding_pattern
         )
-        .bind(&binding_pattern)
-        .fetch_all(&self.pool)
-        .await
+
         .unwrap_or_default()
         .into_iter()
         .map(Into::into)
@@ -993,12 +942,15 @@ impl SqliteSessionMetadata {
         account_id: &str,
     ) -> Vec<SessionEntry> {
         let pattern = format!(r#"%"channel_type":"{channel_type}"%"account_id":"{account_id}"%"#,);
-        sqlx::query_as::<_, SessionRow>(
-            "SELECT * FROM sessions WHERE channel_binding LIKE ? ORDER BY created_at ASC",
+        // LOWER on both sides keeps SQLite's case-insensitive LIKE semantics on
+        // PostgreSQL, where LIKE is case-sensitive by default.
+        fetch_all!(
+            &self.db,
+            SessionRow,
+            "SELECT * FROM sessions WHERE LOWER(channel_binding) LIKE LOWER(?) ORDER BY created_at ASC",
+            &pattern
         )
-        .bind(&pattern)
-        .fetch_all(&self.pool)
-        .await
+
         .unwrap_or_default()
         .into_iter()
         .map(Into::into)
@@ -1011,17 +963,18 @@ impl SqliteSessionMetadata {
         channel_type: &str,
         account_id: &str,
     ) -> Vec<(String, String)> {
-        sqlx::query_as::<_, (String, String)>(
+        fetch_all!(
+            &self.db,
+            (String, String),
             "SELECT chat_id, session_key FROM channel_sessions WHERE channel_type = ? AND account_id = ?",
+            channel_type,
+            account_id
         )
-        .bind(channel_type)
-        .bind(account_id)
-        .fetch_all(&self.pool)
-        .await
+
         .unwrap_or_default()
     }
 
-    /// No-op — SQLite auto-persists.
+    /// No-op — the database auto-persists.
     pub fn save(&self) -> Result<()> {
         Ok(())
     }
