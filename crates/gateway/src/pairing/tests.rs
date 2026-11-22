@@ -580,3 +580,124 @@ async fn pairing_state_approve_enforces_expiry_boundary() {
             .is_ok()
     );
 }
+
+// ── Single-use / check-and-consume regression tests ─────────────────────────
+
+/// One connection so concurrent queries interleave on a shared in-memory
+/// database instead of fanning out across pool connections.
+async fn race_db() -> Db {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let db = Db::from(pool);
+    crate::run_migrations(&db).await.unwrap();
+    db
+}
+
+#[tokio::test]
+async fn approve_is_single_use() {
+    let db = test_db().await;
+    let store = PairingStore::new(db.clone());
+
+    let req = store
+        .request_pair("dev-once", None, "linux", None)
+        .await
+        .unwrap();
+    let first = store.approve(&req.id).await.unwrap();
+
+    let replay = store.approve(&req.id).await;
+    assert!(matches!(
+        replay,
+        Err(Error::PairRequestNotPending(PairStatus::Approved))
+    ));
+
+    // The replay attempt issued no second token.
+    let rows =
+        moltis_db::fetch_all!(&db, (String,), "SELECT token_hash FROM device_tokens",).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(
+        store
+            .verify_device_token(&first.token)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn rejected_request_cannot_be_approved_or_replayed() {
+    let db = test_db().await;
+    let store = PairingStore::new(db);
+
+    let req = store
+        .request_pair("dev-rej", None, "linux", None)
+        .await
+        .unwrap();
+    store.reject(&req.id).await.unwrap();
+
+    assert!(matches!(
+        store.reject(&req.id).await,
+        Err(Error::PairRequestNotPending(PairStatus::Rejected))
+    ));
+    assert!(matches!(
+        store.approve(&req.id).await,
+        Err(Error::PairRequestNotPending(PairStatus::Rejected))
+    ));
+    assert!(store.list_devices().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn concurrent_approve_issues_exactly_one_token() {
+    let db = race_db().await;
+    let store = PairingStore::new(db.clone());
+
+    let req = store
+        .request_pair("dev-race", None, "linux", None)
+        .await
+        .unwrap();
+    let (a, b) = tokio::join!(store.approve(&req.id), store.approve(&req.id));
+    assert!(a.is_ok() != b.is_ok(), "exactly one approve must win");
+
+    let rows =
+        moltis_db::fetch_all!(&db, (String,), "SELECT token_hash FROM device_tokens",).unwrap();
+    assert_eq!(rows.len(), 1);
+}
+
+#[tokio::test]
+async fn concurrent_approve_and_reject_have_one_winner() {
+    let db = race_db().await;
+    let store = PairingStore::new(db.clone());
+
+    let req = store
+        .request_pair("dev-race-2", None, "linux", None)
+        .await
+        .unwrap();
+    let (approved, rejected) = tokio::join!(store.approve(&req.id), store.reject(&req.id));
+    assert!(approved.is_ok() != rejected.is_ok(), "exactly one must win");
+
+    match (approved, rejected) {
+        (Ok(token), Err(_)) => {
+            assert_eq!(
+                store.get_pair_status(&req.id).await.unwrap(),
+                Some(PairStatus::Approved)
+            );
+            assert!(
+                store
+                    .verify_device_token(&token.token)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        },
+        (Err(_), Ok(())) => {
+            assert_eq!(
+                store.get_pair_status(&req.id).await.unwrap(),
+                Some(PairStatus::Rejected)
+            );
+            assert!(store.list_devices().await.unwrap().is_empty());
+        },
+        other => panic!("expected exactly one winner, got {other:?}"),
+    }
+}

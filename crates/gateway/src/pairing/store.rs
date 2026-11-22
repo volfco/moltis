@@ -157,18 +157,22 @@ impl PairingStore {
         if is_expired(&expires_at) {
             execute!(
                 &self.db,
-                "UPDATE pair_requests SET status = 'expired' WHERE id = ?",
+                "UPDATE pair_requests SET status = 'expired' WHERE id = ? AND status = 'pending'",
                 pair_id,
             )?;
             return Err(Error::PairRequestExpired);
         }
 
-        // Mark request as approved.
-        execute!(
+        // Atomically consume the pending request so concurrent approve/reject
+        // calls cannot both succeed and issue duplicate tokens.
+        let consumed = execute!(
             &self.db,
-            "UPDATE pair_requests SET status = 'approved' WHERE id = ?",
+            "UPDATE pair_requests SET status = 'approved' WHERE id = ? AND status = 'pending'",
             pair_id,
         )?;
+        if consumed == 0 {
+            return Err(self.consume_error(pair_id).await);
+        }
 
         // Upsert the paired device.
         execute!(
@@ -220,25 +224,32 @@ impl PairingStore {
 
     /// Reject a pending pair request.
     pub async fn reject(&self, pair_id: &str) -> Result<()> {
-        let row = fetch_optional!(
+        // Atomic check-and-consume: exactly one of concurrent approve/reject wins.
+        let consumed = execute!(
             &self.db,
-            (String, String),
-            "SELECT status, expires_at FROM pair_requests WHERE id = ?",
+            "UPDATE pair_requests SET status = 'rejected' WHERE id = ? AND status = 'pending'",
             pair_id,
         )?;
-
-        let (status, _) = row.ok_or(Error::PairRequestNotFound)?;
-        if PairStatus::from_str(&status) != PairStatus::Pending {
-            return Err(Error::PairRequestNotPending(PairStatus::from_str(&status)));
+        if consumed == 0 {
+            return Err(self.consume_error(pair_id).await);
         }
 
-        execute!(
-            &self.db,
-            "UPDATE pair_requests SET status = 'rejected' WHERE id = ?",
-            pair_id,
-        )?;
-
         Ok(())
+    }
+
+    /// Error for a lost check-and-consume race: re-read the row so the caller
+    /// sees the actual current status.
+    async fn consume_error(&self, pair_id: &str) -> Error {
+        match fetch_optional!(
+            &self.db,
+            (String,),
+            "SELECT status FROM pair_requests WHERE id = ?",
+            pair_id,
+        ) {
+            Ok(Some((status,))) => Error::PairRequestNotPending(PairStatus::from_str(&status)),
+            Ok(None) => Error::PairRequestNotFound,
+            Err(e) => Error::Db(e),
+        }
     }
 
     /// List all approved (non-revoked) devices.
