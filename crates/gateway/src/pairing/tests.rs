@@ -701,3 +701,96 @@ async fn concurrent_approve_and_reject_have_one_winner() {
         other => panic!("expected exactly one winner, got {other:?}"),
     }
 }
+
+// ── Security-focused tests: token generation and redemption edge cases ──────
+
+#[test]
+fn generate_token_is_unique_and_url_safe() {
+    use super::crypto::generate_token;
+
+    let tokens: std::collections::HashSet<String> = (0..32).map(|_| generate_token()).collect();
+    assert_eq!(tokens.len(), 32, "generated tokens must not collide");
+    for token in &tokens {
+        // 32 bytes of entropy, URL-safe base64 without padding.
+        assert_eq!(token.len(), 43);
+        assert!(
+            token
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
+    }
+}
+
+#[tokio::test]
+async fn raw_device_token_is_never_persisted() {
+    use super::crypto::sha256_hex;
+
+    let db = test_db().await;
+    let store = PairingStore::new(db.clone());
+
+    let req = store
+        .request_pair("dev-store", None, "linux", None)
+        .await
+        .unwrap();
+    let token = store.approve(&req.id).await.unwrap();
+
+    // Only the SHA-256 digest and a short non-secret prefix are stored;
+    // verification compares digests, never the raw secret.
+    let rows = moltis_db::fetch_all!(
+        &db,
+        (String, String),
+        "SELECT token_hash, token_prefix FROM device_tokens",
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    let (hash, prefix) = &rows[0];
+    assert_eq!(hash, &sha256_hex(&token.token));
+    assert_eq!(prefix, &token.token[..12]);
+    assert_ne!(hash, &token.token);
+}
+
+#[tokio::test]
+async fn tampered_or_truncated_token_is_rejected() {
+    let db = test_db().await;
+    let store = PairingStore::new(db);
+
+    let req = store
+        .request_pair("dev-tamper", None, "linux", None)
+        .await
+        .unwrap();
+    let token = store.approve(&req.id).await.unwrap();
+    assert!(
+        store
+            .verify_device_token(&token.token)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // One flipped character must invalidate the token.
+    let mut tampered = token.token.clone().into_bytes();
+    let last = tampered.len() - 1;
+    tampered[last] = if tampered[last] == b'A' {
+        b'B'
+    } else {
+        b'A'
+    };
+    let tampered = String::from_utf8(tampered).unwrap();
+    assert!(
+        store
+            .verify_device_token(&tampered)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Truncation must invalidate the token.
+    let truncated = token.token[..token.token.len() - 1].to_string();
+    assert!(
+        store
+            .verify_device_token(&truncated)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
