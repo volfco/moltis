@@ -2,6 +2,46 @@
 
 Short entries recording *why* the code is the way it is. Newest first.
 
+## 2026-11-22 — One `[database]` engine switch, no fallback
+
+**Scope:** major. `crates/config`, gateway startup, CLI, swift-bridge.
+
+**Decision:** `[database] { backend = "sqlite" | "postgres", url }` selects the
+engine for *every* SQL store. `memory.backend` keeps only `builtin | qmd |
+zvec` (its `postgres` variant and `memory.database_url` are gone). Postgres
+configured but unreachable or failing migrations aborts startup with a clear
+error — never a silent SQLite fallback.
+
+**Why:** the operator's directive was "PostgreSQL or SQLite, not both". Two
+knobs (memory-scoped + global) could disagree and split data across engines;
+a fallback hides where data lives and surfaces days later as missing state.
+Verified live: one boot on PostgreSQL creates all 38 store tables in a single
+database; a bad password aborts without creating `moltis.db`.
+
+## 2026-11-22 — Cron moves to the SQL store with a one-time jobs.json import
+
+**Scope:** minor. `crates/gateway/src/server/init_cron.rs`.
+
+**Decision:** production uses `moltis_cron::store_db::DbStore`; existing
+`jobs.json` data is imported once (run history included), then the file is
+renamed to `jobs.json.bak`, mirroring the `projects.toml` migration pattern.
+
+**Why:** startup migrations and `moltis db clear` already treated the SQL
+tables as live data; keeping the JSON store would strand a dead SQL store and
+leave cron data outside the chosen engine.
+
+## 2026-11-22 — `moltis db reset` refuses on PostgreSQL
+
+**Scope:** minor. `crates/cli/src/db_commands.rs`.
+
+**Decision:** reset deletes database *files* and is SQLite-only; on Postgres
+it refuses with actionable steps (drop/recreate the database). `migrate` and
+`clear` work on both engines.
+
+**Why:** `DROP SCHEMA public CASCADE` would destroy non-moltis objects in a
+shared database. A future postgres reset needs a moltis-ownership marker
+first (follow-up in `todo.md`).
+
 ## 2026-11-22 — Postgres test harness must fail loudly when the URL is set
 
 **Scope:** minor. `test_support.rs` in every ported crate.
