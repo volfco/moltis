@@ -2,7 +2,8 @@ use std::collections::HashSet;
 
 use {
     async_trait::async_trait,
-    sqlx::{Row, Sqlite, SqlitePool, Transaction, sqlite::SqliteRow},
+    moltis_db::{Db, DbTx, Dialect},
+    sqlx::{Decode, Row, Type},
     time::OffsetDateTime,
     uuid::Uuid,
 };
@@ -11,39 +12,208 @@ use crate::{
     Account, AccountCreate, AccountUpdate, ConnectorError, ConnectorItem, ConnectorItemInput,
     ConnectorKind, ConnectorReader, Dataset, DatasetCreate, DatasetUpdate, ItemQuery,
     ProjectionConfig, Result, SnapshotResult, SourceObservation, SourceStateMap, SyncRun,
-    SyncRunStatus, search::fts_query,
+    SyncRunStatus,
+    search::{fts_query, websearch_query},
 };
 
 pub const MAX_QUERY_LIMIT: u64 = 500;
 const MAX_SOURCE_KEY_LENGTH: usize = 1024;
 
-pub struct SqliteConnectorStore {
-    pool: SqlitePool,
+/// `connector_accounts` row decoded by column name on either backend.
+struct AccountRow {
+    id: String,
+    kind: String,
+    source_key: Option<String>,
+    name: String,
+    config: String,
+    enabled: bool,
+    created_at: i64,
+    updated_at: i64,
 }
 
-impl SqliteConnectorStore {
+impl<'r, R: Row> sqlx::FromRow<'r, R> for AccountRow
+where
+    &'r str: sqlx::ColumnIndex<R>,
+    String: Decode<'r, R::Database> + Type<R::Database>,
+    Option<String>: Decode<'r, R::Database> + Type<R::Database>,
+    bool: Decode<'r, R::Database> + Type<R::Database>,
+    i64: Decode<'r, R::Database> + Type<R::Database>,
+{
+    fn from_row(row: &'r R) -> std::result::Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            kind: row.try_get("kind")?,
+            source_key: row.try_get("source_key")?,
+            name: row.try_get("name")?,
+            config: row.try_get("config")?,
+            enabled: row.try_get("enabled")?,
+            created_at: row.try_get("created_at")?,
+            updated_at: row.try_get("updated_at")?,
+        })
+    }
+}
+
+/// `connector_datasets` row decoded by column name on either backend.
+struct DatasetRow {
+    id: String,
+    account_id: String,
+    name: String,
+    instruction: Option<String>,
+    config: String,
+    plan_revision: i64,
+    synced_plan_revision: Option<i64>,
+    schedule_minutes: Option<i64>,
+    projection_jsonl: bool,
+    projection_md: bool,
+    enabled: bool,
+    last_sync_at: Option<i64>,
+    next_sync_at: Option<i64>,
+    last_error: Option<String>,
+    item_count: i64,
+    created_at: i64,
+    updated_at: i64,
+}
+
+impl<'r, R: Row> sqlx::FromRow<'r, R> for DatasetRow
+where
+    &'r str: sqlx::ColumnIndex<R>,
+    String: Decode<'r, R::Database> + Type<R::Database>,
+    Option<String>: Decode<'r, R::Database> + Type<R::Database>,
+    bool: Decode<'r, R::Database> + Type<R::Database>,
+    i64: Decode<'r, R::Database> + Type<R::Database>,
+    Option<i64>: Decode<'r, R::Database> + Type<R::Database>,
+{
+    fn from_row(row: &'r R) -> std::result::Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            account_id: row.try_get("account_id")?,
+            name: row.try_get("name")?,
+            instruction: row.try_get("instruction")?,
+            config: row.try_get("config")?,
+            plan_revision: row.try_get("plan_revision")?,
+            synced_plan_revision: row.try_get("synced_plan_revision")?,
+            schedule_minutes: row.try_get("schedule_minutes")?,
+            projection_jsonl: row.try_get("projection_jsonl")?,
+            projection_md: row.try_get("projection_md")?,
+            enabled: row.try_get("enabled")?,
+            last_sync_at: row.try_get("last_sync_at")?,
+            next_sync_at: row.try_get("next_sync_at")?,
+            last_error: row.try_get("last_error")?,
+            item_count: row.try_get("item_count")?,
+            created_at: row.try_get("created_at")?,
+            updated_at: row.try_get("updated_at")?,
+        })
+    }
+}
+
+/// `connector_items` row decoded by column name on either backend.
+struct ItemRow {
+    id: String,
+    dataset_id: String,
+    remote_id: String,
+    kind: String,
+    remote_version: Option<String>,
+    occurred_at: Option<String>,
+    updated_at: Option<String>,
+    body_json: String,
+    search_text: String,
+    content_hash: String,
+    created_at: i64,
+    stored_at: i64,
+    deleted_at: Option<i64>,
+}
+
+impl<'r, R: Row> sqlx::FromRow<'r, R> for ItemRow
+where
+    &'r str: sqlx::ColumnIndex<R>,
+    String: Decode<'r, R::Database> + Type<R::Database>,
+    Option<String>: Decode<'r, R::Database> + Type<R::Database>,
+    i64: Decode<'r, R::Database> + Type<R::Database>,
+    Option<i64>: Decode<'r, R::Database> + Type<R::Database>,
+{
+    fn from_row(row: &'r R) -> std::result::Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            dataset_id: row.try_get("dataset_id")?,
+            remote_id: row.try_get("remote_id")?,
+            kind: row.try_get("kind")?,
+            remote_version: row.try_get("remote_version")?,
+            occurred_at: row.try_get("occurred_at")?,
+            updated_at: row.try_get("updated_at")?,
+            body_json: row.try_get("body_json")?,
+            search_text: row.try_get("search_text")?,
+            content_hash: row.try_get("content_hash")?,
+            created_at: row.try_get("created_at")?,
+            stored_at: row.try_get("stored_at")?,
+            deleted_at: row.try_get("deleted_at")?,
+        })
+    }
+}
+
+/// `connector_sync_runs` row decoded by column name on either backend.
+struct SyncRunRow {
+    id: String,
+    dataset_id: String,
+    status: String,
+    started_at: i64,
+    finished_at: Option<i64>,
+    upserted: i64,
+    deleted: i64,
+    active: i64,
+    error: Option<String>,
+}
+
+impl<'r, R: Row> sqlx::FromRow<'r, R> for SyncRunRow
+where
+    &'r str: sqlx::ColumnIndex<R>,
+    String: Decode<'r, R::Database> + Type<R::Database>,
+    Option<String>: Decode<'r, R::Database> + Type<R::Database>,
+    i64: Decode<'r, R::Database> + Type<R::Database>,
+    Option<i64>: Decode<'r, R::Database> + Type<R::Database>,
+{
+    fn from_row(row: &'r R) -> std::result::Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            dataset_id: row.try_get("dataset_id")?,
+            status: row.try_get("status")?,
+            started_at: row.try_get("started_at")?,
+            finished_at: row.try_get("finished_at")?,
+            upserted: row.try_get("upserted")?,
+            deleted: row.try_get("deleted")?,
+            active: row.try_get("active")?,
+            error: row.try_get("error")?,
+        })
+    }
+}
+
+/// Connector store backed by SQLite or PostgreSQL.
+pub struct DbConnectorStore {
+    db: Db,
+}
+
+impl DbConnectorStore {
     #[must_use]
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(db: Db) -> Self {
+        Self { db }
     }
 
     #[must_use]
-    pub fn pool(&self) -> &SqlitePool {
-        &self.pool
+    pub fn pool(&self) -> &Db {
+        &self.db
     }
 
     async fn dataset_has_kind(&self, dataset_id: &str, kind: ConnectorKind) -> Result<bool> {
-        sqlx::query_scalar::<_, i64>(
+        // EXISTS decodes as 0/1 on SQLite and BOOLEAN on PostgreSQL.
+        let exists: bool = moltis_db::scalar!(
+            &self.db,
+            bool,
             "SELECT EXISTS(SELECT 1 FROM connector_datasets AS dataset \
              JOIN connector_accounts AS account ON account.id = dataset.account_id \
              WHERE dataset.id = ? AND account.kind = ?)",
-        )
-        .bind(dataset_id)
-        .bind(kind.as_str())
-        .fetch_one(&self.pool)
-        .await
-        .map(|exists| exists != 0)
-        .map_err(Into::into)
+            dataset_id,
+            kind.as_str(),
+        )?;
+        Ok(exists)
     }
 
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, input), fields(kind = %input.kind)))]
@@ -63,21 +233,20 @@ impl SqliteConnectorStore {
         }
         let now = now_millis();
         let config = serde_json::to_string(&input.config)?;
-        sqlx::query(
+        moltis_db::execute!(
+            &self.db,
             "INSERT INTO connector_accounts \
              (id, kind, source_key, name, config, enabled, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(id)
-        .bind(input.kind.as_str())
-        .bind(&input.source_key)
-        .bind(&input.name)
-        .bind(config)
-        .bind(input.enabled)
-        .bind(now)
-        .bind(now)
-        .execute(&self.pool)
-        .await?;
+            id,
+            input.kind.as_str(),
+            &input.source_key,
+            &input.name,
+            config,
+            input.enabled,
+            now,
+            now,
+        )?;
         record_write("account.create");
         self.get_account_required(id).await
     }
@@ -86,34 +255,34 @@ impl SqliteConnectorStore {
     pub async fn update_account(&self, id: &str, input: AccountUpdate) -> Result<Account> {
         require_name(&input.name, "account")?;
         let config = serde_json::to_string(&input.config)?;
-        let mut transaction = self.pool.begin().await?;
-        let previous_config =
-            sqlx::query_scalar::<_, String>("SELECT config FROM connector_accounts WHERE id = ?")
-                .bind(id)
-                .fetch_optional(&mut *transaction)
-                .await?
-                .ok_or_else(|| not_found("account", id))?;
+        let mut transaction = self.db.begin().await?;
+        let previous_config: String = moltis_db::tx_fetch_optional!(
+            &mut transaction,
+            (String,),
+            "SELECT config FROM connector_accounts WHERE id = ?",
+            id,
+        )?
+        .ok_or_else(|| not_found("account", id))?
+        .0;
         let config_changed = previous_config != config;
-        let result = sqlx::query(
+        let affected = moltis_db::tx_execute!(
+            &mut transaction,
             "UPDATE connector_accounts SET name = ?, config = ?, enabled = ?, updated_at = ? \
              WHERE id = ?",
-        )
-        .bind(input.name)
-        .bind(config)
-        .bind(input.enabled)
-        .bind(now_millis())
-        .bind(id)
-        .execute(&mut *transaction)
-        .await?;
-        require_affected(result.rows_affected(), "account", id)?;
+            input.name,
+            config,
+            input.enabled,
+            now_millis(),
+            id,
+        )?;
+        require_affected(affected, "account", id)?;
         if config_changed {
-            sqlx::query(
+            moltis_db::tx_execute!(
+                &mut transaction,
                 "UPDATE connector_datasets SET plan_revision = plan_revision + 1 \
                  WHERE account_id = ?",
-            )
-            .bind(id)
-            .execute(&mut *transaction)
-            .await?;
+                id,
+            )?;
         }
         transaction.commit().await?;
         record_write("account.update");
@@ -122,11 +291,8 @@ impl SqliteConnectorStore {
 
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
     pub async fn remove_account(&self, id: &str) -> Result<bool> {
-        let result = sqlx::query("DELETE FROM connector_accounts WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        let removed = result.rows_affected() != 0;
+        let removed =
+            moltis_db::execute!(&self.db, "DELETE FROM connector_accounts WHERE id = ?", id)? != 0;
         if removed {
             record_write("account.remove");
         }
@@ -134,12 +300,13 @@ impl SqliteConnectorStore {
     }
 
     pub async fn get_account(&self, id: &str) -> Result<Option<Account>> {
-        sqlx::query("SELECT * FROM connector_accounts WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?
-            .map(|row| account_from_row(&row))
-            .transpose()
+        let row: Option<AccountRow> = moltis_db::fetch_optional!(
+            &self.db,
+            AccountRow,
+            "SELECT * FROM connector_accounts WHERE id = ?",
+            id,
+        )?;
+        row.map(account_from_row).transpose()
     }
 
     pub async fn get_account_by_source_key(
@@ -148,13 +315,14 @@ impl SqliteConnectorStore {
         source_key: &str,
     ) -> Result<Option<Account>> {
         validate_source_key(source_key)?;
-        sqlx::query("SELECT * FROM connector_accounts WHERE kind = ? AND source_key = ?")
-            .bind(kind.as_str())
-            .bind(source_key)
-            .fetch_optional(&self.pool)
-            .await?
-            .map(|row| account_from_row(&row))
-            .transpose()
+        let row: Option<AccountRow> = moltis_db::fetch_optional!(
+            &self.db,
+            AccountRow,
+            "SELECT * FROM connector_accounts WHERE kind = ? AND source_key = ?",
+            kind.as_str(),
+            source_key,
+        )?;
+        row.map(account_from_row).transpose()
     }
 
     pub async fn adopt_account(
@@ -166,42 +334,41 @@ impl SqliteConnectorStore {
         require_name(&input.name, "account")?;
         validate_source_key(source_key)?;
         let config = serde_json::to_string(&input.config)?;
-        let mut transaction = self.pool.begin().await?;
-        let previous_config = sqlx::query_scalar::<_, String>(
+        let mut transaction = self.db.begin().await?;
+        let previous_config: String = moltis_db::tx_fetch_optional!(
+            &mut transaction,
+            (String,),
             "SELECT config FROM connector_accounts WHERE id = ? AND source_key IS NULL",
-        )
-        .bind(id)
-        .fetch_optional(&mut *transaction)
-        .await?
+            id,
+        )?
         .ok_or_else(|| {
             ConnectorError::InvalidInput(format!("account {id} is not available for adoption"))
-        })?;
+        })?
+        .0;
         let config_changed = previous_config != config;
-        let result = sqlx::query(
+        let affected = moltis_db::tx_execute!(
+            &mut transaction,
             "UPDATE connector_accounts SET source_key = ?, name = ?, config = ?, enabled = ?, \
              updated_at = ? WHERE id = ? AND source_key IS NULL",
-        )
-        .bind(source_key)
-        .bind(input.name)
-        .bind(config)
-        .bind(input.enabled)
-        .bind(now_millis())
-        .bind(id)
-        .execute(&mut *transaction)
-        .await?;
-        if result.rows_affected() != 1 {
+            source_key,
+            input.name,
+            config,
+            input.enabled,
+            now_millis(),
+            id,
+        )?;
+        if affected != 1 {
             return Err(ConnectorError::InvalidInput(format!(
                 "account {id} is not available for adoption"
             )));
         }
         if config_changed {
-            sqlx::query(
+            moltis_db::tx_execute!(
+                &mut transaction,
                 "UPDATE connector_datasets SET plan_revision = plan_revision + 1 \
                  WHERE account_id = ?",
-            )
-            .bind(id)
-            .execute(&mut *transaction)
-            .await?;
+                id,
+            )?;
         }
         transaction.commit().await?;
         record_write("account.adopt");
@@ -209,10 +376,12 @@ impl SqliteConnectorStore {
     }
 
     pub async fn list_accounts(&self) -> Result<Vec<Account>> {
-        let rows = sqlx::query("SELECT * FROM connector_accounts ORDER BY name, id")
-            .fetch_all(&self.pool)
-            .await?;
-        rows.iter().map(account_from_row).collect()
+        let rows: Vec<AccountRow> = moltis_db::fetch_all!(
+            &self.db,
+            AccountRow,
+            "SELECT * FROM connector_accounts ORDER BY name, id",
+        )?;
+        rows.into_iter().map(account_from_row).collect()
     }
 
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, input)))]
@@ -222,26 +391,25 @@ impl SqliteConnectorStore {
         let id = Uuid::new_v4().to_string();
         let now = now_millis();
         let config = serde_json::to_string(&input.config)?;
-        sqlx::query(
+        moltis_db::execute!(
+            &self.db,
             "INSERT INTO connector_datasets \
              (id, account_id, name, instruction, config, schedule_minutes, projection_jsonl, \
               projection_md, enabled, next_sync_at, created_at, updated_at) \
               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&id)
-        .bind(&input.account_id)
-        .bind(&input.name)
-        .bind(&input.instruction)
-        .bind(config)
-        .bind(input.schedule_minutes.map(u64_to_i64).transpose()?)
-        .bind(input.projections.jsonl)
-        .bind(input.projections.markdown)
-        .bind(input.enabled)
-        .bind(input.next_sync_at.map(datetime_to_millis).transpose()?)
-        .bind(now)
-        .bind(now)
-        .execute(&self.pool)
-        .await?;
+            &id,
+            &input.account_id,
+            &input.name,
+            &input.instruction,
+            config,
+            input.schedule_minutes.map(u64_to_i64).transpose()?,
+            input.projections.jsonl,
+            input.projections.markdown,
+            input.enabled,
+            input.next_sync_at.map(datetime_to_millis).transpose()?,
+            now,
+            now,
+        )?;
         record_write("dataset.create");
         self.get_dataset_required(&id).await
     }
@@ -251,37 +419,33 @@ impl SqliteConnectorStore {
         require_name(&input.name, "dataset")?;
         validate_schedule(input.schedule_minutes)?;
         let config = serde_json::to_string(&input.config)?;
-        let result = sqlx::query(
+        let affected = moltis_db::execute!(
+            &self.db,
             "UPDATE connector_datasets SET name = ?, instruction = ?, \
              plan_revision = plan_revision + CASE WHEN config <> ? THEN 1 ELSE 0 END, \
              config = ?, schedule_minutes = ?, projection_jsonl = ?, projection_md = ?, \
              enabled = ?, next_sync_at = ?, updated_at = ? WHERE id = ?",
-        )
-        .bind(input.name)
-        .bind(input.instruction)
-        .bind(&config)
-        .bind(&config)
-        .bind(input.schedule_minutes.map(u64_to_i64).transpose()?)
-        .bind(input.projections.jsonl)
-        .bind(input.projections.markdown)
-        .bind(input.enabled)
-        .bind(input.next_sync_at.map(datetime_to_millis).transpose()?)
-        .bind(now_millis())
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
-        require_affected(result.rows_affected(), "dataset", id)?;
+            input.name,
+            input.instruction,
+            &config,
+            &config,
+            input.schedule_minutes.map(u64_to_i64).transpose()?,
+            input.projections.jsonl,
+            input.projections.markdown,
+            input.enabled,
+            input.next_sync_at.map(datetime_to_millis).transpose()?,
+            now_millis(),
+            id,
+        )?;
+        require_affected(affected, "dataset", id)?;
         record_write("dataset.update");
         self.get_dataset_required(id).await
     }
 
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
     pub async fn remove_dataset(&self, id: &str) -> Result<bool> {
-        let result = sqlx::query("DELETE FROM connector_datasets WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        let removed = result.rows_affected() != 0;
+        let removed =
+            moltis_db::execute!(&self.db, "DELETE FROM connector_datasets WHERE id = ?", id)? != 0;
         if removed {
             record_write("dataset.remove");
         }
@@ -293,45 +457,45 @@ impl SqliteConnectorStore {
         id: &str,
         next_sync_at: Option<OffsetDateTime>,
     ) -> Result<()> {
-        let result = sqlx::query(
+        let affected = moltis_db::execute!(
+            &self.db,
             "UPDATE connector_datasets SET next_sync_at = ?, updated_at = ? WHERE id = ?",
-        )
-        .bind(next_sync_at.map(datetime_to_millis).transpose()?)
-        .bind(now_millis())
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
-        require_affected(result.rows_affected(), "dataset", id)
+            next_sync_at.map(datetime_to_millis).transpose()?,
+            now_millis(),
+            id,
+        )?;
+        require_affected(affected, "dataset", id)
     }
 
     pub async fn set_dataset_last_error(&self, id: &str, error: Option<&str>) -> Result<()> {
-        let result = sqlx::query(
+        let affected = moltis_db::execute!(
+            &self.db,
             "UPDATE connector_datasets SET last_error = ?, updated_at = ? WHERE id = ?",
-        )
-        .bind(error)
-        .bind(now_millis())
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
-        require_affected(result.rows_affected(), "dataset", id)
+            error,
+            now_millis(),
+            id,
+        )?;
+        require_affected(affected, "dataset", id)
     }
 
     pub async fn get_dataset(&self, id: &str) -> Result<Option<Dataset>> {
-        sqlx::query("SELECT * FROM connector_datasets WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?
-            .map(|row| dataset_from_row(&row))
-            .transpose()
+        let row: Option<DatasetRow> = moltis_db::fetch_optional!(
+            &self.db,
+            DatasetRow,
+            "SELECT * FROM connector_datasets WHERE id = ?",
+            id,
+        )?;
+        row.map(dataset_from_row).transpose()
     }
 
     pub async fn list_datasets(&self, account_id: &str) -> Result<Vec<Dataset>> {
-        let rows =
-            sqlx::query("SELECT * FROM connector_datasets WHERE account_id = ? ORDER BY name, id")
-                .bind(account_id)
-                .fetch_all(&self.pool)
-                .await?;
-        rows.iter().map(dataset_from_row).collect()
+        let rows: Vec<DatasetRow> = moltis_db::fetch_all!(
+            &self.db,
+            DatasetRow,
+            "SELECT * FROM connector_datasets WHERE account_id = ? ORDER BY name, id",
+            account_id,
+        )?;
+        rows.into_iter().map(dataset_from_row).collect()
     }
 
     #[cfg_attr(
@@ -347,7 +511,7 @@ impl SqliteConnectorStore {
     ) -> Result<SnapshotResult> {
         validate_snapshot(items)?;
         let now = now_millis();
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.db.begin().await?;
         let result = apply_snapshot_transaction(
             &mut transaction,
             dataset_id,
@@ -376,7 +540,7 @@ impl SqliteConnectorStore {
     ) -> Result<(SnapshotResult, SyncRun)> {
         validate_snapshot(items)?;
         let now = now_millis();
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.db.begin().await?;
         let stats = crate::source::commit_observations(
             &mut transaction,
             run_id,
@@ -386,33 +550,31 @@ impl SqliteConnectorStore {
             now,
         )
         .await?;
-        let run_update = sqlx::query(
+        let run_affected = moltis_db::tx_execute!(
+            &mut transaction,
             "UPDATE connector_sync_runs SET status = ?, finished_at = ?, upserted = ?, \
              deleted = ?, active = ?, error = NULL \
              WHERE id = ? AND dataset_id = ? AND status = 'running'",
-        )
-        .bind(SyncRunStatus::Succeeded.as_str())
-        .bind(now)
-        .bind(u64_to_i64(stats.upserted)?)
-        .bind(u64_to_i64(stats.deleted)?)
-        .bind(u64_to_i64(stats.active)?)
-        .bind(run_id)
-        .bind(dataset_id)
-        .execute(&mut *transaction)
-        .await?;
-        require_affected(run_update.rows_affected(), "running sync run", run_id)?;
-        let dataset_update = sqlx::query(
+            SyncRunStatus::Succeeded.as_str(),
+            now,
+            u64_to_i64(stats.upserted)?,
+            u64_to_i64(stats.deleted)?,
+            u64_to_i64(stats.active)?,
+            run_id,
+            dataset_id,
+        )?;
+        require_affected(run_affected, "running sync run", run_id)?;
+        let dataset_affected = moltis_db::tx_execute!(
+            &mut transaction,
             "UPDATE connector_datasets SET last_sync_at = ?, last_error = NULL, item_count = ?, \
               next_sync_at = ?, synced_plan_revision = plan_revision, updated_at = ? WHERE id = ?",
-        )
-        .bind(now)
-        .bind(u64_to_i64(stats.active)?)
-        .bind(next_sync_at.map(datetime_to_millis).transpose()?)
-        .bind(now)
-        .bind(dataset_id)
-        .execute(&mut *transaction)
-        .await?;
-        require_affected(dataset_update.rows_affected(), "dataset", dataset_id)?;
+            now,
+            u64_to_i64(stats.active)?,
+            next_sync_at.map(datetime_to_millis).transpose()?,
+            now,
+            dataset_id,
+        )?;
+        require_affected(dataset_affected, "dataset", dataset_id)?;
         let run = sync_run_in_transaction(&mut transaction, run_id).await?;
         transaction.commit().await?;
         record_snapshot(stats);
@@ -421,7 +583,7 @@ impl SqliteConnectorStore {
     }
 
     pub async fn source_states(&self, dataset_id: &str) -> Result<SourceStateMap> {
-        crate::source::read_states(&self.pool, dataset_id).await
+        crate::source::read_states(&self.db, dataset_id).await
     }
 
     pub async fn query_items(
@@ -430,46 +592,104 @@ impl SqliteConnectorStore {
         query: ItemQuery,
     ) -> Result<Vec<ConnectorItem>> {
         validate_limit(query.limit)?;
-        let fts = query.text.as_deref().map(fts_query).transpose()?.flatten();
+        let fts = match self.db.dialect() {
+            Dialect::Sqlite => query.text.as_deref().map(fts_query).transpose()?.flatten(),
+            Dialect::Postgres => query
+                .text
+                .as_deref()
+                .map(websearch_query)
+                .transpose()?
+                .flatten(),
+        };
         if query.text.is_some() && fts.is_none() {
             return Ok(Vec::new());
         }
-        let sql = match (query.include_deleted, fts.is_some()) {
-            (true, false) => {
+        let limit = u64_to_i64(query.limit)?;
+        let offset = u64_to_i64(query.offset)?;
+        let rows: Vec<ItemRow> = match (query.include_deleted, fts, self.db.dialect()) {
+            (false, None, _) => moltis_db::fetch_all!(
+                &self.db,
+                ItemRow,
                 "SELECT item.* FROM connector_items AS item WHERE item.dataset_id = ? \
-                 ORDER BY item.occurred_at DESC, item.remote_id LIMIT ? OFFSET ?"
-            },
-            (false, false) => {
+                     AND item.deleted_at IS NULL \
+                     ORDER BY item.occurred_at IS NULL, item.occurred_at DESC, item.remote_id \
+                     LIMIT ? OFFSET ?",
+                dataset_id,
+                limit,
+                offset,
+            )?,
+            (true, None, _) => moltis_db::fetch_all!(
+                &self.db,
+                ItemRow,
                 "SELECT item.* FROM connector_items AS item WHERE item.dataset_id = ? \
-                 AND item.deleted_at IS NULL \
-                 ORDER BY item.occurred_at DESC, item.remote_id LIMIT ? OFFSET ?"
-            },
-            (true, true) => {
+                     ORDER BY item.occurred_at IS NULL, item.occurred_at DESC, item.remote_id \
+                     LIMIT ? OFFSET ?",
+                dataset_id,
+                limit,
+                offset,
+            )?,
+            (false, Some(fts), Dialect::Sqlite) => moltis_db::fetch_all!(
+                &self.db,
+                ItemRow,
                 "SELECT item.* FROM connector_items AS item \
-                 JOIN connector_items_fts ON connector_items_fts.rowid = item.rowid \
-                 WHERE item.dataset_id = ? AND connector_items_fts MATCH ? \
-                 ORDER BY bm25(connector_items_fts), item.occurred_at DESC, item.remote_id \
-                 LIMIT ? OFFSET ?"
-            },
-            (false, true) => {
+                     JOIN connector_items_fts ON connector_items_fts.rowid = item.rowid \
+                     WHERE item.dataset_id = ? AND item.deleted_at IS NULL \
+                     AND connector_items_fts MATCH ? \
+                     ORDER BY bm25(connector_items_fts), item.occurred_at IS NULL, \
+                     item.occurred_at DESC, item.remote_id \
+                     LIMIT ? OFFSET ?",
+                dataset_id,
+                &fts,
+                limit,
+                offset,
+            )?,
+            (true, Some(fts), Dialect::Sqlite) => moltis_db::fetch_all!(
+                &self.db,
+                ItemRow,
                 "SELECT item.* FROM connector_items AS item \
-                 JOIN connector_items_fts ON connector_items_fts.rowid = item.rowid \
-                 WHERE item.dataset_id = ? AND item.deleted_at IS NULL \
-                 AND connector_items_fts MATCH ? \
-                 ORDER BY bm25(connector_items_fts), item.occurred_at DESC, item.remote_id \
-                 LIMIT ? OFFSET ?"
+                     JOIN connector_items_fts ON connector_items_fts.rowid = item.rowid \
+                     WHERE item.dataset_id = ? AND connector_items_fts MATCH ? \
+                     ORDER BY bm25(connector_items_fts), item.occurred_at IS NULL, \
+                     item.occurred_at DESC, item.remote_id \
+                     LIMIT ? OFFSET ?",
+                dataset_id,
+                &fts,
+                limit,
+                offset,
+            )?,
+            (false, Some(fts), Dialect::Postgres) => {
+                // The tsquery is built once in FROM so ts_rank can reuse it in
+                // ORDER BY while keeping one bind per placeholder.
+                moltis_db::fetch_all!(
+                    &self.db,
+                    ItemRow,
+                    "SELECT item.* FROM connector_items AS item, \
+                     websearch_to_tsquery('simple', ?) AS q \
+                     WHERE item.dataset_id = ? AND item.deleted_at IS NULL \
+                     AND item.tsv @@ q \
+                     ORDER BY ts_rank(item.tsv, q)::float8 DESC, item.occurred_at IS NULL, \
+                     item.occurred_at DESC, item.remote_id LIMIT ? OFFSET ?",
+                    &fts,
+                    dataset_id,
+                    limit,
+                    offset,
+                )?
             },
+            (true, Some(fts), Dialect::Postgres) => moltis_db::fetch_all!(
+                &self.db,
+                ItemRow,
+                "SELECT item.* FROM connector_items AS item, \
+                     websearch_to_tsquery('simple', ?) AS q \
+                     WHERE item.dataset_id = ? AND item.tsv @@ q \
+                     ORDER BY ts_rank(item.tsv, q)::float8 DESC, item.occurred_at IS NULL, \
+                     item.occurred_at DESC, item.remote_id LIMIT ? OFFSET ?",
+                &fts,
+                dataset_id,
+                limit,
+                offset,
+            )?,
         };
-        let mut statement = sqlx::query(sql).bind(dataset_id);
-        if let Some(fts) = fts {
-            statement = statement.bind(fts);
-        }
-        let rows = statement
-            .bind(u64_to_i64(query.limit)?)
-            .bind(u64_to_i64(query.offset)?)
-            .fetch_all(&self.pool)
-            .await?;
-        rows.iter().map(item_from_row).collect()
+        rows.into_iter().map(item_from_row).collect()
     }
 
     pub async fn get_item(
@@ -478,33 +698,39 @@ impl SqliteConnectorStore {
         item_id: &str,
         include_deleted: bool,
     ) -> Result<Option<ConnectorItem>> {
-        let sql = if include_deleted {
-            "SELECT * FROM connector_items WHERE dataset_id = ? AND id = ?"
+        let row: Option<ItemRow> = if include_deleted {
+            moltis_db::fetch_optional!(
+                &self.db,
+                ItemRow,
+                "SELECT * FROM connector_items WHERE dataset_id = ? AND id = ?",
+                dataset_id,
+                item_id,
+            )?
         } else {
-            "SELECT * FROM connector_items WHERE dataset_id = ? AND id = ? AND deleted_at IS NULL"
+            moltis_db::fetch_optional!(
+                &self.db,
+                ItemRow,
+                "SELECT * FROM connector_items WHERE dataset_id = ? AND id = ? \
+                 AND deleted_at IS NULL",
+                dataset_id,
+                item_id,
+            )?
         };
-        sqlx::query(sql)
-            .bind(dataset_id)
-            .bind(item_id)
-            .fetch_optional(&self.pool)
-            .await?
-            .map(|row| item_from_row(&row))
-            .transpose()
+        row.map(item_from_row).transpose()
     }
 
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
     pub async fn start_sync_run(&self, dataset_id: &str) -> Result<SyncRun> {
         let id = Uuid::new_v4().to_string();
-        let mut transaction = self.pool.begin().await?;
-        sqlx::query(
+        let mut transaction = self.db.begin().await?;
+        moltis_db::tx_execute!(
+            &mut transaction,
             "INSERT INTO connector_sync_runs (id, dataset_id, status, started_at) VALUES (?, ?, ?, ?)",
-        )
-        .bind(&id)
-        .bind(dataset_id)
-        .bind(SyncRunStatus::Running.as_str())
-        .bind(now_millis())
-        .execute(&mut *transaction)
-        .await?;
+            &id,
+            dataset_id,
+            SyncRunStatus::Running.as_str(),
+            now_millis(),
+        )?;
         let run = sync_run_in_transaction(&mut transaction, &id).await?;
         transaction.commit().await?;
         record_write("sync.start");
@@ -514,30 +740,28 @@ impl SqliteConnectorStore {
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
     pub async fn finish_sync_run(&self, id: &str, stats: SnapshotResult) -> Result<SyncRun> {
         let now = now_millis();
-        let mut transaction = self.pool.begin().await?;
-        let result = sqlx::query(
+        let mut transaction = self.db.begin().await?;
+        let affected = moltis_db::tx_execute!(
+            &mut transaction,
             "UPDATE connector_sync_runs SET status = ?, finished_at = ?, upserted = ?, \
              deleted = ?, active = ?, error = NULL WHERE id = ? AND status = 'running'",
-        )
-        .bind(SyncRunStatus::Succeeded.as_str())
-        .bind(now)
-        .bind(u64_to_i64(stats.upserted)?)
-        .bind(u64_to_i64(stats.deleted)?)
-        .bind(u64_to_i64(stats.active)?)
-        .bind(id)
-        .execute(&mut *transaction)
-        .await?;
-        require_affected(result.rows_affected(), "running sync run", id)?;
-        sqlx::query(
+            SyncRunStatus::Succeeded.as_str(),
+            now,
+            u64_to_i64(stats.upserted)?,
+            u64_to_i64(stats.deleted)?,
+            u64_to_i64(stats.active)?,
+            id,
+        )?;
+        require_affected(affected, "running sync run", id)?;
+        moltis_db::tx_execute!(
+            &mut transaction,
             "UPDATE connector_datasets SET last_sync_at = ?, last_error = NULL, item_count = ?, \
              updated_at = ? WHERE id = (SELECT dataset_id FROM connector_sync_runs WHERE id = ?)",
-        )
-        .bind(now)
-        .bind(u64_to_i64(stats.active)?)
-        .bind(now)
-        .bind(id)
-        .execute(&mut *transaction)
-        .await?;
+            now,
+            u64_to_i64(stats.active)?,
+            now,
+            id,
+        )?;
         let run = sync_run_in_transaction(&mut transaction, id).await?;
         transaction.commit().await?;
         record_write("sync.finish");
@@ -552,27 +776,25 @@ impl SqliteConnectorStore {
             ));
         }
         let now = now_millis();
-        let mut transaction = self.pool.begin().await?;
-        let result = sqlx::query(
+        let mut transaction = self.db.begin().await?;
+        let affected = moltis_db::tx_execute!(
+            &mut transaction,
             "UPDATE connector_sync_runs SET status = ?, finished_at = ?, error = ? \
              WHERE id = ? AND status = 'running'",
-        )
-        .bind(SyncRunStatus::Failed.as_str())
-        .bind(now)
-        .bind(error)
-        .bind(id)
-        .execute(&mut *transaction)
-        .await?;
-        require_affected(result.rows_affected(), "running sync run", id)?;
-        sqlx::query(
+            SyncRunStatus::Failed.as_str(),
+            now,
+            error,
+            id,
+        )?;
+        require_affected(affected, "running sync run", id)?;
+        moltis_db::tx_execute!(
+            &mut transaction,
             "UPDATE connector_datasets SET last_error = ?, updated_at = ? \
              WHERE id = (SELECT dataset_id FROM connector_sync_runs WHERE id = ?)",
-        )
-        .bind(error)
-        .bind(now)
-        .bind(id)
-        .execute(&mut *transaction)
-        .await?;
+            error,
+            now,
+            id,
+        )?;
         let run = sync_run_in_transaction(&mut transaction, id).await?;
         transaction.commit().await?;
         record_write("sync.fail");
@@ -592,29 +814,27 @@ impl SqliteConnectorStore {
             ));
         }
         let now = now_millis();
-        let mut transaction = self.pool.begin().await?;
-        let result = sqlx::query(
+        let mut transaction = self.db.begin().await?;
+        let affected = moltis_db::tx_execute!(
+            &mut transaction,
             "UPDATE connector_sync_runs SET status = ?, finished_at = ?, error = ? \
              WHERE id = ? AND status = 'running'",
-        )
-        .bind(SyncRunStatus::Failed.as_str())
-        .bind(now)
-        .bind(error)
-        .bind(id)
-        .execute(&mut *transaction)
-        .await?;
-        require_affected(result.rows_affected(), "running sync run", id)?;
-        let dataset_update = sqlx::query(
+            SyncRunStatus::Failed.as_str(),
+            now,
+            error,
+            id,
+        )?;
+        require_affected(affected, "running sync run", id)?;
+        let dataset_affected = moltis_db::tx_execute!(
+            &mut transaction,
             "UPDATE connector_datasets SET last_error = ?, next_sync_at = ?, updated_at = ? \
              WHERE id = (SELECT dataset_id FROM connector_sync_runs WHERE id = ?)",
-        )
-        .bind(error)
-        .bind(next_sync_at.map(datetime_to_millis).transpose()?)
-        .bind(now)
-        .bind(id)
-        .execute(&mut *transaction)
-        .await?;
-        require_affected(dataset_update.rows_affected(), "sync run dataset", id)?;
+            error,
+            next_sync_at.map(datetime_to_millis).transpose()?,
+            now,
+            id,
+        )?;
+        require_affected(dataset_affected, "sync run dataset", id)?;
         let run = sync_run_in_transaction(&mut transaction, id).await?;
         transaction.commit().await?;
         record_write("sync.fail");
@@ -628,24 +848,21 @@ impl SqliteConnectorStore {
             ));
         }
         let now = now_millis();
-        let mut transaction = self.pool.begin().await?;
-        sqlx::query(
+        let mut transaction = self.db.begin().await?;
+        moltis_db::tx_execute!(
+            &mut transaction,
             "UPDATE connector_datasets SET last_error = ?, updated_at = ? \
              WHERE id IN (SELECT dataset_id FROM connector_sync_runs WHERE status = 'running')",
-        )
-        .bind(error)
-        .bind(now)
-        .execute(&mut *transaction)
-        .await?;
-        let failed = sqlx::query(
+            error,
+            now,
+        )?;
+        let failed = moltis_db::tx_execute!(
+            &mut transaction,
             "UPDATE connector_sync_runs SET status = 'failed', finished_at = ?, error = ? \
              WHERE status = 'running'",
-        )
-        .bind(now)
-        .bind(error)
-        .execute(&mut *transaction)
-        .await?
-        .rows_affected();
+            now,
+            error,
+        )?;
         transaction.commit().await?;
         if failed != 0 {
             record_write("sync.recover");
@@ -659,15 +876,15 @@ impl SqliteConnectorStore {
         limit: u64,
     ) -> Result<Vec<SyncRun>> {
         validate_limit(limit)?;
-        let rows = sqlx::query(
+        let rows: Vec<SyncRunRow> = moltis_db::fetch_all!(
+            &self.db,
+            SyncRunRow,
             "SELECT * FROM connector_sync_runs WHERE dataset_id = ? \
              ORDER BY started_at DESC, id DESC LIMIT ?",
-        )
-        .bind(dataset_id)
-        .bind(u64_to_i64(limit)?)
-        .fetch_all(&self.pool)
-        .await?;
-        rows.iter().map(sync_run_from_row).collect()
+            dataset_id,
+            u64_to_i64(limit)?,
+        )?;
+        rows.into_iter().map(sync_run_from_row).collect()
     }
 
     async fn get_account_required(&self, id: &str) -> Result<Account> {
@@ -684,17 +901,17 @@ impl SqliteConnectorStore {
 }
 
 #[async_trait]
-impl ConnectorReader for SqliteConnectorStore {
+impl ConnectorReader for DbConnectorStore {
     async fn list_datasets_for_kind(&self, kind: ConnectorKind) -> Result<Vec<Dataset>> {
-        let rows = sqlx::query(
+        let rows: Vec<DatasetRow> = moltis_db::fetch_all!(
+            &self.db,
+            DatasetRow,
             "SELECT dataset.* FROM connector_datasets AS dataset \
              JOIN connector_accounts AS account ON account.id = dataset.account_id \
              WHERE account.kind = ? ORDER BY dataset.name, dataset.id",
-        )
-        .bind(kind.as_str())
-        .fetch_all(&self.pool)
-        .await?;
-        rows.iter().map(dataset_from_row).collect()
+            kind.as_str(),
+        )?;
+        rows.into_iter().map(dataset_from_row).collect()
     }
 
     async fn query_items_for_kind(
@@ -722,21 +939,20 @@ impl ConnectorReader for SqliteConnectorStore {
     }
 }
 
-async fn sync_run_in_transaction(
-    transaction: &mut Transaction<'_, Sqlite>,
-    id: &str,
-) -> Result<SyncRun> {
-    sqlx::query("SELECT * FROM connector_sync_runs WHERE id = ?")
-        .bind(id)
-        .fetch_optional(&mut **transaction)
-        .await?
-        .map(|row| sync_run_from_row(&row))
+async fn sync_run_in_transaction(transaction: &mut DbTx, id: &str) -> Result<SyncRun> {
+    let row: Option<SyncRunRow> = moltis_db::tx_fetch_optional!(
+        transaction,
+        SyncRunRow,
+        "SELECT * FROM connector_sync_runs WHERE id = ?",
+        id,
+    )?;
+    row.map(sync_run_from_row)
         .transpose()?
         .ok_or_else(|| not_found("sync run", id))
 }
 
 async fn apply_snapshot_transaction(
-    transaction: &mut Transaction<'_, Sqlite>,
+    transaction: &mut DbTx,
     dataset_id: &str,
     items: &[ConnectorItemInput],
     observed_remote_ids: &[String],
@@ -745,7 +961,8 @@ async fn apply_snapshot_transaction(
 ) -> Result<SnapshotResult> {
     for item in items {
         let body = serde_json::to_string(&item.body_json)?;
-        sqlx::query(
+        moltis_db::tx_execute!(
+            transaction,
             "INSERT INTO connector_items \
              (id, dataset_id, remote_id, kind, remote_version, occurred_at, updated_at, \
                body_json, search_text, content_hash, created_at, stored_at, deleted_at) \
@@ -756,21 +973,19 @@ async fn apply_snapshot_transaction(
                 body_json = excluded.body_json, search_text = excluded.search_text, \
                 content_hash = excluded.content_hash, stored_at = excluded.stored_at, \
                 deleted_at = NULL",
-        )
-        .bind(Uuid::new_v4().to_string())
-        .bind(dataset_id)
-        .bind(&item.remote_id)
-        .bind(&item.kind)
-        .bind(&item.remote_version)
-        .bind(&item.occurred_at)
-        .bind(&item.updated_at)
-        .bind(body)
-        .bind(&item.search_text)
-        .bind(&item.content_hash)
-        .bind(now)
-        .bind(now)
-        .execute(&mut **transaction)
-        .await?;
+            Uuid::new_v4().to_string(),
+            dataset_id,
+            &item.remote_id,
+            &item.kind,
+            &item.remote_version,
+            &item.occurred_at,
+            &item.updated_at,
+            body,
+            &item.search_text,
+            &item.content_hash,
+            now,
+            now,
+        )?;
     }
 
     let deleted = if complete {
@@ -784,125 +999,185 @@ async fn apply_snapshot_transaction(
         deleted,
         active,
     };
-    let dataset_update =
-        sqlx::query("UPDATE connector_datasets SET item_count = ?, updated_at = ? WHERE id = ?")
-            .bind(u64_to_i64(active)?)
-            .bind(now)
-            .bind(dataset_id)
-            .execute(&mut **transaction)
-            .await?;
-    require_affected(dataset_update.rows_affected(), "dataset", dataset_id)?;
+    let dataset_affected = moltis_db::tx_execute!(
+        transaction,
+        "UPDATE connector_datasets SET item_count = ?, updated_at = ? WHERE id = ?",
+        u64_to_i64(active)?,
+        now,
+        dataset_id,
+    )?;
+    require_affected(dataset_affected, "dataset", dataset_id)?;
     Ok(result)
 }
 
 async fn tombstone_unobserved(
-    transaction: &mut Transaction<'_, Sqlite>,
+    transaction: &mut DbTx,
     dataset_id: &str,
     observed_remote_ids: &[String],
     now: i64,
 ) -> Result<u64> {
     let unique: HashSet<&str> = observed_remote_ids.iter().map(String::as_str).collect();
     let observed = serde_json::to_string(&unique)?;
-    Ok(sqlx::query(
-        "UPDATE connector_items AS item SET deleted_at = ? \
-         WHERE item.dataset_id = ? AND item.deleted_at IS NULL \
-           AND NOT EXISTS (SELECT 1 FROM json_each(?) WHERE value = item.remote_id)",
-    )
-    .bind(now)
-    .bind(dataset_id)
-    .bind(observed)
-    .execute(&mut **transaction)
-    .await?
-    .rows_affected())
+    // SQLite expands the observed JSON array with json_each; PostgreSQL uses
+    // jsonb_array_elements_text. Same shape, same binds.
+    let sql = match transaction.dialect() {
+        Dialect::Sqlite => {
+            "UPDATE connector_items AS item SET deleted_at = ? \
+             WHERE item.dataset_id = ? AND item.deleted_at IS NULL \
+               AND NOT EXISTS (SELECT 1 FROM json_each(?) WHERE value = item.remote_id)"
+        },
+        Dialect::Postgres => {
+            "UPDATE connector_items AS item SET deleted_at = ? \
+             WHERE item.dataset_id = ? AND item.deleted_at IS NULL \
+               AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(?::jsonb) AS observed \
+                 WHERE observed.value = item.remote_id)"
+        },
+    };
+    Ok(moltis_db::tx_execute!(
+        transaction,
+        sql,
+        now,
+        dataset_id,
+        observed,
+    )?)
 }
 
-async fn active_count(transaction: &mut Transaction<'_, Sqlite>, dataset_id: &str) -> Result<u64> {
-    let count: i64 = sqlx::query_scalar(
+async fn active_count(transaction: &mut DbTx, dataset_id: &str) -> Result<u64> {
+    let count: i64 = moltis_db::tx_fetch_one!(
+        transaction,
+        (i64,),
         "SELECT COUNT(*) FROM connector_items WHERE dataset_id = ? AND deleted_at IS NULL",
-    )
-    .bind(dataset_id)
-    .fetch_one(&mut **transaction)
-    .await?;
+        dataset_id,
+    )?
+    .0;
     i64_to_u64(count, "active item count")
 }
 
-fn account_from_row(row: &SqliteRow) -> Result<Account> {
-    let kind: String = row.try_get("kind")?;
-    let config: String = row.try_get("config")?;
+fn account_from_row(row: AccountRow) -> Result<Account> {
+    let AccountRow {
+        id,
+        kind,
+        source_key,
+        name,
+        config,
+        enabled,
+        created_at,
+        updated_at,
+    } = row;
     Ok(Account {
-        id: row.try_get("id")?,
+        id,
         kind: ConnectorKind::try_from(kind)?,
-        source_key: row.try_get("source_key")?,
-        name: row.try_get("name")?,
+        source_key,
+        name,
         config: serde_json::from_str(&config)?,
-        enabled: row.try_get("enabled")?,
-        created_at: millis_to_datetime(row.try_get("created_at")?)?,
-        updated_at: millis_to_datetime(row.try_get("updated_at")?)?,
+        enabled,
+        created_at: millis_to_datetime(created_at)?,
+        updated_at: millis_to_datetime(updated_at)?,
     })
 }
 
-fn dataset_from_row(row: &SqliteRow) -> Result<Dataset> {
-    let config: String = row.try_get("config")?;
-    let schedule: Option<i64> = row.try_get("schedule_minutes")?;
+fn dataset_from_row(row: DatasetRow) -> Result<Dataset> {
+    let DatasetRow {
+        id,
+        account_id,
+        name,
+        instruction,
+        config,
+        plan_revision,
+        synced_plan_revision,
+        schedule_minutes,
+        projection_jsonl,
+        projection_md,
+        enabled,
+        last_sync_at,
+        next_sync_at,
+        last_error,
+        item_count,
+        created_at,
+        updated_at,
+    } = row;
     Ok(Dataset {
-        id: row.try_get("id")?,
-        account_id: row.try_get("account_id")?,
-        name: row.try_get("name")?,
-        instruction: row.try_get("instruction")?,
+        id,
+        account_id,
+        name,
+        instruction,
         config: serde_json::from_str(&config)?,
-        plan_revision: i64_to_u64(row.try_get("plan_revision")?, "plan_revision")?,
-        synced_plan_revision: row
-            .try_get::<Option<i64>, _>("synced_plan_revision")?
+        plan_revision: i64_to_u64(plan_revision, "plan_revision")?,
+        synced_plan_revision: synced_plan_revision
             .map(|revision| i64_to_u64(revision, "synced_plan_revision"))
             .transpose()?,
-        schedule_minutes: schedule
+        schedule_minutes: schedule_minutes
             .map(|value| i64_to_u64(value, "schedule_minutes"))
             .transpose()?,
         projections: ProjectionConfig {
-            jsonl: row.try_get("projection_jsonl")?,
-            markdown: row.try_get("projection_md")?,
+            jsonl: projection_jsonl,
+            markdown: projection_md,
         },
-        enabled: row.try_get("enabled")?,
-        last_sync_at: optional_datetime(row.try_get("last_sync_at")?)?,
-        next_sync_at: optional_datetime(row.try_get("next_sync_at")?)?,
-        last_error: row.try_get("last_error")?,
-        item_count: i64_to_u64(row.try_get("item_count")?, "item_count")?,
-        created_at: millis_to_datetime(row.try_get("created_at")?)?,
-        updated_at: millis_to_datetime(row.try_get("updated_at")?)?,
+        enabled,
+        last_sync_at: optional_datetime(last_sync_at)?,
+        next_sync_at: optional_datetime(next_sync_at)?,
+        last_error,
+        item_count: i64_to_u64(item_count, "item_count")?,
+        created_at: millis_to_datetime(created_at)?,
+        updated_at: millis_to_datetime(updated_at)?,
     })
 }
 
-fn item_from_row(row: &SqliteRow) -> Result<ConnectorItem> {
-    let body: String = row.try_get("body_json")?;
+fn item_from_row(row: ItemRow) -> Result<ConnectorItem> {
+    let ItemRow {
+        id,
+        dataset_id,
+        remote_id,
+        kind,
+        remote_version,
+        occurred_at,
+        updated_at,
+        body_json,
+        search_text,
+        content_hash,
+        created_at,
+        stored_at,
+        deleted_at,
+    } = row;
     Ok(ConnectorItem {
-        id: row.try_get("id")?,
-        dataset_id: row.try_get("dataset_id")?,
-        remote_id: row.try_get("remote_id")?,
-        kind: row.try_get("kind")?,
-        remote_version: row.try_get("remote_version")?,
-        occurred_at: row.try_get("occurred_at")?,
-        updated_at: row.try_get("updated_at")?,
-        body_json: serde_json::from_str(&body)?,
-        search_text: row.try_get("search_text")?,
-        content_hash: row.try_get("content_hash")?,
-        created_at: millis_to_datetime(row.try_get("created_at")?)?,
-        stored_at: millis_to_datetime(row.try_get("stored_at")?)?,
-        deleted_at: optional_datetime(row.try_get("deleted_at")?)?,
+        id,
+        dataset_id,
+        remote_id,
+        kind,
+        remote_version,
+        occurred_at,
+        updated_at,
+        body_json: serde_json::from_str(&body_json)?,
+        search_text,
+        content_hash,
+        created_at: millis_to_datetime(created_at)?,
+        stored_at: millis_to_datetime(stored_at)?,
+        deleted_at: optional_datetime(deleted_at)?,
     })
 }
 
-fn sync_run_from_row(row: &SqliteRow) -> Result<SyncRun> {
-    let status: String = row.try_get("status")?;
+fn sync_run_from_row(row: SyncRunRow) -> Result<SyncRun> {
+    let SyncRunRow {
+        id,
+        dataset_id,
+        status,
+        started_at,
+        finished_at,
+        upserted,
+        deleted,
+        active,
+        error,
+    } = row;
     Ok(SyncRun {
-        id: row.try_get("id")?,
-        dataset_id: row.try_get("dataset_id")?,
+        id,
+        dataset_id,
         status: SyncRunStatus::try_from(status.as_str())?,
-        started_at: millis_to_datetime(row.try_get("started_at")?)?,
-        finished_at: optional_datetime(row.try_get("finished_at")?)?,
-        upserted: i64_to_u64(row.try_get("upserted")?, "sync upserted")?,
-        deleted: i64_to_u64(row.try_get("deleted")?, "sync deleted")?,
-        active: i64_to_u64(row.try_get("active")?, "sync active")?,
-        error: row.try_get("error")?,
+        started_at: millis_to_datetime(started_at)?,
+        finished_at: optional_datetime(finished_at)?,
+        upserted: i64_to_u64(upserted, "sync upserted")?,
+        deleted: i64_to_u64(deleted, "sync deleted")?,
+        active: i64_to_u64(active, "sync active")?,
+        error,
     })
 }
 

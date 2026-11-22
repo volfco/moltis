@@ -1,22 +1,19 @@
 use {
     moltis_connectors::{
         AccountCreate, ConnectorItemInput, ConnectorKind, Dataset, DatasetCreate, DatasetUpdate,
-        ItemQuery, ProjectionConfig, SqliteConnectorStore, cleanup_projection_artifacts,
+        DbConnectorStore, ItemQuery, ProjectionConfig, cleanup_projection_artifacts,
         run_migrations, write_projection,
     },
+    moltis_db::{Db, DbOptions},
     serde_json::{Value, json},
-    sqlx::sqlite::SqlitePoolOptions,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-async fn fixture() -> TestResult<(SqliteConnectorStore, Dataset)> {
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await?;
-    run_migrations(&pool).await?;
-    let store = SqliteConnectorStore::new(pool);
+async fn fixture() -> TestResult<(DbConnectorStore, Dataset)> {
+    let db = Db::connect(&DbOptions::sqlite(":memory:", 1)).await?;
+    run_migrations(&db).await?;
+    let store = DbConnectorStore::new(db);
     let account = store
         .create_account(AccountCreate {
             kind: ConnectorKind::Caldav,

@@ -19,5 +19,5 @@ pub use {
     projection::{cleanup_projection_artifacts, projection_directory, write_projection},
     reader::ConnectorReader,
     search::MAX_SEARCH_QUERY_LENGTH,
-    store::{MAX_QUERY_LIMIT, SqliteConnectorStore},
+    store::{DbConnectorStore, MAX_QUERY_LIMIT},
 };

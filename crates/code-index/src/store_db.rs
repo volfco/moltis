@@ -352,30 +352,38 @@ mod tests {
         }
     }
 
-    /// Fresh store with an empty code-index schema. Returns `None` when
-    /// PostgreSQL is requested but `TEST_POSTGRES_URL` is unset or setup
-    /// fails. The caller must hold [`pg_lock`] for [`Backend::Postgres`].
+    /// Fresh store with an empty code-index schema. Skips (returns `None`)
+    /// only when `TEST_POSTGRES_URL` is unset; when it is set, any
+    /// connect/reset/migration failure panics so a broken harness can not
+    /// pass green. The caller must hold [`pg_lock`] for [`Backend::Postgres`].
     async fn store(backend: Backend) -> Option<DbCodeIndexStore> {
         let db = match backend {
-            Backend::Sqlite => Db::connect(&DbOptions::sqlite(":memory:", 1)).await.ok()?,
+            Backend::Sqlite => Db::connect(&DbOptions::sqlite(":memory:", 1))
+                .await
+                .unwrap_or_else(|error| panic!("sqlite test db connect failed: {error}")),
             Backend::Postgres => {
-                let url = std::env::var("TEST_POSTGRES_URL").ok()?;
-                let db = Db::connect(&DbOptions::postgres(url, 2)).await.ok()?;
+                let Ok(url) = std::env::var("TEST_POSTGRES_URL") else {
+                    return None;
+                };
+                let db = Db::connect(&DbOptions::postgres(url, 2))
+                    .await
+                    .unwrap_or_else(|error| panic!("postgres test db connect failed: {error}"));
                 // Dropping sqlx's history is required: with it in place the
                 // migrator believes this version is already applied and
                 // creates nothing.
-                let reset = moltis_db::execute!(
+                moltis_db::execute!(
                     &db,
                     "DROP TABLE IF EXISTS code_chunks_fts, code_chunks, _sqlx_migrations CASCADE"
-                );
-                if let Err(error) = reset {
-                    eprintln!("postgres test reset failed: {error}");
-                    return None;
-                }
+                )
+                .unwrap_or_else(|error| panic!("postgres test reset failed: {error}"));
                 db
             },
         };
-        Some(DbCodeIndexStore::new(db).await.unwrap())
+        Some(
+            DbCodeIndexStore::new(db)
+                .await
+                .unwrap_or_else(|error| panic!("code-index test migrations failed: {error}")),
+        )
     }
 
     async fn initialize_idempotent_case(store: &DbCodeIndexStore) {

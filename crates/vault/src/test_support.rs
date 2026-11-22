@@ -22,38 +22,40 @@ pub(crate) fn pg_lock() -> &'static tokio::sync::Mutex<()> {
 /// Fresh database with the vault schema plus the gateway tables the
 /// migration helpers operate on (`env_variables`, `ssh_keys`).
 ///
-/// Returns `None` when PostgreSQL is requested but `TEST_POSTGRES_URL` is
-/// unset or setup fails. The caller must already hold [`pg_lock`] for
+/// Skips (returns `None`) only when `TEST_POSTGRES_URL` is unset; when it is
+/// set, any connect/reset/migration failure panics so a broken harness can
+/// not pass green. The caller must already hold [`pg_lock`] for
 /// [`Backend::Postgres`].
 pub(crate) async fn test_db(backend: Backend) -> Option<Db> {
     let db = match backend {
-        Backend::Sqlite => Db::connect(&DbOptions::sqlite(":memory:", 1)).await.ok()?,
+        Backend::Sqlite => Db::connect(&DbOptions::sqlite(":memory:", 1))
+            .await
+            .unwrap_or_else(|error| panic!("sqlite test db connect failed: {error}")),
         Backend::Postgres => {
-            let url = std::env::var("TEST_POSTGRES_URL").ok()?;
-            let db = Db::connect(&DbOptions::postgres(url, 2)).await.ok()?;
+            let Ok(url) = std::env::var("TEST_POSTGRES_URL") else {
+                return None;
+            };
+            let db = Db::connect(&DbOptions::postgres(url, 2))
+                .await
+                .unwrap_or_else(|error| panic!("postgres test db connect failed: {error}"));
             // Dropping sqlx's history is required: with it in place the
             // migrator believes this version is already applied and creates
             // nothing.
-            let reset = moltis_db::execute!(
+            moltis_db::execute!(
                 &db,
                 "DROP TABLE IF EXISTS env_variables, ssh_keys, vault_metadata, \
                  _sqlx_migrations CASCADE"
-            );
-            if let Err(error) = reset {
-                eprintln!("postgres test reset failed: {error}");
-                return None;
-            }
+            )
+            .unwrap_or_else(|error| panic!("postgres test reset failed: {error}"));
             db
         },
     };
-    if let Err(error) = crate::run_migrations(&db).await {
-        eprintln!("vault test migrations failed: {error}");
-        return None;
-    }
-    if let Err(error) = create_gateway_tables(&db).await {
-        eprintln!("vault test gateway tables failed: {error}");
-        return None;
-    }
+    crate::run_migrations(&db)
+        .await
+        .unwrap_or_else(|error| panic!("vault test migrations failed: {error}"));
+    create_gateway_tables(&db)
+        .await
+        .unwrap_or_else(|error| panic!("vault test gateway tables failed: {error}"));
     Some(db)
 }
 
