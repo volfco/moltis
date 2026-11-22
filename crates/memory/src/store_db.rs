@@ -15,14 +15,14 @@
 
 use {
     async_trait::async_trait,
-    moltis_db::{Db, Dialect, execute, fetch_all, fetch_optional, scalar},
+    moltis_db::{Db, Dialect, execute, fetch_all, fetch_one, fetch_optional, scalar},
 };
 
 use crate::{
     pgvector::PgvectorStatus,
     schema::{ChunkRow, FileRow},
     search::{self, SearchResult},
-    store::{CacheEntry, MemoryStore, MergeStrategy},
+    store::{CacheEntry, EmbeddingMeta, MemoryStore, MergeStrategy},
     sync_lock::SyncLockGuard,
 };
 
@@ -386,6 +386,30 @@ async fn keyword_search_pg(
             }
         })
         .collect())
+}
+
+// ── embedding identity (memory_meta) ──────────────────────────────────────
+
+/// `memory_meta` key holding the provider key of the stored vectors.
+const META_PROVIDER_KEY: &str = "embedding_provider_key";
+/// `memory_meta` key holding the model name of the stored vectors.
+const META_MODEL: &str = "embedding_model";
+/// `memory_meta` key holding the dimension count of the stored vectors.
+const META_DIMENSIONS: &str = "embedding_dims";
+
+/// HNSW index over `chunks.embedding`, created once the dimension is known.
+const CHUNKS_EMBEDDING_INDEX: &str = "chunks_embedding_hnsw";
+
+/// Render `chunks.embedding`'s SQL type, e.g. `vector(1536)` or `vector`.
+async fn embedding_column_type(db: &Db) -> crate::error::Result<String> {
+    Ok(fetch_one!(
+        db,
+        (String,),
+        "SELECT format_type(a.atttypid, a.atttypmod) FROM pg_attribute a \
+         WHERE a.attrelid = 'chunks'::regclass AND a.attname = 'embedding' \
+         AND NOT a.attisdropped"
+    )?
+    .0)
 }
 
 // ── row encoding ──────────────────────────────────────────────────────────
@@ -925,6 +949,121 @@ impl MemoryStore for DbMemoryStore {
             Dialect::Sqlite => "sqlite",
             Dialect::Postgres => "postgres",
         }
+    }
+
+    async fn read_embedding_meta(&self) -> crate::error::Result<Option<EmbeddingMeta>> {
+        let rows: Vec<(String, String)> = fetch_all!(
+            &self.db,
+            (String, String),
+            "SELECT key, value FROM memory_meta"
+        )?;
+        let mut provider_key = None;
+        let mut model = None;
+        let mut dimensions = None;
+        for (key, value) in rows {
+            match key.as_str() {
+                META_PROVIDER_KEY => provider_key = Some(value),
+                META_MODEL => model = Some(value),
+                META_DIMENSIONS => dimensions = value.parse::<usize>().ok(),
+                _ => {},
+            }
+        }
+        Ok(match (provider_key, model, dimensions) {
+            (Some(provider_key), Some(model), Some(dimensions)) => Some(EmbeddingMeta {
+                provider_key,
+                model,
+                dimensions,
+            }),
+            // A partially written identity is no identity: the next sync
+            // re-embeds and rewrites all three keys.
+            _ => None,
+        })
+    }
+
+    async fn write_embedding_meta(&self, meta: &EmbeddingMeta) -> crate::error::Result<()> {
+        let rows = [
+            (META_PROVIDER_KEY, meta.provider_key.clone()),
+            (META_MODEL, meta.model.clone()),
+            (META_DIMENSIONS, meta.dimensions.to_string()),
+        ];
+        let mut tx = self.db.begin().await?;
+        for (key, value) in rows {
+            moltis_db::tx_execute!(
+                &mut tx,
+                "INSERT INTO memory_meta (key, value) VALUES (?, ?) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                key,
+                value,
+            )?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn relax_embedding_schema(&self) -> crate::error::Result<()> {
+        if !self.db.is_postgres() {
+            return Ok(());
+        }
+        // The HNSW index cannot span mixed dimensions, and it would be
+        // rebuilt (then reject the new vectors) on the type change.
+        execute!(
+            &self.db,
+            format!("DROP INDEX IF EXISTS {CHUNKS_EMBEDDING_INDEX}")
+        )?;
+        if embedding_column_type(&self.db).await? != "vector" {
+            // Untyped vectors accept any dimension, so the rows can be mixed
+            // between the old and the new provider while the re-embed runs.
+            execute!(
+                &self.db,
+                "ALTER TABLE chunks ALTER COLUMN embedding TYPE vector USING embedding::vector"
+            )?;
+        }
+        Ok(())
+    }
+
+    async fn ensure_embedding_schema(&self, dimensions: usize) -> crate::error::Result<()> {
+        if !self.db.is_postgres() {
+            return Ok(());
+        }
+        let expected = format!("vector({dimensions})");
+        let (current, index_present): (String, bool) = fetch_one!(
+            &self.db,
+            (String, bool),
+            format!(
+                "SELECT format_type(a.atttypid, a.atttypmod), \
+                 to_regclass('{CHUNKS_EMBEDDING_INDEX}') IS NOT NULL \
+                 FROM pg_attribute a WHERE a.attrelid = 'chunks'::regclass \
+                 AND a.attname = 'embedding' AND NOT a.attisdropped"
+            ),
+        )?;
+        if current != expected {
+            // `USING` is required: casting an untyped vector to a dimensioned
+            // one is not an assignment cast. Every stored row already carries
+            // `dimensions` values by now — the re-embed runs before this — so
+            // the cast cannot fail; a mismatch surfaces as a loud error here
+            // rather than silent mixed-dimension data.
+            execute!(
+                &self.db,
+                format!(
+                    "ALTER TABLE chunks ALTER COLUMN embedding TYPE vector({dimensions}) \
+                     USING embedding::vector({dimensions})"
+                )
+            )?;
+        }
+        if !index_present {
+            // HNSW with pgvector's default build parameters (m=16,
+            // ef_construction=64): a fine default for memory-sized indexes and
+            // no tuning knob to expose yet. Cosine distance matches both the
+            // `<=>` search and how vectors are compared in SQLite.
+            execute!(
+                &self.db,
+                format!(
+                    "CREATE INDEX IF NOT EXISTS {CHUNKS_EMBEDDING_INDEX} \
+                     ON chunks USING hnsw (embedding vector_cosine_ops)"
+                )
+            )?;
+        }
+        Ok(())
     }
 }
 

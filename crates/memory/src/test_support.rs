@@ -41,7 +41,7 @@ pub(crate) async fn pg_test_db_pre_migration() -> Option<Db> {
     // believes this version is already applied and creates nothing.
     let reset = moltis_db::execute!(
         &db,
-        "DROP TABLE IF EXISTS chunks_fts, chunks, files, embedding_cache, \
+        "DROP TABLE IF EXISTS chunks_fts, chunks, files, embedding_cache, memory_meta, \
          _sqlx_migrations CASCADE"
     );
     reset.unwrap_or_else(|error| panic!("postgres test schema reset failed: {error}"));
