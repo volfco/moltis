@@ -983,3 +983,19 @@ async fn rotate_revoked_device_fails_cleanly() {
         moltis_db::fetch_all!(&db, (String,), "SELECT token_hash FROM device_tokens",).unwrap();
     assert_eq!(rows.len(), 1);
 }
+
+#[tokio::test]
+async fn device_token_debug_redacts_raw_token() {
+    let db = test_db().await;
+    let store = PairingStore::new(db);
+
+    let req = store
+        .request_pair("dev-debug", None, "linux", None)
+        .await
+        .unwrap();
+    let token = store.approve(&req.id).await.unwrap();
+
+    let debug = format!("{token:?}");
+    assert!(debug.contains("[REDACTED]"));
+    assert!(!debug.contains(&token.token));
+}

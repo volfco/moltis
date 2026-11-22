@@ -82,13 +82,27 @@ pub struct PairRequest {
     pub expires_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A raw device token. `Debug` redacts the bearer secret; serde is not
+/// implemented so the raw token cannot leak through serialization.
+#[derive(Clone)]
 pub struct DeviceToken {
     pub token: String,
     pub device_id: String,
     pub scopes: Vec<String>,
     pub issued_at_ms: u64,
     pub revoked: bool,
+}
+
+impl std::fmt::Debug for DeviceToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceToken")
+            .field("token", &"[REDACTED]")
+            .field("device_id", &self.device_id)
+            .field("scopes", &self.scopes)
+            .field("issued_at_ms", &self.issued_at_ms)
+            .field("revoked", &self.revoked)
+            .finish()
+    }
 }
 
 /// Result of verifying a device token.
