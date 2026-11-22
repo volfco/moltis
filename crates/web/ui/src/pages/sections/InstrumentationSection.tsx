@@ -10,7 +10,7 @@
 import type { VNode } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import { Badge, Loading, SectionHeading, StatusMessage, SubHeading } from "../../components/forms";
-import { sendRpc } from "../../helpers";
+import { sendRpc, sendRpcWhenReady } from "../../helpers";
 import { connected } from "../../signals";
 import { rerender } from "./_shared";
 
@@ -289,7 +289,7 @@ export function InstrumentationSection(): VNode {
 		if (!connected.value) return;
 		setLoading(true);
 		setError(null);
-		sendRpc<InstrumentationStatus>("instrumentation.status", {})
+		sendRpcWhenReady<InstrumentationStatus>("instrumentation.status", {})
 			.then((res) => {
 				if (res.payload) setStatus(res.payload);
 				else setError(res.error?.message ?? "Failed to load instrumentation status");

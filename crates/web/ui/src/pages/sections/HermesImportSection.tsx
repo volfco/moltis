@@ -3,7 +3,7 @@
 import type { VNode } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import { SectionHeading } from "../../components/forms";
-import { sendRpc } from "../../helpers";
+import { sendRpc, sendRpcWhenReady } from "../../helpers";
 import type { RpcResponse } from "./_shared";
 import { rerender } from "./_shared";
 
@@ -57,7 +57,7 @@ export function HermesImportSection(): VNode {
 
 	useEffect(() => {
 		let cancelled = false;
-		sendRpc("hermes.detect", {}).then((res: RpcResponse) => {
+		sendRpcWhenReady("hermes.detect", {}).then((res: RpcResponse) => {
 			if (cancelled) return;
 			if (res?.ok) setScan(res.payload as HermesScanResult);
 			else setError("Failed to scan Hermes installation");

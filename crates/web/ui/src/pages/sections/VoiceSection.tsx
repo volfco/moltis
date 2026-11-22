@@ -4,7 +4,7 @@ import type { VNode } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { TabBar } from "../../components/forms/Tabs";
 import * as gon from "../../gon";
-import { sendRpc } from "../../helpers";
+import { sendRpc, sendRpcWhenReady } from "../../helpers";
 import { connected } from "../../signals";
 import * as S from "../../state";
 import { fetchPhrase } from "../../tts-phrases";
@@ -120,7 +120,7 @@ export function VoiceSection(): VNode {
 			setVoiceLoading(true);
 			rerender();
 		}
-		Promise.all([fetchVoiceProviders(), sendRpc("voice.config.voxtral_requirements", {})])
+		Promise.all([fetchVoiceProviders(), sendRpcWhenReady("voice.config.voxtral_requirements", {})])
 			.then(([providers, voxtral]) => {
 				const provRes = providers as RpcResponse;
 				const voxtralRes = voxtral as RpcResponse;

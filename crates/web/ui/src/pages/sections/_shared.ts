@@ -7,8 +7,8 @@
 
 import { signal } from "@preact/signals";
 import type { VNode } from "preact";
-import { sendRpc } from "../../helpers";
-import * as S from "../../state";
+import { sendRpcWhenReady } from "../../helpers";
+import { onWsReady } from "../../state";
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -100,24 +100,36 @@ export function isMissingMethodError(res: RpcResponse | null): boolean {
 }
 
 export function fetchMainIdentity(): Promise<RpcResponse> {
-	return sendRpc("agents.identity.get", { agent_id: "main" }).then((res: RpcResponse) => {
+	return sendRpcWhenReady("agents.identity.get", { agent_id: "main" }).then((res: RpcResponse) => {
 		if (res?.ok || !isMissingMethodError(res)) return res;
-		return sendRpc("agent.identity.get", {});
+		return sendRpcWhenReady("agent.identity.get", {});
 	});
 }
+
+// Single-slot retry for the identity load: at most one onWsReady waiter is
+// pending at a time and it drains on the next handshake, so repeated UNAVAILABLE
+// failures can never stack registrations.
+let identityRetryPending = false;
 
 export function fetchIdentity(): void {
 	if (!_mounted) return;
 	fetchMainIdentity().then((res: RpcResponse) => {
 		if (res?.ok) {
 			identity.value = res.payload as IdentityData;
-			loading.value = false;
-			rerender();
-		} else if (_mounted && !S.connected) {
-			setTimeout(fetchIdentity, 500);
-		} else {
-			loading.value = false;
-			rerender();
+		} else if (res?.error?.code === "UNAVAILABLE" && _mounted) {
+			// The readiness budget expired before the handshake (server restart or
+			// slow reconnect). Re-fetch as soon as the handshake completes; keep the
+			// loading state until the retry settles, like the old retry loop did.
+			if (!identityRetryPending) {
+				identityRetryPending = true;
+				onWsReady(() => {
+					identityRetryPending = false;
+					fetchIdentity();
+				});
+			}
+			return;
 		}
+		loading.value = false;
+		rerender();
 	});
 }

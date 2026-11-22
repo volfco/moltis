@@ -2,6 +2,26 @@
 
 Short entries recording *why* the code is the way it is. Newest first.
 
+## 2026-11-22 — `sendRpcWhenReady` waits for the handshake before RPC loads
+
+**Scope:** minor. `crates/web/ui/src/helpers.ts`, `state.ts`, settings sections
+(commits `9dd1f6fa`, `ee1443aa`).
+
+**Decision:** initial page-data loads use `sendRpcWhenReady(method, params,
+timeout?)`, which waits on an `onWsReady` waiter registry in `state.ts` woken by
+`setConnected(true)` (post `hello-ok` handshake in `ws-connect.ts`) and then
+delegates to `sendRpc`. The wait is bounded by the same RPC timeout budget as
+`sendRpc`; on timeout it resolves `sendRpc`'s exact UNAVAILABLE error shape.
+Write/action RPCs stay on plain `sendRpc`.
+
+**Why:** settings sections fetched config in a bare `useEffect` before the
+WebSocket existed, so cold loads silently resolved UNAVAILABLE and rendered
+defaults instead of saved config. Alternatives: polling retries (what
+`MemorySection`/`_shared.ts` did ad hoc — unbounded or duplicated per section)
+and rewriting the `[connected.value]` effect gates (would lose reconnect
+refetch); a single bounded helper keeps behavior identical and removes the
+ad-hoc retry loop.
+
 ## 2026-11-22 — One `[database]` engine switch, no fallback
 
 **Scope:** major. `crates/config`, gateway startup, CLI, swift-bridge.

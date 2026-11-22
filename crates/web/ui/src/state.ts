@@ -116,6 +116,21 @@ export function $<T extends HTMLElement = HTMLElement>(id: string): T | null {
 	return document.getElementById(id) as T | null;
 }
 
+// Callbacks waiting for the WebSocket handshake to complete (see onWsReady).
+const wsReadyWaiters = new Set<() => void>();
+
+/** Run `cb` once the WebSocket handshake completes (immediately if already connected). Returns an unregister function. */
+export function onWsReady(cb: () => void): () => void {
+	if (connected && ws && ws.readyState === WebSocket.OPEN) {
+		cb();
+		return () => undefined;
+	}
+	wsReadyWaiters.add(cb);
+	return () => {
+		wsReadyWaiters.delete(cb);
+	};
+}
+
 // ── Setters ──────────────────────────────────────────────────
 export function setWs(v: WebSocket | null): void {
 	ws = v;
@@ -126,6 +141,12 @@ export function setReqId(v: number): void {
 export function setConnected(v: boolean): void {
 	connected = v;
 	sig.connected.value = v;
+	if (v) {
+		for (const cb of [...wsReadyWaiters]) {
+			wsReadyWaiters.delete(cb);
+			cb();
+		}
+	}
 }
 export function setSubscribed(v: boolean): void {
 	subscribed = v;

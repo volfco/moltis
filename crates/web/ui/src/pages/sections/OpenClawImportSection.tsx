@@ -3,7 +3,7 @@
 import type { VNode } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import { SectionHeading } from "../../components/forms";
-import { sendRpc } from "../../helpers";
+import { sendRpc, sendRpcWhenReady } from "../../helpers";
 import { ChannelType } from "../../types";
 import type { RpcResponse } from "./_shared";
 import { rerender } from "./_shared";
@@ -72,7 +72,7 @@ export function OpenClawImportSection(): VNode {
 
 	useEffect(() => {
 		let cancelled = false;
-		sendRpc("openclaw.scan", {}).then((res: RpcResponse) => {
+		sendRpcWhenReady("openclaw.scan", {}).then((res: RpcResponse) => {
 			if (cancelled) return;
 			if (res?.ok) setScan(res.payload as ScanResult);
 			else setError("Failed to scan OpenClaw installation");

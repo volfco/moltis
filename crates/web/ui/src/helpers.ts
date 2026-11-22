@@ -334,6 +334,53 @@ export function sendRpc<T = unknown>(
 	});
 }
 
+/**
+ * Like sendRpc, but waits for the WebSocket handshake to complete first.
+ * Initial page loads can run before the socket is ready; without the wait they
+ * silently resolve UNAVAILABLE and show defaults instead of saved state.
+ * The wait and the delegated request share one RPC timeout budget: the request
+ * receives the remaining budget. If the connection is still not ready when the
+ * budget expires, this resolves the same UNAVAILABLE error as sendRpc.
+ */
+export function sendRpcWhenReady<T = unknown>(
+	method: string,
+	params: unknown,
+	timeout?: number | { timeoutMs?: number },
+): Promise<RpcResponse<T>> {
+	if (S.connected && S.ws && S.ws.readyState === WebSocket.OPEN) {
+		return sendRpc<T>(method, params, timeout);
+	}
+	const requestedTimeoutMs = typeof timeout === "number" ? timeout : timeout?.timeoutMs;
+	const waitBudgetMs = rpcTimeoutMs(requestedTimeoutMs);
+	const startedAt = Date.now();
+	return new Promise((resolve) => {
+		let settled = false;
+		let off: (() => void) | undefined;
+		const finish = (ready: boolean): void => {
+			if (settled) return;
+			settled = true;
+			off?.();
+			clearTimeout(timer);
+			if (ready) {
+				resolve(sendRpc<T>(method, params, Math.max(1, waitBudgetMs - (Date.now() - startedAt))));
+			} else {
+				resolve({
+					ok: false,
+					error: {
+						code: "UNAVAILABLE",
+						message: localizedRpcErrorMessage({
+							code: "UNAVAILABLE",
+							message: "WebSocket not connected",
+						}),
+					},
+				});
+			}
+		};
+		const timer = setTimeout(() => finish(false), waitBudgetMs);
+		off = S.onWsReady(() => finish(true));
+	});
+}
+
 export function localizedRpcErrorMessage(error: RpcErrorObj | null | undefined): string {
 	if (!error) return t("errors:generic.title");
 	if (error.code) {

@@ -3,7 +3,7 @@
 import type { VNode } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import { Loading } from "../../components/forms";
-import { sendRpc } from "../../helpers";
+import { sendRpc, sendRpcWhenReady } from "../../helpers";
 import { clearAllSessions } from "../../sessions";
 import { connected } from "../../signals";
 import { targetChecked, targetValue } from "../../typed-events";
@@ -28,7 +28,7 @@ export function GraphqlSection(): VNode {
 			return;
 		}
 		setLoadingConfig(true);
-		sendRpc("graphql.config.get", {})
+		sendRpcWhenReady("graphql.config.get", {})
 			.then((res: RpcResponse) => {
 				if (res?.ok) {
 					setEnabled((res.payload as { enabled?: boolean })?.enabled !== false);

@@ -4,7 +4,7 @@ import { signal } from "@preact/signals";
 import type { VNode } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import * as gon from "../../gon";
-import { sendRpc } from "../../helpers";
+import { sendRpc, sendRpcWhenReady } from "../../helpers";
 import { fetchPhrase } from "../../tts-phrases";
 import { targetValue } from "../../typed-events";
 import { Modal } from "../../ui";
@@ -566,7 +566,7 @@ export function AddVoiceProviderModal({
 			return;
 		}
 		setElevenlabsCatalogLoading(true);
-		sendRpc("voice.elevenlabs.catalog", {})
+		sendRpcWhenReady("voice.elevenlabs.catalog", {})
 			.then((res: RpcResponse) => {
 				if (res?.ok) {
 					const payload = res.payload as {
