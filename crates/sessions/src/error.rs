@@ -12,6 +12,9 @@ pub enum Error {
     Sqlx(#[from] sqlx::Error),
 
     #[error(transparent)]
+    Db(#[from] moltis_db::DbError),
+
+    #[error(transparent)]
     Join(#[from] tokio::task::JoinError),
 
     #[error(transparent)]

@@ -10,6 +10,8 @@ pub mod key;
 pub mod metadata;
 pub mod session_events;
 pub mod state_store;
+#[cfg(test)]
+pub(crate) mod test_support;
 mod storage_layout;
 pub mod store;
 
@@ -28,10 +30,12 @@ pub use {
 /// This creates the `sessions` and `channel_sessions` tables. Should be called
 /// at application startup after [`moltis_projects::run_migrations`] (sessions
 /// has a foreign key to projects).
-pub async fn run_migrations(pool: &sqlx::SqlitePool) -> Result<()> {
-    sqlx::migrate!("./migrations")
-        .set_ignore_missing(true)
-        .run(pool)
-        .await?;
+pub async fn run_migrations(db: &moltis_db::Db) -> Result<()> {
+    moltis_db::run_migrations(
+        db,
+        sqlx::migrate!("./migrations"),
+        sqlx::migrate!("./migrations_pg"),
+    )
+    .await?;
     Ok(())
 }
