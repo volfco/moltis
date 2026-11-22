@@ -7,6 +7,7 @@ use std::{
 use {
     crate::{Result, types::Project},
     async_trait::async_trait,
+    moltis_db::{Db, execute, fetch_all, fetch_optional},
 };
 
 fn now_ms() -> u64 {
@@ -92,73 +93,52 @@ impl ProjectStore for TomlProjectStore {
     }
 }
 
-// ── SQLite-backed implementation ────────────────────────────────────
+// ── Database-backed implementation (SQLite / PostgreSQL) ────────────────────────────────────
 
-/// Stores projects in a SQLite database.
-pub struct SqliteProjectStore {
-    pool: sqlx::SqlitePool,
+/// Stores projects in a SQLite or PostgreSQL database.
+pub struct DbProjectStore {
+    db: Db,
 }
 
-impl SqliteProjectStore {
-    pub fn new(pool: sqlx::SqlitePool) -> Self {
-        Self { pool }
+impl DbProjectStore {
+    pub fn new(db: Db) -> Self {
+        Self { db }
     }
 
     /// Initialize the projects table schema.
     ///
-    /// **Deprecated**: Schema is now managed by sqlx migrations in the gateway crate.
-    /// This method is retained for tests that use in-memory databases.
+    /// Runs the crate's own migrations (SQLite and PostgreSQL dialects), so
+    /// tests using in-memory databases get the same schema as production.
     #[doc(hidden)]
-    pub async fn init(pool: &sqlx::SqlitePool) -> Result<()> {
-        sqlx::query(
-            r#"CREATE TABLE IF NOT EXISTS projects (
-                id               TEXT    PRIMARY KEY,
-                label            TEXT    NOT NULL,
-                directory        TEXT    NOT NULL,
-                system_prompt    TEXT,
-                auto_worktree    INTEGER NOT NULL DEFAULT 0,
-                setup_command    TEXT,
-                teardown_command TEXT,
-                branch_prefix    TEXT,
-                sandbox_image    TEXT,
-                detected         INTEGER NOT NULL DEFAULT 0,
-                code_index_enabled INTEGER NOT NULL DEFAULT 1,
-                created_at       INTEGER NOT NULL,
-                updated_at       INTEGER NOT NULL
-            )"#,
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_projects_updated_at ON projects(updated_at)")
-            .execute(pool)
-            .await
-            .ok();
-
-        Ok(())
+    pub async fn init(db: &Db) -> Result<()> {
+        crate::run_migrations(db).await
     }
 }
 
 #[async_trait]
-impl ProjectStore for SqliteProjectStore {
+impl ProjectStore for DbProjectStore {
     async fn list(&self) -> Result<Vec<Project>> {
-        let rows =
-            sqlx::query_as::<_, ProjectRow>("SELECT * FROM projects ORDER BY updated_at DESC")
-                .fetch_all(&self.pool)
-                .await?;
+        let rows = fetch_all!(
+            &self.db,
+            ProjectRow,
+            "SELECT * FROM projects ORDER BY updated_at DESC",
+        )?;
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
     async fn get(&self, id: &str) -> Result<Option<Project>> {
-        let row = sqlx::query_as::<_, ProjectRow>("SELECT * FROM projects WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
+        let row = fetch_optional!(
+            &self.db,
+            ProjectRow,
+            "SELECT * FROM projects WHERE id = ?",
+            id
+        )?;
         Ok(row.map(Into::into))
     }
 
     async fn upsert(&self, project: Project) -> Result<()> {
-        sqlx::query(
+        execute!(
+            &self.db,
             r#"INSERT INTO projects (id, label, directory, system_prompt, auto_worktree, setup_command, teardown_command, branch_prefix, sandbox_image, detected, code_index_enabled, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
@@ -173,48 +153,43 @@ impl ProjectStore for SqliteProjectStore {
                  detected = excluded.detected,
                  code_index_enabled = excluded.code_index_enabled,
                  updated_at = excluded.updated_at"#,
-        )
-        .bind(&project.id)
-        .bind(&project.label)
-        .bind(project.directory.to_string_lossy().as_ref())
-        .bind(&project.system_prompt)
-        .bind(project.auto_worktree as i32)
-        .bind(&project.setup_command)
-        .bind(&project.teardown_command)
-        .bind(&project.branch_prefix)
-        .bind(&project.sandbox_image)
-        .bind(project.detected as i32)
-        .bind(project.code_index_enabled as i32)
-        .bind(project.created_at as i64)
-        .bind(project.updated_at as i64)
-        .execute(&self.pool)
-        .await?;
+            &project.id,
+            &project.label,
+            project.directory.to_string_lossy().as_ref(),
+            &project.system_prompt,
+            project.auto_worktree,
+            &project.setup_command,
+            &project.teardown_command,
+            &project.branch_prefix,
+            &project.sandbox_image,
+            project.detected,
+            project.code_index_enabled,
+            project.created_at as i64,
+            project.updated_at as i64,
+        )?;
         Ok(())
     }
 
     async fn delete(&self, id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM projects WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        execute!(&self.db, "DELETE FROM projects WHERE id = ?", id)?;
         Ok(())
     }
 }
 
-/// Internal row type for sqlx mapping.
+/// Internal row type for sqlx mapping (both backends decode the same types).
 #[derive(sqlx::FromRow)]
 struct ProjectRow {
     id: String,
     label: String,
     directory: String,
     system_prompt: Option<String>,
-    auto_worktree: i32,
+    auto_worktree: bool,
     setup_command: Option<String>,
     teardown_command: Option<String>,
     branch_prefix: Option<String>,
     sandbox_image: Option<String>,
-    detected: i32,
-    code_index_enabled: i32,
+    detected: bool,
+    code_index_enabled: bool,
     created_at: i64,
     updated_at: i64,
 }
@@ -226,13 +201,13 @@ impl From<ProjectRow> for Project {
             label: r.label,
             directory: PathBuf::from(r.directory),
             system_prompt: r.system_prompt,
-            auto_worktree: r.auto_worktree != 0,
+            auto_worktree: r.auto_worktree,
             setup_command: r.setup_command,
             teardown_command: r.teardown_command,
             branch_prefix: r.branch_prefix,
             sandbox_image: r.sandbox_image,
-            detected: r.detected != 0,
-            code_index_enabled: r.code_index_enabled != 0,
+            detected: r.detected,
+            code_index_enabled: r.code_index_enabled,
             created_at: r.created_at as u64,
             updated_at: r.updated_at as u64,
         }
@@ -294,17 +269,14 @@ mod tests {
         assert!(store.list().await.unwrap().is_empty());
     }
 
-    async fn sqlite_pool() -> sqlx::SqlitePool {
+    async fn sqlite_db() -> Db {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
-        SqliteProjectStore::init(&pool).await.unwrap();
-        pool
+        let db = Db::from(pool);
+        DbProjectStore::init(&db).await.unwrap();
+        db
     }
 
-    #[tokio::test]
-    async fn test_sqlite_store_crud() {
-        let pool = sqlite_pool().await;
-        let store = SqliteProjectStore::new(pool);
-
+    async fn crud_suite(store: &DbProjectStore) {
         assert!(store.list().await.unwrap().is_empty());
 
         let p = new_project("test".into(), "Test".into(), "/tmp/test".into());
@@ -322,6 +294,25 @@ mod tests {
 
         store.delete("test").await.unwrap();
         assert!(store.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_store_crud() {
+        let store = DbProjectStore::new(sqlite_db().await);
+        crud_suite(&store).await;
+    }
+
+    #[tokio::test]
+    async fn test_postgres_store_crud() {
+        if std::env::var("TEST_POSTGRES_URL").is_err() {
+            eprintln!("skipping: TEST_POSTGRES_URL is not set");
+            return;
+        }
+        let _guard = crate::test_support::pg_lock().lock().await;
+        let Some(db) = crate::test_support::pg_test_db().await else {
+            return;
+        };
+        crud_suite(&DbProjectStore::new(db)).await;
     }
 
     #[tokio::test]

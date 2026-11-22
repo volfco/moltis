@@ -15,16 +15,17 @@ use {
 use moltis_webhooks::{
     auth, dedup,
     profiles::ProfileRegistry,
-    store::{NewDelivery, SqliteWebhookStore, WebhookStore},
+    store::{DbWebhookStore, NewDelivery, WebhookStore},
     types::{AuthMode, DeliveryStatus, EventFilter, SessionMode, WebhookCreate},
 };
 
 type HmacSha256 = Hmac<Sha256>;
 
-async fn setup() -> SqliteWebhookStore {
+async fn setup() -> DbWebhookStore {
     let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-    moltis_webhooks::run_migrations(&pool).await.unwrap();
-    SqliteWebhookStore::with_pool(pool)
+    let db = moltis_db::Db::from(pool);
+    moltis_webhooks::run_migrations(&db).await.unwrap();
+    DbWebhookStore::with_pool(db)
 }
 
 fn make_headers(pairs: &[(&str, &str)]) -> HeaderMap {

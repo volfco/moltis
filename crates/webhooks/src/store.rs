@@ -2,7 +2,7 @@
 
 use {
     async_trait::async_trait,
-    sqlx::{Row, SqlitePool},
+    moltis_db::{Db, execute, fetch_all, fetch_one, fetch_optional, tx_execute},
     time::OffsetDateTime,
 };
 
@@ -88,15 +88,15 @@ pub struct NewResponseAction {
     pub error_message: Option<String>,
 }
 
-/// SQLite-backed webhook store.
-pub struct SqliteWebhookStore {
-    pool: SqlitePool,
+/// Database-backed webhook store (SQLite or PostgreSQL).
+pub struct DbWebhookStore {
+    db: Db,
 }
 
-impl SqliteWebhookStore {
+impl DbWebhookStore {
     /// Create a store using an existing pool (migrations must already be run).
-    pub fn with_pool(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub fn with_pool(db: Db) -> Self {
+        Self { db }
     }
 }
 
@@ -106,118 +106,199 @@ fn now_iso() -> String {
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into())
 }
 
-fn row_to_webhook(row: &sqlx::sqlite::SqliteRow) -> Result<Webhook> {
-    let auth_mode_str: String = row.get("auth_mode");
+/// Row type for `webhooks`; both backends decode the same Rust types.
+#[derive(sqlx::FromRow)]
+struct WebhookRow {
+    id: i64,
+    name: String,
+    description: Option<String>,
+    enabled: bool,
+    public_id: String,
+    agent_id: Option<String>,
+    model: Option<String>,
+    system_prompt_suffix: Option<String>,
+    tool_policy_json: Option<String>,
+    auth_mode: String,
+    auth_config_json: Option<String>,
+    source_profile: String,
+    source_config_json: Option<String>,
+    event_filter_json: Option<String>,
+    session_mode: String,
+    named_session_key: Option<String>,
+    allowed_cidrs_json: Option<String>,
+    max_body_bytes: i64,
+    rate_limit_per_minute: i64,
+    delivery_count: i64,
+    last_delivery_at: Option<String>,
+    created_at: String,
+    updated_at: String,
+    deliver_only: bool,
+    prompt_template: Option<String>,
+    deliver_to: Option<String>,
+    deliver_extra_json: Option<String>,
+}
+
+/// Row type for `webhook_deliveries`; both backends decode the same Rust types.
+#[derive(sqlx::FromRow)]
+struct DeliveryRow {
+    id: i64,
+    webhook_id: i64,
+    received_at: String,
+    status: String,
+    event_type: Option<String>,
+    entity_key: Option<String>,
+    delivery_key: Option<String>,
+    http_method: Option<String>,
+    content_type: Option<String>,
+    remote_ip: Option<String>,
+    headers_json: Option<String>,
+    body_size: i64,
+    session_key: Option<String>,
+    rejection_reason: Option<String>,
+    run_error: Option<String>,
+    started_at: Option<String>,
+    finished_at: Option<String>,
+    duration_ms: Option<i64>,
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+}
+
+/// Row type for `webhook_response_actions`; both backends decode the same Rust
+/// types.
+#[derive(sqlx::FromRow)]
+struct ResponseActionRow {
+    id: i64,
+    delivery_id: i64,
+    tool_name: String,
+    input_json: Option<String>,
+    output_json: Option<String>,
+    status: String,
+    error_message: Option<String>,
+    created_at: String,
+}
+
+fn row_to_webhook(row: WebhookRow) -> Result<Webhook> {
     let auth_mode: AuthMode =
-        serde_json::from_value(serde_json::Value::String(auth_mode_str)).unwrap_or_default();
-    let session_mode_str: String = row.get("session_mode");
+        serde_json::from_value(serde_json::Value::String(row.auth_mode)).unwrap_or_default();
     let session_mode: SessionMode =
-        serde_json::from_value(serde_json::Value::String(session_mode_str)).unwrap_or_default();
+        serde_json::from_value(serde_json::Value::String(row.session_mode)).unwrap_or_default();
     let tool_policy: Option<ToolPolicy> = row
-        .get::<Option<String>, _>("tool_policy_json")
-        .and_then(|s| serde_json::from_str(&s).ok());
+        .tool_policy_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok());
     let event_filter: EventFilter = row
-        .get::<Option<String>, _>("event_filter_json")
-        .and_then(|s| serde_json::from_str(&s).ok())
+        .event_filter_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default();
     let allowed_cidrs: Vec<String> = row
-        .get::<Option<String>, _>("allowed_cidrs_json")
-        .and_then(|s| serde_json::from_str(&s).ok())
+        .allowed_cidrs_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default();
     let auth_config: Option<serde_json::Value> = row
-        .get::<Option<String>, _>("auth_config_json")
-        .and_then(|s| serde_json::from_str(&s).ok());
+        .auth_config_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok());
     let source_config: Option<serde_json::Value> = row
-        .get::<Option<String>, _>("source_config_json")
-        .and_then(|s| serde_json::from_str(&s).ok());
+        .source_config_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok());
+    let deliver_extra = row
+        .deliver_extra_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok());
 
     Ok(Webhook {
-        id: row.get("id"),
-        name: row.get("name"),
-        description: row.get("description"),
-        enabled: row.get::<i32, _>("enabled") != 0,
-        public_id: row.get("public_id"),
-        agent_id: row.get("agent_id"),
-        model: row.get("model"),
-        system_prompt_suffix: row.get("system_prompt_suffix"),
+        id: row.id,
+        name: row.name,
+        description: row.description,
+        enabled: row.enabled,
+        public_id: row.public_id,
+        agent_id: row.agent_id,
+        model: row.model,
+        system_prompt_suffix: row.system_prompt_suffix,
         tool_policy,
         auth_mode,
         auth_config,
-        source_profile: row.get("source_profile"),
+        source_profile: row.source_profile,
         source_config,
         event_filter,
         session_mode,
-        named_session_key: row.get("named_session_key"),
+        named_session_key: row.named_session_key,
         allowed_cidrs,
-        max_body_bytes: row.get::<i64, _>("max_body_bytes") as usize,
-        rate_limit_per_minute: row.get::<i64, _>("rate_limit_per_minute") as u32,
-        delivery_count: row.get::<i64, _>("delivery_count") as u64,
-        last_delivery_at: row.get("last_delivery_at"),
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-        deliver_only: row.get::<i32, _>("deliver_only") != 0,
-        prompt_template: row.get("prompt_template"),
-        deliver_to: row.get("deliver_to"),
-        deliver_extra: row
-            .get::<Option<String>, _>("deliver_extra_json")
-            .and_then(|s| serde_json::from_str(&s).ok()),
+        max_body_bytes: row.max_body_bytes as usize,
+        rate_limit_per_minute: row.rate_limit_per_minute as u32,
+        delivery_count: row.delivery_count as u64,
+        last_delivery_at: row.last_delivery_at,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        deliver_only: row.deliver_only,
+        prompt_template: row.prompt_template,
+        deliver_to: row.deliver_to,
+        deliver_extra,
     })
 }
 
-fn row_to_delivery(row: &sqlx::sqlite::SqliteRow) -> Result<WebhookDelivery> {
-    let status_str: String = row.get("status");
-    let status: DeliveryStatus = serde_json::from_value(serde_json::Value::String(status_str))
+fn row_to_delivery(row: DeliveryRow) -> Result<WebhookDelivery> {
+    let status: DeliveryStatus = serde_json::from_value(serde_json::Value::String(row.status))
         .unwrap_or(DeliveryStatus::Received);
 
     Ok(WebhookDelivery {
-        id: row.get("id"),
-        webhook_id: row.get("webhook_id"),
-        received_at: row.get("received_at"),
+        id: row.id,
+        webhook_id: row.webhook_id,
+        received_at: row.received_at,
         status,
-        event_type: row.get("event_type"),
-        entity_key: row.get("entity_key"),
-        delivery_key: row.get("delivery_key"),
-        http_method: row.get("http_method"),
-        content_type: row.get("content_type"),
-        remote_ip: row.get("remote_ip"),
-        headers_json: row.get("headers_json"),
-        body_size: row.get::<i64, _>("body_size") as usize,
-        session_key: row.get("session_key"),
-        rejection_reason: row.get("rejection_reason"),
-        run_error: row.get("run_error"),
-        started_at: row.get("started_at"),
-        finished_at: row.get("finished_at"),
-        duration_ms: row.try_get("duration_ms").ok().flatten(),
-        input_tokens: row.try_get("input_tokens").ok().flatten(),
-        output_tokens: row.try_get("output_tokens").ok().flatten(),
+        event_type: row.event_type,
+        entity_key: row.entity_key,
+        delivery_key: row.delivery_key,
+        http_method: row.http_method,
+        content_type: row.content_type,
+        remote_ip: row.remote_ip,
+        headers_json: row.headers_json,
+        body_size: row.body_size as usize,
+        session_key: row.session_key,
+        rejection_reason: row.rejection_reason,
+        run_error: row.run_error,
+        started_at: row.started_at,
+        finished_at: row.finished_at,
+        duration_ms: row.duration_ms,
+        input_tokens: row.input_tokens,
+        output_tokens: row.output_tokens,
     })
 }
 
 #[async_trait]
-impl WebhookStore for SqliteWebhookStore {
+impl WebhookStore for DbWebhookStore {
     async fn list_webhooks(&self) -> Result<Vec<Webhook>> {
-        let rows = sqlx::query("SELECT * FROM webhooks ORDER BY created_at DESC")
-            .fetch_all(&self.pool)
-            .await?;
-        rows.iter().map(row_to_webhook).collect()
+        let rows = fetch_all!(
+            &self.db,
+            WebhookRow,
+            "SELECT * FROM webhooks ORDER BY created_at DESC"
+        )?;
+        rows.into_iter().map(row_to_webhook).collect()
     }
 
     async fn get_webhook(&self, id: i64) -> Result<Webhook> {
-        let row = sqlx::query("SELECT * FROM webhooks WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or_else(|| Error::webhook_not_found(id.to_string()))?;
-        row_to_webhook(&row)
+        let row = fetch_optional!(
+            &self.db,
+            WebhookRow,
+            "SELECT * FROM webhooks WHERE id = ?",
+            id
+        )?
+        .ok_or_else(|| Error::webhook_not_found(id.to_string()))?;
+        row_to_webhook(row)
     }
 
     async fn get_webhook_by_public_id(&self, public_id: &str) -> Result<Webhook> {
-        let row = sqlx::query("SELECT * FROM webhooks WHERE public_id = ?")
-            .bind(public_id)
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or_else(|| Error::webhook_not_found(public_id))?;
-        row_to_webhook(&row)
+        let row = fetch_optional!(
+            &self.db,
+            WebhookRow,
+            "SELECT * FROM webhooks WHERE public_id = ?",
+            public_id,
+        )?
+        .ok_or_else(|| Error::webhook_not_found(public_id))?;
+        row_to_webhook(row)
     }
 
     async fn create_webhook(&self, create: WebhookCreate) -> Result<Webhook> {
@@ -254,41 +335,44 @@ impl WebhookStore for SqliteWebhookStore {
             .map(serde_json::to_string)
             .transpose()?;
 
-        let result = sqlx::query(
+        // RETURNING id instead of last_insert_rowid(): the latter is
+        // SQLite-only, and RETURNING works on both engines (SQLite >= 3.35).
+        let (id,) = fetch_one!(
+            &self.db,
+            (i64,),
             "INSERT INTO webhooks (name, description, public_id, agent_id, model, system_prompt_suffix, \
              tool_policy_json, auth_mode, auth_config_json, source_profile, source_config_json, \
              event_filter_json, session_mode, named_session_key, allowed_cidrs_json, \
              max_body_bytes, rate_limit_per_minute, deliver_only, prompt_template, deliver_to, \
              deliver_extra_json, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&create.name)
-        .bind(&create.description)
-        .bind(&public_id)
-        .bind(&create.agent_id)
-        .bind(&create.model)
-        .bind(&create.system_prompt_suffix)
-        .bind(&tool_policy_json)
-        .bind(&auth_mode_str)
-        .bind(&auth_config_json)
-        .bind(&create.source_profile)
-        .bind(&source_config_json)
-        .bind(&event_filter_json)
-        .bind(&session_mode_str)
-        .bind(&create.named_session_key)
-        .bind(&allowed_cidrs_json)
-        .bind(create.max_body_bytes as i64)
-        .bind(create.rate_limit_per_minute as i64)
-        .bind(create.deliver_only as i32)
-        .bind(&create.prompt_template)
-        .bind(&create.deliver_to)
-        .bind(&deliver_extra_json)
-        .bind(&now)
-        .bind(&now)
-        .execute(&self.pool)
-        .await?;
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             RETURNING id",
+            &create.name,
+            &create.description,
+            &public_id,
+            &create.agent_id,
+            &create.model,
+            &create.system_prompt_suffix,
+            &tool_policy_json,
+            &auth_mode_str,
+            &auth_config_json,
+            &create.source_profile,
+            &source_config_json,
+            &event_filter_json,
+            &session_mode_str,
+            &create.named_session_key,
+            &allowed_cidrs_json,
+            create.max_body_bytes as i64,
+            create.rate_limit_per_minute as i64,
+            create.deliver_only,
+            &create.prompt_template,
+            &create.deliver_to,
+            &deliver_extra_json,
+            &now,
+            &now,
+        )?;
 
-        self.get_webhook(result.last_insert_rowid()).await
+        self.get_webhook(id).await
     }
 
     async fn update_webhook(&self, id: i64, patch: WebhookPatch) -> Result<Webhook> {
@@ -387,7 +471,8 @@ impl WebhookStore for SqliteWebhookStore {
             .map(serde_json::to_string)
             .transpose()?;
 
-        sqlx::query(
+        execute!(
+            &self.db,
             "UPDATE webhooks SET name = ?, description = ?, enabled = ?, agent_id = ?, model = ?, \
              system_prompt_suffix = ?, tool_policy_json = ?, auth_mode = ?, auth_config_json = ?, \
              source_config_json = ?, event_filter_json = ?, session_mode = ?, named_session_key = ?, \
@@ -395,31 +480,29 @@ impl WebhookStore for SqliteWebhookStore {
              deliver_only = ?, prompt_template = ?, deliver_to = ?, deliver_extra_json = ?, \
              updated_at = ? \
              WHERE id = ?",
-        )
-        .bind(&webhook.name)
-        .bind(&webhook.description)
-        .bind(webhook.enabled as i32)
-        .bind(&webhook.agent_id)
-        .bind(&webhook.model)
-        .bind(&webhook.system_prompt_suffix)
-        .bind(&tool_policy_json)
-        .bind(&auth_mode_str)
-        .bind(&auth_config_json)
-        .bind(&source_config_json)
-        .bind(&event_filter_json)
-        .bind(&session_mode_str)
-        .bind(&webhook.named_session_key)
-        .bind(&allowed_cidrs_json)
-        .bind(webhook.max_body_bytes as i64)
-        .bind(webhook.rate_limit_per_minute as i64)
-        .bind(webhook.deliver_only as i32)
-        .bind(&webhook.prompt_template)
-        .bind(&webhook.deliver_to)
-        .bind(&deliver_extra_json)
-        .bind(&now)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+            &webhook.name,
+            &webhook.description,
+            webhook.enabled,
+            &webhook.agent_id,
+            &webhook.model,
+            &webhook.system_prompt_suffix,
+            &tool_policy_json,
+            &auth_mode_str,
+            &auth_config_json,
+            &source_config_json,
+            &event_filter_json,
+            &session_mode_str,
+            &webhook.named_session_key,
+            &allowed_cidrs_json,
+            webhook.max_body_bytes as i64,
+            webhook.rate_limit_per_minute as i64,
+            webhook.deliver_only,
+            &webhook.prompt_template,
+            &webhook.deliver_to,
+            &deliver_extra_json,
+            &now,
+            id,
+        )?;
 
         webhook.updated_at = now;
         Ok(webhook)
@@ -427,23 +510,20 @@ impl WebhookStore for SqliteWebhookStore {
 
     async fn delete_webhook(&self, id: i64) -> Result<()> {
         // Transaction prevents partial data loss if a later DELETE fails.
-        let mut tx = self.pool.begin().await?;
-        sqlx::query(
+        let mut tx = self.db.begin().await?;
+        tx_execute!(
+            &mut tx,
             "DELETE FROM webhook_response_actions WHERE delivery_id IN \
              (SELECT id FROM webhook_deliveries WHERE webhook_id = ?)",
-        )
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query("DELETE FROM webhook_deliveries WHERE webhook_id = ?")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-        let result = sqlx::query("DELETE FROM webhooks WHERE id = ?")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-        if result.rows_affected() == 0 {
+            id,
+        )?;
+        tx_execute!(
+            &mut tx,
+            "DELETE FROM webhook_deliveries WHERE webhook_id = ?",
+            id
+        )?;
+        let affected = tx_execute!(&mut tx, "DELETE FROM webhooks WHERE id = ?", id)?;
+        if affected == 0 {
             return Err(Error::webhook_not_found(id.to_string()));
         }
         tx.commit().await?;
@@ -451,13 +531,12 @@ impl WebhookStore for SqliteWebhookStore {
     }
 
     async fn increment_delivery_count(&self, id: i64, received_at: &str) -> Result<()> {
-        sqlx::query(
+        execute!(
+            &self.db,
             "UPDATE webhooks SET delivery_count = delivery_count + 1, last_delivery_at = ? WHERE id = ?",
-        )
-        .bind(received_at)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+            received_at,
+            id,
+        )?;
         Ok(())
     }
 
@@ -466,28 +545,31 @@ impl WebhookStore for SqliteWebhookStore {
             .as_str()
             .unwrap_or("received")
             .to_string();
-        let result = sqlx::query(
+        // RETURNING id instead of last_insert_rowid(): the latter is
+        // SQLite-only, and RETURNING works on both engines (SQLite >= 3.35).
+        let (id,) = fetch_one!(
+            &self.db,
+            (i64,),
             "INSERT INTO webhook_deliveries (webhook_id, received_at, status, event_type, entity_key, \
              delivery_key, http_method, content_type, remote_ip, headers_json, body_size, body_blob, \
              rejection_reason) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(d.webhook_id)
-        .bind(&d.received_at)
-        .bind(&status_str)
-        .bind(&d.event_type)
-        .bind(&d.entity_key)
-        .bind(&d.delivery_key)
-        .bind(&d.http_method)
-        .bind(&d.content_type)
-        .bind(&d.remote_ip)
-        .bind(&d.headers_json)
-        .bind(d.body_size as i64)
-        .bind(&d.body_blob)
-        .bind(&d.rejection_reason)
-        .execute(&self.pool)
-        .await?;
-        Ok(result.last_insert_rowid())
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             RETURNING id",
+            d.webhook_id,
+            &d.received_at,
+            &status_str,
+            &d.event_type,
+            &d.entity_key,
+            &d.delivery_key,
+            &d.http_method,
+            &d.content_type,
+            &d.remote_ip,
+            &d.headers_json,
+            d.body_size as i64,
+            &d.body_blob,
+            &d.rejection_reason,
+        )?;
+        Ok(id)
     }
 
     async fn update_delivery_status(
@@ -500,34 +582,35 @@ impl WebhookStore for SqliteWebhookStore {
             .as_str()
             .unwrap_or("received")
             .to_string();
-        sqlx::query(
+        execute!(
+            &self.db,
             "UPDATE webhook_deliveries SET status = ?, session_key = COALESCE(?, session_key), \
              run_error = COALESCE(?, run_error), started_at = COALESCE(?, started_at), \
              finished_at = COALESCE(?, finished_at), duration_ms = COALESCE(?, duration_ms), \
              input_tokens = COALESCE(?, input_tokens), output_tokens = COALESCE(?, output_tokens) \
              WHERE id = ?",
-        )
-        .bind(&status_str)
-        .bind(&update.session_key)
-        .bind(&update.run_error)
-        .bind(&update.started_at)
-        .bind(&update.finished_at)
-        .bind(update.duration_ms)
-        .bind(update.input_tokens)
-        .bind(update.output_tokens)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+            &status_str,
+            &update.session_key,
+            &update.run_error,
+            &update.started_at,
+            &update.finished_at,
+            update.duration_ms,
+            update.input_tokens,
+            update.output_tokens,
+            id,
+        )?;
         Ok(())
     }
 
     async fn get_delivery(&self, id: i64) -> Result<WebhookDelivery> {
-        let row = sqlx::query("SELECT * FROM webhook_deliveries WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or(Error::DeliveryNotFound { delivery_id: id })?;
-        row_to_delivery(&row)
+        let row = fetch_optional!(
+            &self.db,
+            DeliveryRow,
+            "SELECT * FROM webhook_deliveries WHERE id = ?",
+            id,
+        )?
+        .ok_or(Error::DeliveryNotFound { delivery_id: id })?;
+        row_to_delivery(row)
     }
 
     async fn list_deliveries(
@@ -536,101 +619,105 @@ impl WebhookStore for SqliteWebhookStore {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<WebhookDelivery>> {
-        let rows = sqlx::query(
+        let rows = fetch_all!(
+            &self.db,
+            DeliveryRow,
             "SELECT * FROM webhook_deliveries WHERE webhook_id = ? ORDER BY received_at DESC LIMIT ? OFFSET ?",
-        )
-        .bind(webhook_id)
-        .bind(limit as i64)
-        .bind(offset as i64)
-        .fetch_all(&self.pool)
-        .await?;
-        rows.iter().map(row_to_delivery).collect()
+            webhook_id,
+            limit as i64,
+            offset as i64,
+        )?;
+        rows.into_iter().map(row_to_delivery).collect()
     }
 
     async fn get_delivery_body(&self, delivery_id: i64) -> Result<Option<Vec<u8>>> {
-        let row = sqlx::query("SELECT body_blob FROM webhook_deliveries WHERE id = ?")
-            .bind(delivery_id)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(row.and_then(|r| r.get("body_blob")))
+        let row = fetch_optional!(
+            &self.db,
+            (Option<Vec<u8>>,),
+            "SELECT body_blob FROM webhook_deliveries WHERE id = ?",
+            delivery_id,
+        )?;
+        Ok(row.and_then(|(blob,)| blob))
     }
 
     async fn find_by_delivery_key(&self, webhook_id: i64, key: &str) -> Result<Option<i64>> {
-        let row = sqlx::query(
+        let row = fetch_optional!(
+            &self.db,
+            (i64,),
             "SELECT id FROM webhook_deliveries WHERE webhook_id = ? AND delivery_key = ?",
-        )
-        .bind(webhook_id)
-        .bind(key)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.map(|r| r.get("id")))
+            webhook_id,
+            key,
+        )?;
+        Ok(row.map(|(id,)| id))
     }
 
     async fn list_unprocessed_deliveries(&self) -> Result<Vec<i64>> {
-        let rows = sqlx::query(
+        let rows = fetch_all!(
+            &self.db,
+            (i64,),
             "SELECT id FROM webhook_deliveries WHERE status IN ('received', 'queued', 'processing') ORDER BY received_at ASC",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows.iter().map(|r| r.get("id")).collect())
+        )?;
+        Ok(rows.into_iter().map(|(id,)| id).collect())
     }
 
     async fn insert_response_action(&self, a: &NewResponseAction) -> Result<i64> {
         let now = now_iso();
-        let result = sqlx::query(
+        // RETURNING id instead of last_insert_rowid(): the latter is
+        // SQLite-only, and RETURNING works on both engines (SQLite >= 3.35).
+        let (id,) = fetch_one!(
+            &self.db,
+            (i64,),
             "INSERT INTO webhook_response_actions (delivery_id, tool_name, input_json, output_json, status, error_message, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(a.delivery_id)
-        .bind(&a.tool_name)
-        .bind(&a.input_json)
-        .bind(&a.output_json)
-        .bind(&a.status)
-        .bind(&a.error_message)
-        .bind(&now)
-        .execute(&self.pool)
-        .await?;
-        Ok(result.last_insert_rowid())
+             VALUES (?, ?, ?, ?, ?, ?, ?) \
+             RETURNING id",
+            a.delivery_id,
+            &a.tool_name,
+            &a.input_json,
+            &a.output_json,
+            &a.status,
+            &a.error_message,
+            &now,
+        )?;
+        Ok(id)
     }
 
     async fn list_response_actions(&self, delivery_id: i64) -> Result<Vec<WebhookResponseAction>> {
-        let rows = sqlx::query(
+        let rows = fetch_all!(
+            &self.db,
+            ResponseActionRow,
             "SELECT * FROM webhook_response_actions WHERE delivery_id = ? ORDER BY created_at ASC",
-        )
-        .bind(delivery_id)
-        .fetch_all(&self.pool)
-        .await?;
-        let mut actions = Vec::with_capacity(rows.len());
-        for row in &rows {
-            actions.push(WebhookResponseAction {
-                id: row.get("id"),
-                delivery_id: row.get("delivery_id"),
-                tool_name: row.get("tool_name"),
-                input_json: row.get("input_json"),
-                output_json: row.get("output_json"),
-                status: row.get("status"),
-                error_message: row.get("error_message"),
-                created_at: row.get("created_at"),
-            });
-        }
-        Ok(actions)
+            delivery_id,
+        )?;
+        Ok(rows
+            .into_iter()
+            .map(|row| WebhookResponseAction {
+                id: row.id,
+                delivery_id: row.delivery_id,
+                tool_name: row.tool_name,
+                input_json: row.input_json,
+                output_json: row.output_json,
+                status: row.status,
+                error_message: row.error_message,
+                created_at: row.created_at,
+            })
+            .collect())
     }
 
     async fn prune_deliveries_before(&self, before: &str) -> Result<u64> {
-        let mut tx = self.pool.begin().await?;
-        sqlx::query(
+        let mut tx = self.db.begin().await?;
+        tx_execute!(
+            &mut tx,
             "DELETE FROM webhook_response_actions WHERE delivery_id IN \
              (SELECT id FROM webhook_deliveries WHERE received_at < ?)",
-        )
-        .bind(before)
-        .execute(&mut *tx)
-        .await?;
-        let result = sqlx::query("DELETE FROM webhook_deliveries WHERE received_at < ?")
-            .bind(before)
-            .execute(&mut *tx)
-            .await?;
+            before,
+        )?;
+        let affected = tx_execute!(
+            &mut tx,
+            "DELETE FROM webhook_deliveries WHERE received_at < ?",
+            before,
+        )?;
         tx.commit().await?;
-        Ok(result.rows_affected())
+        Ok(affected)
     }
 }
 
@@ -639,10 +726,23 @@ impl WebhookStore for SqliteWebhookStore {
 mod tests {
     use {super::*, crate::types::*};
 
-    async fn make_store() -> SqliteWebhookStore {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        crate::run_migrations(&pool).await.unwrap();
-        SqliteWebhookStore::with_pool(pool)
+    async fn sqlite_store() -> DbWebhookStore {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let db = Db::from(pool);
+        crate::run_migrations(&db).await.unwrap();
+        DbWebhookStore::with_pool(db)
+    }
+
+    /// PostgreSQL store for one test, serialized and freshly migrated.
+    /// The guard keeps the crate lock until the test ends.
+    async fn pg_store() -> Option<(tokio::sync::MutexGuard<'static, ()>, DbWebhookStore)> {
+        if std::env::var("TEST_POSTGRES_URL").is_err() {
+            eprintln!("skipping: TEST_POSTGRES_URL is not set");
+            return None;
+        }
+        let guard = crate::test_support::pg_lock().lock().await;
+        let db = crate::test_support::pg_test_db().await?;
+        Some((guard, DbWebhookStore::with_pool(db)))
     }
 
     fn make_create(name: &str) -> WebhookCreate {
@@ -670,27 +770,39 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_create_and_list() {
-        let store = make_store().await;
+    fn make_delivery(webhook_id: i64) -> NewDelivery {
+        NewDelivery {
+            webhook_id,
+            received_at: "2026-04-07T00:00:00Z".into(),
+            status: DeliveryStatus::Received,
+            event_type: Some("push".into()),
+            entity_key: None,
+            delivery_key: Some("abc-123".into()),
+            http_method: Some("POST".into()),
+            content_type: Some("application/json".into()),
+            remote_ip: Some("1.2.3.4".into()),
+            headers_json: None,
+            body_size: 100,
+            body_blob: Some(b"{\"test\":true}".to_vec()),
+            rejection_reason: None,
+        }
+    }
+
+    async fn create_and_list_body(store: &DbWebhookStore) {
         store.create_webhook(make_create("hook1")).await.unwrap();
         store.create_webhook(make_create("hook2")).await.unwrap();
         let webhooks = store.list_webhooks().await.unwrap();
         assert_eq!(webhooks.len(), 2);
     }
 
-    #[tokio::test]
-    async fn test_get_by_public_id() {
-        let store = make_store().await;
+    async fn get_by_public_id_body(store: &DbWebhookStore) {
         let wh = store.create_webhook(make_create("hook1")).await.unwrap();
         let fetched = store.get_webhook_by_public_id(&wh.public_id).await.unwrap();
         assert_eq!(fetched.id, wh.id);
         assert_eq!(fetched.name, "hook1");
     }
 
-    #[tokio::test]
-    async fn test_update() {
-        let store = make_store().await;
+    async fn update_body(store: &DbWebhookStore) {
         let wh = store.create_webhook(make_create("hook1")).await.unwrap();
         let updated = store
             .update_webhook(wh.id, WebhookPatch {
@@ -704,36 +816,15 @@ mod tests {
         assert!(!updated.enabled);
     }
 
-    #[tokio::test]
-    async fn test_delete() {
-        let store = make_store().await;
+    async fn delete_body(store: &DbWebhookStore) {
         let wh = store.create_webhook(make_create("hook1")).await.unwrap();
         store.delete_webhook(wh.id).await.unwrap();
         assert!(store.get_webhook(wh.id).await.is_err());
     }
 
-    #[tokio::test]
-    async fn test_delivery_roundtrip() {
-        let store = make_store().await;
+    async fn delivery_roundtrip_body(store: &DbWebhookStore) {
         let wh = store.create_webhook(make_create("hook1")).await.unwrap();
-        let delivery_id = store
-            .insert_delivery(&NewDelivery {
-                webhook_id: wh.id,
-                received_at: "2026-04-07T00:00:00Z".into(),
-                status: DeliveryStatus::Received,
-                event_type: Some("push".into()),
-                entity_key: None,
-                delivery_key: Some("abc-123".into()),
-                http_method: Some("POST".into()),
-                content_type: Some("application/json".into()),
-                remote_ip: Some("1.2.3.4".into()),
-                headers_json: None,
-                body_size: 100,
-                body_blob: Some(b"{\"test\":true}".to_vec()),
-                rejection_reason: None,
-            })
-            .await
-            .unwrap();
+        let delivery_id = store.insert_delivery(&make_delivery(wh.id)).await.unwrap();
 
         let delivery = store.get_delivery(delivery_id).await.unwrap();
         assert_eq!(delivery.event_type.as_deref(), Some("push"));
@@ -748,28 +839,17 @@ mod tests {
         assert_eq!(dup, Some(delivery_id));
     }
 
-    #[tokio::test]
-    async fn test_delivery_status_update() {
-        let store = make_store().await;
+    async fn delivery_status_update_body(store: &DbWebhookStore) {
         let wh = store.create_webhook(make_create("hook1")).await.unwrap();
-        let delivery_id = store
-            .insert_delivery(&NewDelivery {
-                webhook_id: wh.id,
-                received_at: "2026-04-07T00:00:00Z".into(),
-                status: DeliveryStatus::Received,
-                event_type: None,
-                entity_key: None,
-                delivery_key: None,
-                http_method: None,
-                content_type: None,
-                remote_ip: None,
-                headers_json: None,
-                body_size: 0,
-                body_blob: None,
-                rejection_reason: None,
-            })
-            .await
-            .unwrap();
+        let mut delivery = make_delivery(wh.id);
+        delivery.event_type = None;
+        delivery.delivery_key = None;
+        delivery.http_method = None;
+        delivery.content_type = None;
+        delivery.remote_ip = None;
+        delivery.body_size = 0;
+        delivery.body_blob = None;
+        let delivery_id = store.insert_delivery(&delivery).await.unwrap();
 
         store
             .update_delivery_status(delivery_id, DeliveryStatus::Completed, DeliveryUpdate {
@@ -787,28 +867,18 @@ mod tests {
         assert_eq!(delivery.session_key.as_deref(), Some("webhook:test:1"));
     }
 
-    #[tokio::test]
-    async fn test_response_actions() {
-        let store = make_store().await;
+    async fn response_actions_body(store: &DbWebhookStore) {
         let wh = store.create_webhook(make_create("hook1")).await.unwrap();
-        let delivery_id = store
-            .insert_delivery(&NewDelivery {
-                webhook_id: wh.id,
-                received_at: "2026-04-07T00:00:00Z".into(),
-                status: DeliveryStatus::Completed,
-                event_type: None,
-                entity_key: None,
-                delivery_key: None,
-                http_method: None,
-                content_type: None,
-                remote_ip: None,
-                headers_json: None,
-                body_size: 0,
-                body_blob: None,
-                rejection_reason: None,
-            })
-            .await
-            .unwrap();
+        let mut delivery = make_delivery(wh.id);
+        delivery.status = DeliveryStatus::Completed;
+        delivery.event_type = None;
+        delivery.delivery_key = None;
+        delivery.http_method = None;
+        delivery.content_type = None;
+        delivery.remote_ip = None;
+        delivery.body_size = 0;
+        delivery.body_blob = None;
+        let delivery_id = store.insert_delivery(&delivery).await.unwrap();
 
         store
             .insert_response_action(&NewResponseAction {
@@ -827,28 +897,17 @@ mod tests {
         assert_eq!(actions[0].tool_name, "github_post_comment");
     }
 
-    #[tokio::test]
-    async fn test_cascade_delete() {
-        let store = make_store().await;
+    async fn cascade_delete_body(store: &DbWebhookStore) {
         let wh = store.create_webhook(make_create("hook1")).await.unwrap();
-        let delivery_id = store
-            .insert_delivery(&NewDelivery {
-                webhook_id: wh.id,
-                received_at: "2026-04-07T00:00:00Z".into(),
-                status: DeliveryStatus::Received,
-                event_type: None,
-                entity_key: None,
-                delivery_key: None,
-                http_method: None,
-                content_type: None,
-                remote_ip: None,
-                headers_json: None,
-                body_size: 0,
-                body_blob: None,
-                rejection_reason: None,
-            })
-            .await
-            .unwrap();
+        let mut delivery = make_delivery(wh.id);
+        delivery.event_type = None;
+        delivery.delivery_key = None;
+        delivery.http_method = None;
+        delivery.content_type = None;
+        delivery.remote_ip = None;
+        delivery.body_size = 0;
+        delivery.body_blob = None;
+        let delivery_id = store.insert_delivery(&delivery).await.unwrap();
         store
             .insert_response_action(&NewResponseAction {
                 delivery_id,
@@ -864,5 +923,109 @@ mod tests {
         // Deleting webhook should cascade to deliveries and actions
         store.delete_webhook(wh.id).await.unwrap();
         assert!(store.get_delivery(delivery_id).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_and_list() {
+        create_and_list_body(&sqlite_store().await).await;
+    }
+
+    #[tokio::test]
+    async fn test_postgres_create_and_list() {
+        let Some((_guard, store)) = pg_store().await else {
+            return;
+        };
+        create_and_list_body(&store).await;
+    }
+
+    #[tokio::test]
+    async fn test_get_by_public_id() {
+        get_by_public_id_body(&sqlite_store().await).await;
+    }
+
+    #[tokio::test]
+    async fn test_postgres_get_by_public_id() {
+        let Some((_guard, store)) = pg_store().await else {
+            return;
+        };
+        get_by_public_id_body(&store).await;
+    }
+
+    #[tokio::test]
+    async fn test_update() {
+        update_body(&sqlite_store().await).await;
+    }
+
+    #[tokio::test]
+    async fn test_postgres_update() {
+        let Some((_guard, store)) = pg_store().await else {
+            return;
+        };
+        update_body(&store).await;
+    }
+
+    #[tokio::test]
+    async fn test_delete() {
+        delete_body(&sqlite_store().await).await;
+    }
+
+    #[tokio::test]
+    async fn test_postgres_delete() {
+        let Some((_guard, store)) = pg_store().await else {
+            return;
+        };
+        delete_body(&store).await;
+    }
+
+    #[tokio::test]
+    async fn test_delivery_roundtrip() {
+        delivery_roundtrip_body(&sqlite_store().await).await;
+    }
+
+    #[tokio::test]
+    async fn test_postgres_delivery_roundtrip() {
+        let Some((_guard, store)) = pg_store().await else {
+            return;
+        };
+        delivery_roundtrip_body(&store).await;
+    }
+
+    #[tokio::test]
+    async fn test_delivery_status_update() {
+        delivery_status_update_body(&sqlite_store().await).await;
+    }
+
+    #[tokio::test]
+    async fn test_postgres_delivery_status_update() {
+        let Some((_guard, store)) = pg_store().await else {
+            return;
+        };
+        delivery_status_update_body(&store).await;
+    }
+
+    #[tokio::test]
+    async fn test_response_actions() {
+        response_actions_body(&sqlite_store().await).await;
+    }
+
+    #[tokio::test]
+    async fn test_postgres_response_actions() {
+        let Some((_guard, store)) = pg_store().await else {
+            return;
+        };
+        response_actions_body(&store).await;
+    }
+
+    #[tokio::test]
+    async fn test_cascade_delete() {
+        cascade_delete_body(&sqlite_store().await).await;
+    }
+
+    #[tokio::test]
+    async fn test_postgres_cascade_delete() {
+        let Some((_guard, store)) = pg_store().await else {
+            return;
+        };
+        cascade_delete_body(&store).await;
     }
 }

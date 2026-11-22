@@ -11,6 +11,7 @@ cron           = { workspace = true }
 moltis-agents  = { workspace = true }
 moltis-common  = { workspace = true }
 moltis-config  = { workspace = true }
+moltis-db      = { workspace = true }
 moltis-metrics = { optional = true, workspace = true }
 serde          = { workspace = true }
 serde_json     = { workspace = true }

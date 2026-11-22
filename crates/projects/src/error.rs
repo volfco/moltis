@@ -7,6 +7,8 @@ pub enum Error {
     #[error(transparent)]
     Sqlx(#[from] sqlx::Error),
     #[error(transparent)]
+    Db(#[from] moltis_db::DbError),
+    #[error(transparent)]
     Migration(#[from] sqlx::migrate::MigrateError),
     #[error(transparent)]
     TomlDeserialize(#[from] toml::de::Error),
