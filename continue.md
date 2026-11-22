@@ -37,14 +37,19 @@ Landed on the memory hardening wave:
 - `crates/web/ui` — `sendRpcWhenReady()` in `helpers.ts` (waits for the
   `hello-ok` handshake, bounded by one RPC budget) adopted for settings
   cold-load fetches; `MemorySection` uses it too.
+- `crates/cli` — `moltis memory reindex [--force]` drives the in-place
+  re-embed; the zvec collection migration it used to collide with is now
+  `moltis memory migrate-collection`.
 
 ## Next items
 
 1. Open the PR from `feat/postgres-memory-backend` and run
    `./scripts/local-validate.sh <PR>` (the CI gate).
-2. Run the Playwright specs listed in the ui-retry handoff (cold-load spec +
-   the settings/voice/phone/instrumentation specs) in a checkout with a built
-   gateway binary.
+2. Playwright needs `LD_LIBRARY_PATH` pointing at zvec's prebuilt library on
+   machines where it is not on the loader path, or `target/debug/moltis` fails
+   with `libzvec_c_api.so: cannot open shared object file` and every webServer
+   start exits 127:
+   `export LD_LIBRARY_PATH=$PWD/target/debug/build/zvec-rust-sys-*/out/zvec-prebuilt`
 3. Follow-ups live in `todo.md`; the largest are `moltis memory import-from-sqlite`,
    retrying a skipped sync on headless profiles, and the Settings UI for the
    `[database]` engine.
