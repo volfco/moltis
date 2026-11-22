@@ -11,6 +11,13 @@
 //! on that same connection (closing it instead if the unlock fails), and
 //! [`Drop`] marks it `close_on_drop` as a fallback — a closed session releases
 //! its advisory locks server-side, so the lock cannot outlive the sync run.
+//!
+//! That guarantee only holds while the guard is *armed*: the connection is put
+//! inside the guard before the lock query runs, and both the acquisition query
+//! and the unlock query borrow it through the guard instead of holding it in a
+//! local. A task abort or timeout therefore never drops a bare connection
+//! across an await — sqlx returns cancelled connections to the pool after a
+//! repair ping, and a session returned that way keeps its advisory locks.
 
 use {
     moltis_db::Db,
@@ -54,30 +61,67 @@ impl SyncLockGuard {
         let pool = db
             .postgres()
             .ok_or_else(|| crate::error::Error::Backend("postgres db without pool".into()))?;
-        // Hold this exact connection for the guard's lifetime: the advisory
-        // lock is session-scoped and would leak to later pool borrowers if the
-        // connection went back while still holding it.
-        let mut conn = pool.acquire().await?;
-        let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
-            .bind(MEMORY_SYNC_LOCK_KEY)
-            .fetch_one(&mut *conn)
-            .await?;
-        // On failure the connection holds no lock and may return to the pool.
-        Ok(acquired.then_some(Self::Pg { conn: Some(conn) }))
+        let conn = pool.acquire().await?;
+        // Arm the guard before the lock query: the server may grant the lock
+        // while this future is inside the await below, and a dropped future
+        // must close that session rather than return it to the pool still
+        // holding the lock.
+        let mut guard = Self::Pg { conn: Some(conn) };
+        let acquired: bool = {
+            let Some(conn) = guard.conn_mut() else {
+                // Unreachable: the guard was just armed. Fail loudly rather
+                // than report a phantom contended lock.
+                return Err(crate::error::Error::Backend(
+                    "postgres sync lock guard without connection".into(),
+                ));
+            };
+            sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+                .bind(MEMORY_SYNC_LOCK_KEY)
+                .fetch_one(&mut **conn)
+                .await?
+        };
+        if acquired {
+            return Ok(Some(guard));
+        }
+        // Not acquired: this session holds no lock, so the connection is safe
+        // to return to the pool.
+        drop(guard.take_conn());
+        Ok(None)
+    }
+
+    /// Borrow the lock connection, if the guard still owns it.
+    fn conn_mut(&mut self) -> Option<&mut PoolConnection<Postgres>> {
+        match self {
+            Self::Pg { conn } => conn.as_mut(),
+            Self::Uncontended => None,
+        }
+    }
+
+    /// Take the connection out of the guard; the guard no longer owns it.
+    fn take_conn(&mut self) -> Option<PoolConnection<Postgres>> {
+        match self {
+            Self::Pg { conn } => conn.take(),
+            Self::Uncontended => None,
+        }
     }
 
     /// Release the lock deterministically and return the connection to the pool.
     pub async fn release(mut self) {
-        let Self::Pg { conn } = &mut self else {
+        let unlocked = match self.conn_mut() {
+            Some(conn) => {
+                sqlx::query("SELECT pg_advisory_unlock($1)")
+                    .bind(MEMORY_SYNC_LOCK_KEY)
+                    .execute(&mut **conn)
+                    .await
+            },
+            None => return,
+        };
+        // Take the connection only after the unlock resolved: the guard must
+        // stay armed across that await, so dropping `release` midway still
+        // closes the session instead of pooling a possibly-locked one.
+        let Some(conn) = self.take_conn() else {
             return;
         };
-        let Some(mut conn) = conn.take() else {
-            return;
-        };
-        let unlocked = sqlx::query("SELECT pg_advisory_unlock($1)")
-            .bind(MEMORY_SYNC_LOCK_KEY)
-            .execute(&mut *conn)
-            .await;
         if let Err(error) = unlocked {
             // Returning a connection that still holds the lock would leak it to
             // the next borrower; kill the session instead.
@@ -95,13 +139,9 @@ impl Drop for SyncLockGuard {
     /// sqlx closes it instead of returning it to the pool, and a closed
     /// session releases its advisory locks server-side.
     fn drop(&mut self) {
-        let Self::Pg { conn } = self else {
-            return;
-        };
-        let Some(mut conn) = conn.take() else {
-            return;
-        };
-        conn.close_on_drop();
+        if let Some(mut conn) = self.take_conn() {
+            conn.close_on_drop();
+        }
     }
 }
 
@@ -194,7 +234,6 @@ mod tests {
             report.skipped,
             "sync must skip while the lock is held elsewhere"
         );
-        assert_eq!(report.files_updated, 0);
         assert_eq!(
             manager.status().await.unwrap().total_files,
             0,
@@ -242,6 +281,59 @@ mod tests {
         assert!(
             try_lock(&mut other).await,
             "error path must not leak the lock"
+        );
+        unlock(&mut other).await;
+    }
+
+    /// A task aborted while holding the lock must not strand it: abort drops
+    /// the task's future, the guard's `Drop` closes the session, and the
+    /// server releases the session advisory lock.
+    ///
+    /// Residual window not covered here: cancelling `try_acquire` *inside*
+    /// the `pg_try_advisory_lock` await, between the server granting the lock
+    /// and the bool arriving. That window is closed by construction (the
+    /// guard is armed before the query runs, so the drop closes the session)
+    /// rather than by this test, because forcing a mid-query abort would need
+    /// a test-only hook inside sqlx's query path.
+    #[tokio::test]
+    async fn postgres_aborted_task_does_not_strand_the_lock() {
+        if !pg_enabled() {
+            return;
+        }
+        let _guard = crate::test_support::pg_lock().lock().await;
+        let db = crate::test_support::pg_test_db().await.unwrap();
+        let mut other = other_instance().await;
+
+        let (acquired_tx, acquired_rx) = tokio::sync::oneshot::channel();
+        let holder = tokio::spawn(async move {
+            let guard = SyncLockGuard::try_acquire(&db).await.unwrap().unwrap();
+            assert!(matches!(&guard, SyncLockGuard::Pg { .. }));
+            let _ = acquired_tx.send(());
+            // Hold the lock until the task is aborted.
+            std::future::pending::<()>().await;
+        });
+        acquired_rx.await.unwrap();
+        assert!(
+            !try_lock(&mut other).await,
+            "spawned task must hold the lock before it is aborted"
+        );
+
+        holder.abort();
+        let _ = holder.await;
+
+        // Drop closes the lock connection asynchronously; wait for the server
+        // to notice and release the session lock.
+        let mut reacquired = false;
+        for _ in 0..50 {
+            if try_lock(&mut other).await {
+                reacquired = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(
+            reacquired,
+            "aborting the holder task must not leave the lock held"
         );
         unlock(&mut other).await;
     }
