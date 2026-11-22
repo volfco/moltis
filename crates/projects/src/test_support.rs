@@ -14,24 +14,28 @@ pub(crate) fn pg_lock() -> &'static tokio::sync::Mutex<()> {
 
 /// Open the test database with an empty projects schema.
 ///
-/// Returns `None` when `TEST_POSTGRES_URL` is unset. The caller must already
+/// Returns `None` when `TEST_POSTGRES_URL` is unset (the caller's test skips).
+/// When it IS set, any setup failure panics: a green run must never mean "the
+/// database was unreachable and nothing was tested". The caller must already
 /// hold [`pg_lock`].
 pub(crate) async fn pg_test_db() -> Option<Db> {
-    let url = std::env::var("TEST_POSTGRES_URL").ok()?;
-    let db = Db::connect(&DbOptions::postgres(url, 2)).await.ok()?;
+    let Ok(url) = std::env::var("TEST_POSTGRES_URL") else {
+        return None;
+    };
+    let db = Db::connect(&DbOptions::postgres(url, 2))
+        .await
+        .unwrap_or_else(|error| {
+            panic!("TEST_POSTGRES_URL is set but connecting to it failed: {error}")
+        });
     // Dropping sqlx's history is required: with it in place the migrator
     // believes this version is already applied and creates nothing.
     let reset = moltis_db::execute!(
         &db,
         "DROP TABLE IF EXISTS projects, _sqlx_migrations CASCADE"
     );
-    if let Err(error) = reset {
-        eprintln!("postgres test reset failed: {error}");
-        return None;
-    }
-    if let Err(error) = crate::run_migrations(&db).await {
-        eprintln!("postgres test migrations failed: {error}");
-        return None;
-    }
+    reset.unwrap_or_else(|error| panic!("postgres test schema reset failed: {error}"));
+    crate::run_migrations(&db)
+        .await
+        .unwrap_or_else(|error| panic!("postgres test migrations failed: {error}"));
     Some(db)
 }
