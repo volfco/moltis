@@ -4,7 +4,7 @@ use {
         Error as ChannelError, Result as ChannelResult,
         message_log::{MessageLog, MessageLogEntry, SenderSummary},
     },
-    moltis_db::{Db, execute, fetch_all, fetch_optional},
+    moltis_db::{Db, execute, fetch_all},
 };
 
 fn channel_db_error(

@@ -1,6 +1,6 @@
 use {
     async_trait::async_trait,
-    moltis_db::{Db, execute, fetch_all, fetch_one, fetch_optional},
+    moltis_db::{Db, execute, fetch_all, fetch_optional},
 };
 
 use moltis_channels::{

@@ -661,7 +661,7 @@ pub async fn prepare_gateway_core_with_profile(
     ));
 
     let agent_persona_store = Arc::new(crate::agent_persona::AgentPersonaStore::new(
-        db_pool.clone(),
+        moltis_db::Db::from(db_pool.clone()),
     ));
     if let Err(e) = agent_persona_store.ensure_main_workspace_seeded() {
         tracing::warn!(error = %e, "failed to seed main agent workspace");
@@ -672,7 +672,7 @@ pub async fn prepare_gateway_core_with_profile(
 
     #[cfg(feature = "voice")]
     let voice_persona_store = Arc::new(crate::voice_persona::VoicePersonaStore::new(
-        db_pool.clone(),
+        moltis_db::Db::from(db_pool.clone()),
     ));
     #[cfg(feature = "voice")]
     match voice_persona_store.seed_defaults().await {

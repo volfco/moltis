@@ -772,7 +772,9 @@ mod tests {
             Arc::new(moltis_sessions::metadata::SqliteSessionMetadata::new(
                 pool.clone(),
             )),
-            Arc::new(crate::agent_persona::AgentPersonaStore::new(pool)),
+            Arc::new(crate::agent_persona::AgentPersonaStore::new(
+                moltis_db::Db::from(pool),
+            )),
             Arc::new(tokio::sync::OnceCell::new()),
         );
 
