@@ -23,12 +23,14 @@ pub use {
 
 /// Run database migrations for the vault crate.
 ///
-/// Creates the `vault_metadata` table. Should be called at application startup
-/// after cron migrations and before gateway migrations.
-pub async fn run_migrations(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
-    sqlx::migrate!("./migrations")
-        .set_ignore_missing(true)
-        .run(pool)
-        .await?;
+/// Creates the `vault_metadata` table on either backend. Should be called at
+/// application startup after cron migrations and before gateway migrations.
+pub async fn run_migrations(db: &moltis_db::Db) -> anyhow::Result<()> {
+    moltis_db::run_migrations(
+        db,
+        sqlx::migrate!("./migrations"),
+        sqlx::migrate!("./migrations_pg"),
+    )
+    .await?;
     Ok(())
 }
