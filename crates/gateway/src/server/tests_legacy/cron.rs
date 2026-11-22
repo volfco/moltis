@@ -23,10 +23,11 @@ impl CronHistoryFixture {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        sqlx::query("CREATE TABLE projects (id TEXT PRIMARY KEY)")
-            .execute(&pool)
-            .await
-            .unwrap();
+        moltis_db::execute!(
+            &moltis_db::Db::from(pool.clone()),
+            "CREATE TABLE projects (id TEXT PRIMARY KEY)"
+        )
+        .unwrap();
         SqliteSessionMetadata::init(&pool).await.unwrap();
         let metadata = Arc::new(SqliteSessionMetadata::new(pool));
         let directory = tempfile::tempdir().unwrap();

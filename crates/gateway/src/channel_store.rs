@@ -1,4 +1,7 @@
-use {async_trait::async_trait, sqlx::SqlitePool};
+use {
+    async_trait::async_trait,
+    moltis_db::{Db, execute, fetch_all, fetch_one, fetch_optional},
+};
 
 use moltis_channels::{
     Error as ChannelError, Result as ChannelResult,
@@ -16,8 +19,14 @@ use {
     std::sync::Arc,
 };
 
-fn channel_db_error(context: &'static str, source: sqlx::Error) -> ChannelError {
-    ChannelError::external(context, source)
+fn channel_db_error(
+    context: &'static str,
+    source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+) -> ChannelError {
+    ChannelError::External {
+        context: context.into(),
+        source: source.into(),
+    }
 }
 
 /// Internal row type for sqlx mapping.
@@ -44,14 +53,14 @@ impl TryFrom<ChannelRow> for StoredChannel {
     }
 }
 
-/// SQLite-backed channel store.
+/// Database-backed channel store (SQLite or PostgreSQL).
 pub struct SqliteChannelStore {
-    pool: SqlitePool,
+    db: Db,
 }
 
 impl SqliteChannelStore {
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(db: Db) -> Self {
+        Self { db }
     }
 
     /// Initialize the channels table schema.
@@ -59,21 +68,10 @@ impl SqliteChannelStore {
     /// **Deprecated**: Schema is now managed by sqlx migrations.
     /// This method is retained for tests that use in-memory databases.
     #[doc(hidden)]
-    pub async fn init(pool: &SqlitePool) -> ChannelResult<()> {
-        sqlx::query(
-            r#"CREATE TABLE IF NOT EXISTS channels (
-                channel_type TEXT    NOT NULL DEFAULT 'telegram',
-                account_id   TEXT    NOT NULL,
-                config       TEXT    NOT NULL,
-                created_at   INTEGER NOT NULL,
-                updated_at   INTEGER NOT NULL,
-                PRIMARY KEY (channel_type, account_id)
-            )"#,
-        )
-        .execute(pool)
-        .await
-        .map_err(|e| channel_db_error("init channels table", e))?;
-        Ok(())
+    pub async fn init(db: &Db) -> ChannelResult<()> {
+        crate::run_migrations(db)
+            .await
+            .map_err(|e| channel_db_error("init channels schema", e))
     }
 }
 
@@ -234,11 +232,12 @@ impl ChannelStore for VaultChannelStore {
 #[async_trait]
 impl ChannelStore for SqliteChannelStore {
     async fn list(&self) -> ChannelResult<Vec<StoredChannel>> {
-        let rows =
-            sqlx::query_as::<_, ChannelRow>("SELECT * FROM channels ORDER BY updated_at DESC")
-                .fetch_all(&self.pool)
-                .await
-                .map_err(|e| channel_db_error("list channels", e))?;
+        let rows = fetch_all!(
+            &self.db,
+            ChannelRow,
+            "SELECT * FROM channels ORDER BY updated_at DESC"
+        )
+        .map_err(|e| channel_db_error("list channels", e))?;
         rows.into_iter().map(TryInto::try_into).collect()
     }
 
@@ -247,45 +246,45 @@ impl ChannelStore for SqliteChannelStore {
         channel_type: &str,
         account_id: &str,
     ) -> ChannelResult<Option<StoredChannel>> {
-        let row = sqlx::query_as::<_, ChannelRow>(
+        let row = fetch_optional!(
+            &self.db,
+            ChannelRow,
             "SELECT * FROM channels WHERE channel_type = ? AND account_id = ?",
+            channel_type,
+            account_id,
         )
-        .bind(channel_type)
-        .bind(account_id)
-        .fetch_optional(&self.pool)
-        .await
         .map_err(|e| channel_db_error("get channel", e))?;
         row.map(TryInto::try_into).transpose()
     }
 
     async fn upsert(&self, channel: StoredChannel) -> ChannelResult<()> {
         let config_json = serde_json::to_string(&channel.config)?;
-        sqlx::query(
+        execute!(
+            &self.db,
             r#"INSERT INTO channels (account_id, channel_type, config, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?)
                ON CONFLICT(channel_type, account_id) DO UPDATE SET
                  channel_type = excluded.channel_type,
                  config = excluded.config,
                  updated_at = excluded.updated_at"#,
+            &channel.account_id,
+            &channel.channel_type,
+            &config_json,
+            channel.created_at,
+            channel.updated_at,
         )
-        .bind(&channel.account_id)
-        .bind(&channel.channel_type)
-        .bind(&config_json)
-        .bind(channel.created_at)
-        .bind(channel.updated_at)
-        .execute(&self.pool)
-        .await
         .map_err(|e| channel_db_error("upsert channel", e))?;
         Ok(())
     }
 
     async fn delete(&self, channel_type: &str, account_id: &str) -> ChannelResult<()> {
-        sqlx::query("DELETE FROM channels WHERE channel_type = ? AND account_id = ?")
-            .bind(channel_type)
-            .bind(account_id)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| channel_db_error("delete channel", e))?;
+        execute!(
+            &self.db,
+            "DELETE FROM channels WHERE channel_type = ? AND account_id = ?",
+            channel_type,
+            account_id,
+        )
+        .map_err(|e| channel_db_error("delete channel", e))?;
         Ok(())
     }
 }
@@ -298,15 +297,18 @@ mod tests {
     #[cfg(feature = "vault")]
     use std::sync::Arc;
 
-    async fn test_pool() -> SqlitePool {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        SqliteChannelStore::init(&pool).await.unwrap();
+    async fn test_pool() -> sqlx::SqlitePool {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        SqliteChannelStore::init(&Db::from(pool.clone()))
+            .await
+            .unwrap();
         pool
     }
 
     #[cfg(feature = "vault")]
-    async fn test_vault(pool: SqlitePool) -> Arc<moltis_vault::Vault> {
-        sqlx::query(
+    async fn test_vault(pool: sqlx::SqlitePool) -> Arc<moltis_vault::Vault> {
+        moltis_db::execute!(
+            &Db::from(pool.clone()),
             "CREATE TABLE IF NOT EXISTS vault_metadata (
                 id                   INTEGER PRIMARY KEY CHECK (id = 1),
                 version              INTEGER NOT NULL DEFAULT 1,
@@ -319,8 +321,6 @@ mod tests {
                 updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
             )",
         )
-        .execute(&pool)
-        .await
         .unwrap();
 
         let vault = Arc::new(moltis_vault::Vault::new(pool).await.unwrap());
@@ -338,7 +338,7 @@ mod tests {
     #[tokio::test]
     async fn test_upsert_and_get() {
         let pool = test_pool().await;
-        let store = SqliteChannelStore::new(pool);
+        let store = SqliteChannelStore::new(Db::from(pool));
 
         let ch = StoredChannel {
             account_id: "bot1".into(),
@@ -357,7 +357,7 @@ mod tests {
     #[tokio::test]
     async fn test_upsert_updates_existing() {
         let pool = test_pool().await;
-        let store = SqliteChannelStore::new(pool);
+        let store = SqliteChannelStore::new(Db::from(pool));
         let t = now();
 
         store
@@ -392,7 +392,7 @@ mod tests {
     #[tokio::test]
     async fn test_delete() {
         let pool = test_pool().await;
-        let store = SqliteChannelStore::new(pool);
+        let store = SqliteChannelStore::new(Db::from(pool));
 
         store
             .upsert(StoredChannel {
@@ -412,7 +412,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_order() {
         let pool = test_pool().await;
-        let store = SqliteChannelStore::new(pool);
+        let store = SqliteChannelStore::new(Db::from(pool));
 
         store
             .upsert(StoredChannel {
@@ -445,7 +445,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_nonexistent() {
         let pool = test_pool().await;
-        let store = SqliteChannelStore::new(pool);
+        let store = SqliteChannelStore::new(Db::from(pool));
         assert!(store.get("telegram", "nope").await.unwrap().is_none());
     }
 
@@ -456,7 +456,8 @@ mod tests {
         crate::vault_lifecycle::set_vault_encryption_runtime_enabled(true);
         let pool = test_pool().await;
         let vault = test_vault(pool.clone()).await;
-        let inner: Arc<dyn ChannelStore> = Arc::new(SqliteChannelStore::new(pool.clone()));
+        let inner: Arc<dyn ChannelStore> =
+            Arc::new(SqliteChannelStore::new(Db::from(pool.clone())));
         let store = VaultChannelStore::new(inner, Some(vault));
         let timestamp = now();
 
@@ -471,11 +472,11 @@ mod tests {
             .await
             .unwrap();
 
-        let raw: (String,) = sqlx::query_as(
+        let raw: (String,) = moltis_db::fetch_one!(
+            &Db::from(pool.clone()),
+            (String,),
             "SELECT config FROM channels WHERE channel_type = 'telegram' AND account_id = 'bot1'",
         )
-        .fetch_one(&pool)
-        .await
         .unwrap();
         assert!(!raw.0.contains("\"abc\""));
         assert!(raw.0.contains("vault_encrypted"));
@@ -488,7 +489,8 @@ mod tests {
     #[tokio::test]
     async fn vault_store_falls_back_to_plaintext_when_uninitialized() {
         let pool = test_pool().await;
-        sqlx::query(
+        moltis_db::execute!(
+            &Db::from(pool.clone()),
             "CREATE TABLE IF NOT EXISTS vault_metadata (
                 id                   INTEGER PRIMARY KEY CHECK (id = 1),
                 version              INTEGER NOT NULL DEFAULT 1,
@@ -501,11 +503,10 @@ mod tests {
                 updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
             )",
         )
-        .execute(&pool)
-        .await
         .unwrap();
         let vault = Arc::new(moltis_vault::Vault::new(pool.clone()).await.unwrap());
-        let inner: Arc<dyn ChannelStore> = Arc::new(SqliteChannelStore::new(pool.clone()));
+        let inner: Arc<dyn ChannelStore> =
+            Arc::new(SqliteChannelStore::new(Db::from(pool.clone())));
         let store = VaultChannelStore::new(inner, Some(vault));
         let timestamp = now();
 
@@ -520,11 +521,11 @@ mod tests {
             .await
             .unwrap();
 
-        let raw: (String,) = sqlx::query_as(
+        let raw: (String,) = moltis_db::fetch_one!(
+            &Db::from(pool.clone()),
+            (String,),
             "SELECT config FROM channels WHERE channel_type = 'telegram' AND account_id = 'bot1'",
         )
-        .fetch_one(&pool)
-        .await
         .unwrap();
         assert!(raw.0.contains("\"abc\""));
     }
@@ -537,7 +538,7 @@ mod tests {
         let pool = test_pool().await;
         let vault = test_vault(pool.clone()).await;
         vault.seal().await;
-        let inner: Arc<dyn ChannelStore> = Arc::new(SqliteChannelStore::new(pool));
+        let inner: Arc<dyn ChannelStore> = Arc::new(SqliteChannelStore::new(Db::from(pool)));
         let store = VaultChannelStore::new(inner, Some(vault));
         let timestamp = now();
 

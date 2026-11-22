@@ -744,14 +744,16 @@ mod tests {
         .unwrap();
 
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
-        sqlx::query("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY)")
-            .execute(&pool)
-            .await
-            .unwrap();
+        moltis_db::execute!(
+            &moltis_db::Db::from(pool.clone()),
+            "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY)"
+        )
+        .unwrap();
         moltis_sessions::metadata::SqliteSessionMetadata::init(&pool)
             .await
             .unwrap();
-        sqlx::query(
+        moltis_db::execute!(
+            &moltis_db::Db::from(pool.clone()),
             r#"CREATE TABLE IF NOT EXISTS agents (
                 id          TEXT PRIMARY KEY,
                 name        TEXT NOT NULL,
@@ -761,10 +763,8 @@ mod tests {
                 description TEXT,
                 created_at  INTEGER NOT NULL,
                 updated_at  INTEGER NOT NULL
-            )"#,
+            )"#
         )
-        .execute(&pool)
-        .await
         .unwrap();
 
         let service = GatewayOnboardingService::new(

@@ -504,7 +504,8 @@ mod tests {
     use super::*;
 
     async fn test_vault(pool: SqlitePool) -> Arc<moltis_vault::Vault> {
-        sqlx::query(
+        moltis_db::execute!(
+            &moltis_db::Db::from(pool.clone()),
             "CREATE TABLE IF NOT EXISTS vault_metadata (
                 id                   INTEGER PRIMARY KEY CHECK (id = 1),
                 version              INTEGER NOT NULL DEFAULT 1,
@@ -517,8 +518,6 @@ mod tests {
                 updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
             )",
         )
-        .execute(&pool)
-        .await
         .unwrap();
 
         let vault = Arc::new(moltis_vault::Vault::new(pool).await.unwrap());

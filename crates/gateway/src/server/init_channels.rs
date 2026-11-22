@@ -45,7 +45,7 @@ pub(crate) async fn init_channels(
     #[cfg(feature = "vault")]
     let channel_store: Arc<dyn ChannelStore> = {
         let inner: Arc<dyn ChannelStore> = Arc::new(crate::channel_store::SqliteChannelStore::new(
-            db_pool.clone(),
+            moltis_db::Db::from(db_pool.clone()),
         ));
         Arc::new(crate::channel_store::VaultChannelStore::new(
             inner,
@@ -54,7 +54,7 @@ pub(crate) async fn init_channels(
     };
     #[cfg(not(feature = "vault"))]
     let channel_store: Arc<dyn ChannelStore> = Arc::new(
-        crate::channel_store::SqliteChannelStore::new(db_pool.clone()),
+        crate::channel_store::SqliteChannelStore::new(moltis_db::Db::from(db_pool.clone())),
     );
 
     let channel_sink: Arc<dyn moltis_channels::ChannelEventSink> = Arc::new(
