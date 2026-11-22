@@ -25,6 +25,17 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+impl From<moltis_db::DbError> for Error {
+    fn from(e: moltis_db::DbError) -> Self {
+        match e {
+            moltis_db::DbError::Sqlx(e) => Error::Db(e),
+            // Keep the public Error enum unchanged: surface the rare non-sqlx
+            // variants through the existing Db variant.
+            other => Error::Db(sqlx::Error::Protocol(other.to_string())),
+        }
+    }
+}
+
 // ── Types ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

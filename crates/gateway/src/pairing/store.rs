@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use {
-    moltis_db::{Db, execute, fetch_all, fetch_optional},
+    moltis_db::{Db, execute, fetch_all, fetch_optional, tx_execute, tx_fetch_optional},
     time::OffsetDateTime,
 };
 
@@ -324,21 +324,25 @@ impl PairingStore {
 
     /// Rotate a device token: revoke all existing tokens, issue new.
     pub async fn rotate_token(&self, device_id: &str) -> Result<DeviceToken> {
-        // Verify device exists and is active.
-        let exists = fetch_optional!(
-            &self.db,
+        // Transaction-scoped guard: revoke + insert commit atomically, so
+        // concurrent rotations serialize and leave exactly one live token.
+        let mut tx = self.db.begin().await?;
+
+        // Only active devices may rotate — revoking a revoked device's check
+        // would just mint a dead token row.
+        let exists = tx_fetch_optional!(
+            &mut tx,
             (String,),
-            "SELECT status FROM paired_devices WHERE device_id = ?",
+            "SELECT status FROM paired_devices WHERE device_id = ? AND status = 'active'",
             device_id,
         )?;
-
         if exists.is_none() {
             return Err(Error::DeviceNotFound);
         }
 
         // Load current scopes from any active token.
-        let scopes_row = fetch_optional!(
-            &self.db,
+        let scopes_row = tx_fetch_optional!(
+            &mut tx,
             (String,),
             "SELECT scopes FROM device_tokens WHERE device_id = ? AND revoked = 0 LIMIT 1",
             device_id,
@@ -355,8 +359,8 @@ impl PairingStore {
             });
 
         // Revoke all existing tokens.
-        execute!(
-            &self.db,
+        tx_execute!(
+            &mut tx,
             "UPDATE device_tokens SET revoked = 1 WHERE device_id = ? AND revoked = 0",
             device_id,
         )?;
@@ -368,8 +372,8 @@ impl PairingStore {
         let scopes_json = serde_json::to_string(&scopes).unwrap_or_default();
         let issued_at_ms = current_epoch_ms();
 
-        execute!(
-            &self.db,
+        tx_execute!(
+            &mut tx,
             "INSERT INTO device_tokens (token_hash, token_prefix, device_id, scopes)
              VALUES (?, ?, ?, ?)",
             &token_hash,
@@ -377,6 +381,8 @@ impl PairingStore {
             device_id,
             &scopes_json,
         )?;
+
+        tx.commit().await?;
 
         Ok(DeviceToken {
             token: raw_token,

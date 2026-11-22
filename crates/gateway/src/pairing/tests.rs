@@ -912,3 +912,74 @@ async fn approve_fails_closed_on_malformed_expiry() {
             .is_empty()
     );
 }
+
+// ── Token rotation regression tests ─────────────────────────────────────────
+
+#[tokio::test]
+async fn concurrent_rotate_yields_exactly_one_live_token() {
+    let db = race_db().await;
+    let store = PairingStore::new(db.clone());
+    let token = store
+        .create_device_token(Some("Rotate Node"), "linux")
+        .await
+        .unwrap();
+
+    let (a, b) = tokio::join!(
+        store.rotate_token(&token.device_id),
+        store.rotate_token(&token.device_id),
+    );
+    let rotated = [a.unwrap().token, b.unwrap().token];
+
+    // Exactly one live token remains and it is one of the rotated tokens.
+    assert_eq!(
+        store
+            .list_device_tokens(&token.device_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let first_live = store
+        .verify_device_token(&rotated[0])
+        .await
+        .unwrap()
+        .is_some();
+    let second_live = store
+        .verify_device_token(&rotated[1])
+        .await
+        .unwrap()
+        .is_some();
+    assert!(
+        first_live != second_live,
+        "exactly one rotated token may live"
+    );
+    // The pre-rotation token is dead either way.
+    assert!(
+        store
+            .verify_device_token(&token.token)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn rotate_revoked_device_fails_cleanly() {
+    let db = test_db().await;
+    let store = PairingStore::new(db.clone());
+    let token = store
+        .create_device_token(Some("Doomed Node"), "linux")
+        .await
+        .unwrap();
+    store.revoke_token(&token.device_id).await.unwrap();
+
+    assert!(matches!(
+        store.rotate_token(&token.device_id).await,
+        Err(Error::DeviceNotFound)
+    ));
+
+    // No dead token row was minted for the revoked device.
+    let rows =
+        moltis_db::fetch_all!(&db, (String,), "SELECT token_hash FROM device_tokens",).unwrap();
+    assert_eq!(rows.len(), 1);
+}
