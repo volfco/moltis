@@ -3,6 +3,20 @@
 Short summaries only; details live in `continue.md`, `decisions.md`, and the
 tracker (`bd ready`).
 
+## Test suite findings (full workspace run, one crate per process, 2026-11-22)
+
+- [ ] `crates/skills/src/clawhub.rs:1334` `live_scan_returns_security_data` fails
+      reproducibly (2/2): it hits the real ClawHub API and asserts
+      `scanners.vt.is_some()`, but the live payload no longer carries
+      VirusTotal results. Network errors are tolerated by the test, an
+      API-shape change is not. Either tolerate a missing `vt` field or gate
+      the test behind an env flag like the other live tests.
+- [ ] `crates/swift-bridge/src/ffi_core.rs:883`
+      `chat_stream_sends_error_for_no_provider` is load-flaky: it passed 3/3
+      in isolation but failed inside the full-crate run, where it races its
+      own stream-event timeout against parallel tests. Await the event with a
+      deterministic signal instead of a fixed budget.
+
 ## Postgres test hygiene (verified 2026-03: workspace compiles; SqlitePool
 ## call-site inventory and pg_test_db error-swallowing fix are done)
 
